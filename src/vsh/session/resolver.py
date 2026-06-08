@@ -1,5 +1,6 @@
 from __future__ import annotations as _annotations
 
+import functools
 from pathlib import Path
 
 _STATIC_PROTECTED_ROOTS: tuple[tuple[str, str], ...] = (
@@ -20,40 +21,48 @@ _STATIC_PROTECTED_ROOTS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _resolve_path(value: str) -> Path:
-    return Path(value).expanduser().resolve()
+@functools.lru_cache(maxsize=4096)
+def _resolved_absolute_path(value: str) -> str:
+    return str(Path(value).expanduser().resolve())
+
+
+def _resolved_path(value: str) -> str:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return _resolved_absolute_path(str(path))
+    return str(path.resolve())
 
 
 def resolve_workspace_path(base: str, candidate: str) -> str:
-    base_path = _resolve_path(base)
     candidate_path = Path(candidate).expanduser()
     if candidate_path.is_absolute():
-        return str(candidate_path.resolve())
-    return str((base_path / candidate_path).resolve())
+        return _resolved_path(str(candidate_path))
+    base_resolved = _resolved_path(base)
+    return str((Path(base_resolved) / candidate_path).resolve())
 
 
 def is_within_workspace(path: str, workspace_root: str) -> bool:
-    resolved_path = _resolve_path(path)
-    resolved_root = _resolve_path(workspace_root)
+    resolved_path = _resolved_path(path)
+    resolved_root = _resolved_path(workspace_root)
     try:
-        resolved_path.relative_to(resolved_root)
+        Path(resolved_path).relative_to(resolved_root)
     except ValueError:
         return False
     return True
 
 
 def is_same_path_or_ancestor(path: str, descendant: str) -> bool:
-    resolved_path = _resolve_path(path)
-    resolved_descendant = _resolve_path(descendant)
+    resolved_path = _resolved_path(path)
+    resolved_descendant = _resolved_path(descendant)
     try:
-        resolved_descendant.relative_to(resolved_path)
+        Path(resolved_descendant).relative_to(resolved_path)
     except ValueError:
         return False
     return True
 
 
 def get_protected_path_label(path: str) -> str | None:
-    resolved_path = _resolve_path(path)
+    resolved_path = Path(_resolved_path(path))
     home_path = Path.home().resolve()
     dynamic_roots: tuple[tuple[Path, str], ...] = (
         (home_path, "home directory"),
@@ -69,8 +78,8 @@ def get_protected_path_label(path: str) -> str | None:
 
 
 def ensure_safe_workspace_root(workspace_root: str) -> str:
-    resolved_root = _resolve_path(workspace_root)
-    protected_label = get_protected_path_label(str(resolved_root))
+    resolved_root = _resolved_path(workspace_root)
+    protected_label = get_protected_path_label(resolved_root)
     if protected_label is not None:
         raise ValueError(f"workspace root is too broad or protected: {protected_label}")
-    return str(resolved_root)
+    return resolved_root

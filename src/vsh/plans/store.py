@@ -10,6 +10,7 @@ from .models import ApprovalToken, PlanRecord, SimulationResult
 @dataclass
 class PlanStore:
     plans: dict[str, PlanRecord] = field(default_factory=dict)
+    _tokens: dict[str, PlanRecord] = field(default_factory=dict)
 
     def save(
         self,
@@ -41,14 +42,14 @@ class PlanStore:
             approved_at_ns=time.time_ns(),
         )
         record.approval_token = token
+        self._tokens[token.token] = record
         return token
 
     def get_by_token(self, approval_token: str) -> PlanRecord:
-        for record in self.plans.values():
-            token = record.approval_token
-            if token is not None and token.token == approval_token:
-                return record
-        raise KeyError(f"unknown approval token: {approval_token}")
+        try:
+            return self._tokens[approval_token]
+        except KeyError as exc:
+            raise KeyError(f"unknown approval token: {approval_token}") from exc
 
 
 plan_store = PlanStore()

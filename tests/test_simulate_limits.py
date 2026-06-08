@@ -11,6 +11,7 @@ from vsh.simulate.models import Overlay
 from vsh.simulate.protected_paths import (
     DEFAULT_PROTECTED_PATTERNS,
     _match_globstar_pattern,
+    clear_protected_patterns_cache,
     load_protected_patterns,
     matches_protected_pattern,
 )
@@ -64,9 +65,11 @@ def test_classify_approval_requirement_for_overlay_delete() -> None:
 def test_load_protected_patterns_from_env_and_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    clear_protected_patterns_cache()
     monkeypatch.setenv("VSH_PROTECTED_PATTERNS", "*.secret,private.key")
     assert load_protected_patterns() == ("*.secret", "private.key")
 
+    clear_protected_patterns_cache()
     monkeypatch.delenv("VSH_PROTECTED_PATTERNS", raising=False)
     patterns_file = tmp_path / "patterns.txt"
     patterns_file.write_text("# comment\n*.vault\n", encoding="utf-8")
@@ -77,6 +80,7 @@ def test_load_protected_patterns_from_env_and_file(
 def test_load_protected_patterns_falls_back_when_env_is_blank(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    clear_protected_patterns_cache()
     monkeypatch.setenv("VSH_PROTECTED_PATTERNS", " , ")
     assert load_protected_patterns() == DEFAULT_PROTECTED_PATTERNS
 
@@ -85,9 +89,18 @@ def test_load_protected_patterns_falls_back_when_file_has_only_comments(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    clear_protected_patterns_cache()
     patterns_file = tmp_path / "patterns.txt"
     patterns_file.write_text("# only comments\n", encoding="utf-8")
     monkeypatch.setenv("VSH_PROTECTED_PATTERNS_FILE", str(patterns_file))
+    assert load_protected_patterns() == DEFAULT_PROTECTED_PATTERNS
+
+
+def test_load_protected_patterns_ignores_missing_file_mtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_protected_patterns_cache()
+    monkeypatch.setenv("VSH_PROTECTED_PATTERNS_FILE", "/tmp/does-not-exist-patterns.txt")
     assert load_protected_patterns() == DEFAULT_PROTECTED_PATTERNS
 
 

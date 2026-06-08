@@ -10,7 +10,7 @@ __all__ = ("advance_snapshot",)
 
 def advance_snapshot(snapshot: WorkspaceSnapshot, result: SimulationResult) -> WorkspaceSnapshot:
     """Apply a successful simulation onto an in-memory snapshot for chained sandbox calls."""
-    nodes = {path: node.model_copy() for path, node in snapshot.nodes.items()}
+    nodes = dict(snapshot.nodes)
     predicted = result.predicted_effects
 
     for path in predicted.deletes:

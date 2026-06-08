@@ -1,6 +1,7 @@
 from __future__ import annotations as _annotations
 
 import os
+import stat as stat_module
 import time
 import uuid
 from pathlib import Path
@@ -48,9 +49,7 @@ def _build_nodes(root: Path) -> dict[str, SnapshotNode]:
         node = node_for_path(current_path)
         nodes[str(current_path)] = node
         for child_dir in dirnames:
-            child_path = current_path / child_dir
-            nodes[str(child_path)] = node_for_path(child_path)
-            node.children.append(str(child_path))
+            node.children.append(str(current_path / child_dir))
         for filename in filenames:
             child_path = current_path / filename
             nodes[str(child_path)] = node_for_path(child_path)
@@ -61,17 +60,21 @@ def _build_nodes(root: Path) -> dict[str, SnapshotNode]:
 
 
 def node_for_path(path: Path) -> SnapshotNode:
-    stat_result = path.lstat()
-    if path.is_symlink():
+    return snapshot_node_from_lstat(path, path.lstat())
+
+
+def snapshot_node_from_lstat(path: Path, stat_result: os.stat_result) -> SnapshotNode:
+    mode = stat_result.st_mode
+    if stat_module.S_ISLNK(mode):
         kind = "symlink"
-    elif path.is_dir():
+    elif stat_module.S_ISDIR(mode):
         kind = "dir"
     else:
         kind = "file"
     parent = str(path.parent) if path.parent != path else None
     content_ref = None
     size = None
-    if path.is_file():
+    if stat_module.S_ISREG(mode):
         size = stat_result.st_size
         content_ref = f"opaque:{path}:{stat_result.st_size}:{stat_result.st_mtime_ns}"
     return SnapshotNode(

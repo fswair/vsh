@@ -183,6 +183,56 @@ def test_revalidate_reports_stale_and_refreshes_snapshot(tmp_path: Path) -> None
     assert refreshed_report.refreshed_paths
 
 
+def test_revalidate_refreshes_deleted_paths(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "tracked.txt"
+    target.write_text("v1\n", encoding="utf-8")
+    snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
+    result = simulate_command(TouchCommand(path="tracked.txt", no_create=True), snapshot)
+    record = plan_store.get(result.plan_id)
+    target.unlink()
+
+    report, refreshed = revalidate_plan(record, snapshot)
+    assert report.status == "stale"
+    assert str(target.resolve()) not in refreshed.nodes
+
+
+def test_revalidate_keeps_missing_nodes_when_refresh_disabled(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "tracked.txt"
+    target.write_text("v1\n", encoding="utf-8")
+    snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
+    result = simulate_command(TouchCommand(path="tracked.txt", no_create=True), snapshot)
+    record = plan_store.get(result.plan_id)
+    resolved = str(target.resolve())
+    target.unlink()
+
+    report, unchanged = revalidate_plan(record, snapshot, refresh_on_drift=False)
+
+    assert report.status == "stale"
+    assert resolved in unchanged.nodes
+
+
+def test_revalidate_refreshes_directory_children(tmp_path: Path) -> None:
+    from vsh.schemas import StatCommand
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    nested = workspace / "pkg"
+    nested.mkdir()
+    (nested / "tracked.txt").write_text("v1\n", encoding="utf-8")
+    snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
+    result = simulate_command(StatCommand(path="pkg"), snapshot)
+    record = plan_store.get(result.plan_id)
+    (nested / "new.txt").write_text("added\n", encoding="utf-8")
+
+    report, refreshed = revalidate_plan(record, snapshot)
+    assert report.status == "stale"
+    assert str((nested / "new.txt").resolve()) in refreshed.nodes
+
+
 def test_refresh_snapshot_paths_edge_cases(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -207,6 +257,20 @@ def test_refresh_snapshot_paths_edge_cases(tmp_path: Path) -> None:
     assert str(workspace.resolve()) in updated.nodes
 
 
+def test_refresh_snapshot_paths_updates_file_without_directory_children(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "file.txt"
+    target.write_text("v1\n", encoding="utf-8")
+    snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
+    target.write_text("v2\n", encoding="utf-8")
+
+    updated, refreshed = refresh_snapshot_paths(snapshot, {str(target.resolve())})
+
+    assert refreshed == [str(target.resolve())]
+    assert str(target.resolve()) in updated.nodes
+
+
 def test_fingerprint_node_and_persistence_restore_errors() -> None:
     node = SnapshotNode(path="/tmp/a", parent=None, kind="file", size=1, mode=0o644, mtime_ns=1)
     assert fingerprint_node(node).startswith("file:")
@@ -214,6 +278,22 @@ def test_fingerprint_node_and_persistence_restore_errors() -> None:
         _restore_command(None, {})
     with pytest.raises(ValueError, match="unknown persisted command model"):
         _restore_command("MissingCommand", {})
+
+
+def test_fingerprints_for_paths_prefers_snapshot_nodes(tmp_path: Path) -> None:
+    from vsh.snapshot.fingerprint import fingerprints_for_paths
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "tracked.txt"
+    target.write_text("v1\n", encoding="utf-8")
+    snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
+    resolved = str(target.resolve())
+    target.write_text("changed-on-disk\n", encoding="utf-8")
+
+    fingerprints = fingerprints_for_paths({resolved}, snapshot)
+
+    assert fingerprints[resolved] == fingerprint_node(snapshot.nodes[resolved])
 
 
 def test_runtime_persistence_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

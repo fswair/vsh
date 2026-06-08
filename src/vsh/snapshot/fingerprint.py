@@ -1,12 +1,15 @@
 from __future__ import annotations as _annotations
 
+import os
+import stat as stat_module
 from pathlib import Path
 
 from vsh.simulate.models import AccessJournal, PredictedEffects
-from vsh.snapshot.models import SnapshotNode
+from vsh.snapshot.models import SnapshotNode, WorkspaceSnapshot
 
 __all__ = (
     "collect_touched_paths",
+    "fingerprint_from_stat",
     "fingerprint_node",
     "fingerprint_path",
     "fingerprints_for_paths",
@@ -17,19 +20,23 @@ def fingerprint_node(node: SnapshotNode) -> str:
     return f"{node.kind}:{node.size}:{node.mtime_ns}:{node.mode}:{node.revision}"
 
 
+def fingerprint_from_stat(path: Path, stat_result: os.stat_result) -> str:
+    mode = stat_result.st_mode
+    if stat_module.S_ISLNK(mode):
+        kind = "symlink"
+    elif stat_module.S_ISDIR(mode):
+        kind = "dir"
+    else:
+        kind = "file"
+    size = stat_result.st_size if stat_module.S_ISREG(mode) else None
+    return f"{kind}:{size}:{stat_result.st_mtime_ns}:{mode}:0"
+
+
 def fingerprint_path(path: str) -> str:
     target = Path(path)
     if not target.exists():
         return "missing"
-    stat_result = target.lstat()
-    if target.is_symlink():
-        kind = "symlink"
-    elif target.is_dir():
-        kind = "dir"
-    else:
-        kind = "file"
-    size = stat_result.st_size if target.is_file() else None
-    return f"{kind}:{size}:{stat_result.st_mtime_ns}:{stat_result.st_mode}:0"
+    return fingerprint_from_stat(target, target.lstat())
 
 
 def collect_touched_paths(journal: AccessJournal, predicted: PredictedEffects) -> set[str]:
@@ -51,5 +58,14 @@ def collect_touched_paths(journal: AccessJournal, predicted: PredictedEffects) -
     return paths
 
 
-def fingerprints_for_paths(paths: set[str]) -> dict[str, str]:
-    return {path: fingerprint_path(path) for path in sorted(paths)}
+def fingerprints_for_paths(
+    paths: set[str],
+    snapshot: WorkspaceSnapshot | None = None,
+) -> dict[str, str]:
+    fingerprints: dict[str, str] = {}
+    for path in sorted(paths):
+        if snapshot is not None and (node := snapshot.nodes.get(path)) is not None:
+            fingerprints[path] = fingerprint_node(node)
+        else:
+            fingerprints[path] = fingerprint_path(path)
+    return fingerprints

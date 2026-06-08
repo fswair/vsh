@@ -40,6 +40,8 @@ from .approval_levels import classify_approval_requirement, max_touched_paths
 from .models import AccessJournal, Overlay, PolicyDecision, PredictedEffects
 from .policy import decide_policy, protected_read_path_reason
 
+_READ_SCOPE_TREE_MIN_NODES = 128
+
 
 def simulate_command(command: StructuredCommand, snapshot: WorkspaceSnapshot) -> SimulationResult:
     start_ns = perf_counter_ns()
@@ -135,12 +137,12 @@ def simulate_command(command: StructuredCommand, snapshot: WorkspaceSnapshot) ->
             cwd_after=overlay.cwd_override or snapshot.session.cwd_logical,
         )
         decision, reason = decide_policy(command, snapshot, overlay)
+    touched_paths = collect_touched_paths(journal, predicted)
     if decision != "reject":
-        touched_count = len(collect_touched_paths(journal, predicted))
         limit = max_touched_paths()
-        if touched_count > limit:
+        if len(touched_paths) > limit:
             decision = "reject"
-            reason = f"command would touch too many paths ({touched_count} > {limit})"
+            reason = f"command would touch too many paths ({len(touched_paths)} > {limit})"
     raw_matches_shell_preview = command.raw_matches_shell_preview(shell_preview)
     execution_eligible, execution_eligibility_reason = _evaluate_execution_eligibility(
         decision=decision,
@@ -166,8 +168,7 @@ def simulate_command(command: StructuredCommand, snapshot: WorkspaceSnapshot) ->
         journal=journal,
         simulation_time_ms=elapsed_ms(start_ns),
     )
-    touched_paths = collect_touched_paths(result.journal, result.predicted_effects)
-    path_fingerprints = fingerprints_for_paths(touched_paths)
+    path_fingerprints = fingerprints_for_paths(touched_paths, snapshot)
     plan_fingerprint = compute_plan_fingerprint(
         snapshot_id=snapshot.snapshot_id,
         command=command,
@@ -238,8 +239,18 @@ def _read_scope(snapshot: WorkspaceSnapshot, target: str) -> list[str]:
         return [target]
     if node.kind != "dir":
         return [target]
-    prefix = f"{target.rstrip('/')}/"
-    return [path for path in snapshot.nodes if path == target or path.startswith(prefix)]
+    if target == snapshot.session.workspace_root or len(snapshot.nodes) <= _READ_SCOPE_TREE_MIN_NODES:
+        prefix = f"{target.rstrip('/')}/"
+        return [path for path in snapshot.nodes if path == target or path.startswith(prefix)]
+    scoped: list[str] = []
+    stack = [target]
+    while stack:
+        path = stack.pop()
+        scoped.append(path)
+        current = snapshot.nodes.get(path)
+        if current is not None and current.kind == "dir":
+            stack.extend(reversed(current.children))
+    return scoped
 
 
 def _first_outside_workspace(targets: list[str], snapshot: WorkspaceSnapshot) -> str | None:

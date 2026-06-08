@@ -3903,7 +3903,7 @@ wheels = [
 ]
 
 [[package]]
-name = "vsh"
+name = "vbash"
 source = { editable = "." }
 dependencies = [
     { name = "click" },

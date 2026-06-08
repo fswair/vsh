@@ -13,7 +13,14 @@ from vsh.sandbox import (
     run_vsh_sandbox,
 )
 from vsh.sandbox.policy import classify_simulation_effects, effect_kinds_allowed_by_policy
-from vsh.schemas import CatCommand, CdCommand, MkdirCommand, MoveCommand, RemoveCommand, TouchCommand
+from vsh.schemas import (
+    CatCommand,
+    CdCommand,
+    MkdirCommand,
+    MoveCommand,
+    RemoveCommand,
+    TouchCommand,
+)
 from vsh.simulate.engine import simulate_command
 from vsh.snapshot.builder import snapshot_workspace
 

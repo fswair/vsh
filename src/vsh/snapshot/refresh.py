@@ -5,7 +5,7 @@ from pathlib import Path
 from vsh.snapshot.builder import IGNORED_DIRECTORIES, node_for_path
 from vsh.snapshot.models import SnapshotNode, WorkspaceSnapshot
 
-__all__ = ("refresh_snapshot_paths",)
+__all__ = ("refresh_directory_children", "refresh_snapshot_paths")
 
 
 def refresh_snapshot_paths(
@@ -25,12 +25,12 @@ def refresh_snapshot_paths(
         nodes[raw_path] = node_for_path(path)
         refreshed.append(raw_path)
         if nodes[raw_path].kind == "dir":
-            _refresh_directory_children(nodes, path)
+            refresh_directory_children(nodes, path)
     updated = snapshot.model_copy(update={"nodes": nodes})
     return updated, refreshed
 
 
-def _refresh_directory_children(nodes: dict[str, SnapshotNode], directory: Path) -> None:
+def refresh_directory_children(nodes: dict[str, SnapshotNode], directory: Path) -> None:
     root_key = str(directory.resolve())
     root_node = nodes.get(root_key)
     if root_node is None:
@@ -43,3 +43,6 @@ def _refresh_directory_children(nodes: dict[str, SnapshotNode], directory: Path)
         nodes[child_key] = node_for_path(entry)
         children.append(child_key)
     nodes[root_key] = root_node.model_copy(update={"children": children})
+
+
+_refresh_directory_children = refresh_directory_children

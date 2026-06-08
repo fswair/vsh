@@ -1,11 +1,13 @@
 from __future__ import annotations as _annotations
 
 import fnmatch
+import functools
 import os
 from pathlib import Path, PurePosixPath
 
 __all__ = (
     "DEFAULT_PROTECTED_PATTERNS",
+    "clear_protected_patterns_cache",
     "get_protected_workspace_path_reason",
     "load_protected_patterns",
     "matches_protected_pattern",
@@ -30,24 +32,46 @@ DEFAULT_PROTECTED_PATTERNS: tuple[str, ...] = (
 )
 
 
-def load_protected_patterns() -> tuple[str, ...]:
-    """Load protected path globs from env or fall back to defaults."""
-    env_patterns = os.environ.get("VSH_PROTECTED_PATTERNS")
+def _protected_patterns_cache_key() -> tuple[str, str, int]:
+    env_patterns = os.environ.get("VSH_PROTECTED_PATTERNS", "")
+    env_file = os.environ.get("VSH_PROTECTED_PATTERNS_FILE", "")
+    file_mtime_ns = 0
+    if env_file:
+        file_path = Path(env_file)
+        if file_path.is_file():
+            file_mtime_ns = file_path.stat().st_mtime_ns
+    return (env_patterns, env_file, file_mtime_ns)
+
+
+@functools.lru_cache(maxsize=16)
+def _load_protected_patterns_cached(cache_key: tuple[str, str, int]) -> tuple[str, ...]:
+    env_patterns, env_file, _file_mtime_ns = cache_key
     if env_patterns:
         patterns = tuple(part.strip() for part in env_patterns.split(",") if part.strip())
         if patterns:
             return patterns
 
-    env_file = os.environ.get("VSH_PROTECTED_PATTERNS_FILE")
     if env_file:
-        lines = Path(env_file).read_text(encoding="utf-8").splitlines()
-        patterns = tuple(
-            line.strip() for line in lines if line.strip() and not line.startswith("#")
-        )
-        if patterns:
-            return patterns
+        file_path = Path(env_file)
+        if file_path.is_file():
+            lines = file_path.read_text(encoding="utf-8").splitlines()
+            patterns = tuple(
+                line.strip() for line in lines if line.strip() and not line.startswith("#")
+            )
+            if patterns:
+                return patterns
 
     return DEFAULT_PROTECTED_PATTERNS
+
+
+def load_protected_patterns() -> tuple[str, ...]:
+    """Load protected path globs from env or fall back to defaults."""
+    return _load_protected_patterns_cached(_protected_patterns_cache_key())
+
+
+def clear_protected_patterns_cache() -> None:
+    """Clear cached protected pattern configuration."""
+    _load_protected_patterns_cached.cache_clear()
 
 
 def workspace_relative_path(path: str, workspace_root: str) -> str | None:

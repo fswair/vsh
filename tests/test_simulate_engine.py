@@ -170,6 +170,26 @@ def test_read_scope_handles_missing_file_and_directory_prefixes(tmp_path: Path) 
     assert src_path in scoped
 
 
+def test_read_scope_uses_tree_traversal_for_large_subtrees(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import vsh.simulate.engine as engine_module
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    nested = workspace / "pkg"
+    nested.mkdir()
+    for index in range(3):
+        (nested / f"file{index}.txt").write_text("x\n", encoding="utf-8")
+    snapshot = _snapshot(workspace)
+    monkeypatch.setattr(engine_module, "_READ_SCOPE_TREE_MIN_NODES", 1)
+
+    scoped = _read_scope(snapshot, str(nested.resolve()))
+
+    assert str(nested.resolve()) in scoped
+    assert str((nested / "file0.txt").resolve()) in scoped
+
+
 def test_first_outside_workspace_returns_first_offender(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
