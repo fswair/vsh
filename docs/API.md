@@ -196,11 +196,15 @@ Registered tools: `vsh_search`, `vsh_get_schema`, `vsh_snapshot_workspace`,
 
 ## Sandbox (Monty batch execution)
 
+`code` is a Monty program. Usually it is helper **function(args)** calls —
+`simulate("vsh_list", {"path": "."})`, `search("mkdir")`, etc. Extra Python between
+calls is optional. A return expression at the end of the program becomes `output`.
+
 ```python
 from vsh.sandbox import SandboxPolicy, run_vsh_sandbox
 
 result = run_vsh_sandbox(
-    code='simulate("vsh_touch", {"path": "x.txt"})\nreturn "ok"',
+    code='simulate("vsh_touch", {"path": "x.txt"})\n"ok"',
     snapshot_id=snapshot.snapshot_id,
     policy="read_write",
 )
@@ -210,7 +214,7 @@ result = run_vsh_sandbox(
 
 | Field | Meaning |
 |-------|---------|
-| `output` | Monty return value |
+| `output` | Program result (return expression at end of Monty code) |
 | `stdout` | Captured `print()` output |
 | `calls` | Ordered `SandboxCallRecord` list (tool, params, plan_id, decision) |
 | `policy` | Policy applied for the run |

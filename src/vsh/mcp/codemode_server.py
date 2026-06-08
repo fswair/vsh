@@ -26,6 +26,29 @@ Rules:
 - Simulate every command before approval.
 - Execute only approved, execution-eligible plans.
 - Use resources for stateful context instead of bloating tool responses.
+
+Batch simulation (`vsh_sandbox`):
+- The `code` argument is a Monty Python program. Built-in helpers look like normal
+  function calls: `search(query)`, `get_schema(name)`, `simulate(tool_name, params)`.
+- Most programs are just those calls — one per line or in sequence, e.g.
+  `simulate("vsh_list", {"path": "."})`. No extra Python required.
+- When useful, you may also assign results to variables, pass them into later calls,
+  slice/filter, etc.
+- `simulate(...)` yields a SimulationResult dict (`plan_id`, `decision`,
+  `predicted_effects`, `journal`, ...).
+- Add a return expression at the end of the program; Monty treats it as the program
+  result → `vsh_sandbox` field `output`. Example: `paths[:5]`. Use `print(...)` for
+  debug text; that goes to `stdout`, not `output`.
+- Each `simulate(...)` is recorded in `calls[]` (plan_id per step) for later
+  `approve` / `execute_approved`. A compact program result does not drop plans.
+- Read-command file/listing content is not in simulate output; it appears after
+  `execute_approved`. Summarize from `predicted_effects` / `journal` when needed.
+
+Example (optional chaining + program result):
+  pwd = simulate("vsh_pwd", {})
+  ls = simulate("vsh_list", {"path": pwd["predicted_effects"]["cwd_after"] or "."})
+  paths = ls["predicted_effects"]["reads"]
+  paths[:5]
 """
 
 _CUSTOM_SECTION_HEADER = "Project-specific instructions:"

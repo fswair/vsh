@@ -15,7 +15,11 @@ Use vsh tools to validate workspace commands before touching the real filesystem
 Workflow:
 1. Call vsh_search or vsh_get_schema to discover structured commands.
 2. Call vsh_snapshot_workspace once per workspace session.
-3. Prefer vsh_sandbox to batch multiple simulate() calls in one Monty code run.
+3. Prefer vsh_sandbox to batch helper calls in one Monty program when that saves turns.
+   Code is usually plain function(args) lines — simulate("vsh_list", {"path": "."}),
+   search("touch"), etc. Extra Python (variables, chaining, slices) is optional.
+   Put a return expression at the end of the program; Monty uses it as the result
+   (vsh_sandbox.output). Each simulate(...) still records plan_id in calls[].
 4. Or call vsh_simulate for a single command when a sandbox batch is unnecessary.
 5. Only call vsh_approve and vsh_execute_approved when simulation.execution_eligible is true.
 
@@ -96,7 +100,7 @@ def create_vsh_function_toolset() -> FunctionToolset[VshAgentDeps]:
         snapshot_id: str | None = None,
         policy: SandboxPolicy = "read_only",
     ) -> dict[str, Any]:
-        """Run Monty sandbox code that chains vsh simulate() calls in one batch."""
+        """Run Monty code: helper calls like simulate(name, params); end expression is output."""
         active_snapshot_id = snapshot_id or ctx.deps.snapshot_id
         if active_snapshot_id is None:
             msg = "snapshot_id is missing; call vsh_snapshot_workspace first"

@@ -168,17 +168,58 @@ execute_approved(approval_token)
 
 ### Batch flow (`vsh_sandbox`)
 
-When the agent needs several simulations in one turn, prefer `vsh_sandbox` instead of
-many separate `simulate` calls. The model writes Monty Python that chains
-`search()`, `get_schema()`, and `simulate()`; vsh returns one structured result with
-stdout, return value, and per-call records.
+When several simulations belong in one turn, prefer `vsh_sandbox` over many separate
+`simulate` calls. Pass a Monty Python program as `code`:
+
+| Field | Meaning |
+|-------|---------|
+| `output` | Program result (return expression at end of the program) |
+| `stdout` | Captured `print()` output |
+| `calls` | Ordered simulate records (`plan_id`, `decision`, …) for approve/execute |
+| `error` | Syntax/runtime/policy failure |
+
+Helpers inside the program are plain function calls:
 
 ```python
-# Example sandbox code (executed inside Monty)
+search("list")
+get_schema("vsh_list")
+simulate("vsh_list", {"path": "."})
+```
+
+- **Call-style code is enough** — a sequence of `simulate(name, params)` (and optional
+  `search` / `get_schema`) calls is valid. No variables or extra Python required.
+- **More Python is optional** — assign a call result to a variable, pass it into the
+  next `simulate(...)`, slice/filter, etc., when you only need part of the data back.
+- **`simulate(...)`** → `dict` (`plan_id`, `decision`, `predicted_effects`, `journal`, …)
+- **Program result** — add a return expression at the end of the file; Monty uses it
+  as the program result, exposed as `vsh_sandbox` → `output`. Example: `paths[:5]`
+- **`print(...)`** → `stdout`, not `output`
+
+Minimal batch (function calls only):
+
+```python
 simulate("vsh_touch", {"path": "x.txt"})
 simulate("vsh_mkdir", {"path": "foo", "parents": True})
-return "done"
+"done"
 ```
+
+Optional chaining (pwd → ls, first five paths as program result):
+
+```python
+pwd = simulate("vsh_pwd", {})
+ls = simulate(
+    "vsh_list",
+    {"path": pwd["predicted_effects"]["cwd_after"] or "."},
+)
+paths = ls["predicted_effects"]["reads"]
+paths[:5]
+```
+
+Every `simulate()` still appends to `calls[]` with a `plan_id`. Use those for
+`approve` → `execute_approved` when ready; sandbox does not auto-commit.
+
+Note: simulate does not include read-command file bodies or `ls` stdout. Those appear
+after `execute_approved`. Summarize from `predicted_effects` / `journal` when needed.
 
 `policy` controls which predicted effect kinds are allowed inside the sandbox:
 
