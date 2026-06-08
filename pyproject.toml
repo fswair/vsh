@@ -1,0 +1,134 @@
+[project]
+name = "vsh"
+dynamic = ["version"]
+description = "vsh is a validation-first command engine for agent workspaces."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+keywords = ["agents", "commands", "mcp", "simulation", "workspaces"]
+dependencies = [
+    "click>=8.1.8",
+    "dotenv>=0.9.9",
+    "fastmcp>=2.0",
+    "pydantic>=2.7",
+    "python-dotenv>=1.2.2",
+]
+
+[project.optional-dependencies]
+agent = [
+    "pydantic-ai>=0.2",
+]
+dev = [
+    "basedpyright",
+    "pydantic-ai>=0.2",
+    "pytest",
+    "pytest-cov",
+    "ruff",
+    "ty",
+]
+
+[dependency-groups]
+dev = [
+    "basedpyright",
+    "pytest",
+    "pytest-cov",
+    "ruff",
+    "ty",
+]
+agent = [
+    "pydantic-ai>=0.2",
+]
+
+[tool.uv]
+default-groups = ["dev", "agent"]
+
+[project.scripts]
+vsh = "vsh.__main__:main"
+vsh-codemode = "vsh.mcp.codemode_server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/vsh/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vsh"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+    "N",
+    "W",
+    "UP",
+    "B",
+    "C4",
+    "SIM",
+]
+ignore = [
+    "E501",
+    "B008",
+]
+
+[tool.ty]
+
+[tool.ty.environment]
+python-version = "3.11"
+
+[tool.ty.src]
+exclude = [
+    "plans/**",
+]
+
+[tool.ty.rules]
+unresolved-import = "ignore"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+    "--color=yes",
+    "--cov=vsh",
+    "--cov-branch",
+    "--cov-report=term-missing:skip-covered",
+    "--cov-fail-under=100",
+]
+markers = []
+
+[tool.coverage.run]
+branch = true
+source = ["src/vsh"]
+omit = [
+    "src/vsh/_version.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+precision = 2
+fail_under = 100
+
+[tool.basedpyright]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
+reportUnusedCallResult = false
