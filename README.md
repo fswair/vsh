@@ -7,7 +7,7 @@ Validation-first command engine for AI agents operating on workspaces.
 ## Install
 
 ```bash
-uv sync
+uv add vbash
 ```
 
 `uv sync` installs the project plus `dev` and `agent` dependency groups (including `pydantic-ai`).
@@ -124,21 +124,6 @@ uv run python playground/benchmark_vsh_vs_native.py
 ```
 
 Reports land in `playground/reports/<timestamp>/`. See [playground/README.md](https://github.com/fswair/vsh/blob/main/playground/README.md).
-
-## PyPI releases
-
-Releases are published with [trusted publishing](https://docs.pypi.org/trusted-publishers/) via
-[`.github/workflows/publish.yml`](https://github.com/fswair/vsh/blob/main/.github/workflows/publish.yml) (`uv build` + `uv publish`).
-
-1. Configure a **pending publisher** on PyPI for project `vsh`:
-   - Owner: your GitHub org/user
-   - Repository: this repo
-   - Workflow: `publish.yml`
-   - Environment: `pypi`
-2. Create a GitHub **environment** named `pypi` (optional approval rules).
-3. Bump `src/vsh/_version.py`, commit, tag `vX.Y.Z`, push the tag.
-
-The workflow requests an OIDC token (`id-token: write`) — no long-lived PyPI API token in secrets.
 
 ## License
 
