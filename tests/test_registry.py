@@ -146,7 +146,7 @@ def test_common_agent_commands_render_shell_previews() -> None:
     )
     assert (
         repr(FindCommand(path=".", name="*.py", type="file", maxdepth=2))
-        == "find . -name *.py -type f -maxdepth 2"
+        == "find . -name '*.py' -type f -maxdepth 2"
     )
     assert repr(WcCommand(path="README.md", lines=True, words=True)) == "wc -lw README.md"
     assert (

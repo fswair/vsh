@@ -28,6 +28,7 @@ agent = [
 ]
 dev = [
     "basedpyright",
+    "matplotlib",
     "pydantic-ai>=0.2",
     "pytest",
     "pytest-cov",
@@ -38,6 +39,7 @@ dev = [
 [dependency-groups]
 dev = [
     "basedpyright",
+    "matplotlib",
     "pytest",
     "pytest-cov",
     "ruff",

@@ -4,7 +4,7 @@ from typing import ClassVar, Literal
 
 from pydantic import Field
 
-from .common import CommandKind, SideEffect, StructuredCommand
+from .common import CommandKind, SideEffect, StructuredCommand, quote_shell_token
 
 
 class FindCommand(StructuredCommand):
@@ -27,12 +27,12 @@ class FindCommand(StructuredCommand):
     )
 
     def to_shell(self) -> str:
-        tokens = [self._command_alias, self.path]
+        tokens = [self._command_alias, quote_shell_token(self.path)]
         if self.name:
-            tokens.extend(["-name", self.name])
+            tokens.extend(["-name", quote_shell_token(self.name)])
         if self.type:
             type_alias = {"file": "f", "dir": "d", "symlink": "l"}[self.type]
             tokens.extend(["-type", type_alias])
         if self.maxdepth is not None:
-            tokens.extend(["-maxdepth", str(self.maxdepth)])
+            tokens.extend(["-maxdepth", quote_shell_token(self.maxdepth)])
         return " ".join(tokens)

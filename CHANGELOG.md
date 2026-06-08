@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Protected workspace path policy (`VSH_PROTECTED_PATTERNS`, `VSH_PROTECTED_PATTERNS_FILE`)
+- Approval tiers on `SimulationResult` (`read_only`, `mutation`, `destructive`)
+- `auto_approve_plan()` for read-only auto-approval; `approve_plan(..., auto=True)`
+- Read command stdout capture in `ActualEffects.stdout` (`vsh.execute.read_output`)
+- Execution timing fields: `simulation_time_ms`, `execution_time_ms`, `total_time_ms`
+- `VSH_MAX_TOUCHED_PATHS` simulation limit (default `500`)
+- Shell previews quote paths with `shlex.quote`
+
 ### Fixed
 
 - `vsh_list` now rejects workspace escapes (`/`, `..`, paths outside the root) during simulation

@@ -41,17 +41,26 @@ Fields of interest:
 | Field | Meaning |
 |-------|---------|
 | `plan_id` | Stable plan identifier |
-| `shell_preview` | Canonical shell rendering |
+| `shell_preview` | Canonical shell rendering (`shlex.quote` for paths) |
 | `decision` | `approve`, `reject`, or `approve_with_warning` |
 | `execution_eligible` | Whether the plan may reach real execution |
+| `approval_tier` | `read_only`, `mutation`, or `destructive` |
+| `requires_manual_approval` | Whether `auto_approve_plan` is allowed |
 | `predicted_effects` | Node-level creates/updates/deletes/renames |
 | `journal` | Access journal used for drift fingerprints |
+| `simulation_time_ms` | Wall-clock time spent in `simulate_command` |
 
 ## Approval
 
-### `approve_plan(plan_id: str) -> ApprovalToken`
+### `approve_plan(plan_id: str, *, auto: bool = False) -> ApprovalToken`
 
-Bind an approval token to an immutable simulation artifact.
+Bind an approval token to an immutable simulation artifact. Set `auto=True` only for
+read-only plans where `requires_manual_approval` is `False`.
+
+### `auto_approve_plan(plan_id: str) -> ApprovalToken`
+
+Convenience wrapper for `approve_plan(plan_id, auto=True)`. Raises `ValueError` for
+mutation or destructive tiers.
 
 ## Execution
 
@@ -62,7 +71,11 @@ Bind an approval token to an immutable simulation artifact.
 | `applied` | Whether the real filesystem was mutated/verified |
 | `revalidation` | Drift status (`ok` or `stale`) |
 | `actual_effects` | Observed filesystem effects |
+| `actual_effects.stdout` | Captured output for read commands (`cat`, `grep`, `ls`, …) |
 | `matches_prediction` | Whether actual effects match simulation |
+| `total_time_ms` | Full `execute_approved` wall time |
+| `revalidation_time_ms` | Drift revalidation segment |
+| `apply_time_ms` | Real filesystem dispatch segment |
 
 Raises:
 
@@ -75,6 +88,9 @@ Raises:
 |----------|---------|---------|
 | `VSH_DATA_DIR` | `~/.vsh` | JSON store root |
 | `VSH_PERSIST` | `1` | Set `0` to disable disk writes |
+| `VSH_PROTECTED_PATTERNS` | built-in defaults | Comma-separated protected path globs |
+| `VSH_PROTECTED_PATTERNS_FILE` | — | Newline-separated protected globs file |
+| `VSH_MAX_TOUCHED_PATHS` | `500` | Simulation limit for touched paths |
 
 ```python
 from vsh.persistence import PersistenceStore

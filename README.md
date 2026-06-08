@@ -2,7 +2,7 @@
 
 Validation-first command engine for AI agents operating on workspaces.
 
-`vsh` is not a POSIX shell emulator. It is a **safe command planning and execution control layer** for AI agents: shell-like intent becomes typed `StructuredCommand` models, side effects are simulated on a workspace snapshot, plans are approved, drift is revalidated, and only then are mutations applied to the real filesystem. Read commands validate path access; they do not stream file contents back to the agent today.
+`vsh` is not a POSIX shell emulator. It is a **safe command planning and execution control layer** for AI agents: shell-like intent becomes typed `StructuredCommand` models, side effects are simulated on a workspace snapshot, plans are approved, drift is revalidated, and only then are mutations applied to the real filesystem. Read commands validate path access and return captured stdout on execution; simulation does not stream file contents.
 
 ## Install
 
@@ -100,6 +100,9 @@ agent = Agent(
 |----------|---------|---------|
 | `VSH_DATA_DIR` | `~/.vsh` | JSON persistence directory |
 | `VSH_PERSIST` | `1` | Set `0` to disable disk writes |
+| `VSH_PROTECTED_PATTERNS` | built-in defaults | Comma-separated protected path globs |
+| `VSH_PROTECTED_PATTERNS_FILE` | — | Newline-separated protected globs file |
+| `VSH_MAX_TOUCHED_PATHS` | `500` | Simulation limit for touched paths |
 | `MODEL_NAME` | — | Live agent model id (demo) |
 
 ## Development
@@ -111,6 +114,16 @@ ty check
 basedpyright src tests
 pytest tests/
 ```
+
+## Performance benchmarks
+
+Compare every vsh command against native shell (5 runs, median + min/max, plots):
+
+```bash
+uv run python playground/benchmark_vsh_vs_native.py
+```
+
+Reports land in `playground/reports/<timestamp>/`. See [playground/README.md](playground/README.md).
 
 ## License
 

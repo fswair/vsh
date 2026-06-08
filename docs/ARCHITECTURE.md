@@ -46,13 +46,22 @@ The canonical path is **simulate → approve → execute_approved**. There is no
 
 ## Simulation
 
-`simulate_command()` renders `shell_preview` via `command.to_shell()`, applies read or
-mutation logic against the snapshot graph, records an `AccessJournal`, derives
-`PredictedEffects`, and runs policy checks.
+`simulate_command()` renders `shell_preview` via `command.to_shell()` (paths quoted with
+`shlex.quote`), applies read or mutation logic against the snapshot graph, records an
+`AccessJournal`, derives `PredictedEffects`, and runs policy checks.
+
+Protected workspace paths (`.env`, `secrets/**`, `*.pem`, …) are rejected during
+simulation via `vsh.simulate.protected_paths`. Override globs with `VSH_PROTECTED_PATTERNS`
+or `VSH_PROTECTED_PATTERNS_FILE`.
+
+Each result includes an `approval_tier` (`read_only`, `mutation`, `destructive`) and
+`requires_manual_approval`. Use `auto_approve_plan()` only for read-only plans.
 
 Mutation commands usually return `approve_with_warning`. Both `approve` and
 `approve_with_warning` are execution-eligible unless `raw_command` fails the shell preview
 match check.
+
+`VSH_MAX_TOUCHED_PATHS` caps how many paths a single simulation may touch.
 
 Each plan stores:
 
@@ -67,7 +76,9 @@ Each plan stores:
 2. Runs `revalidate_plan()` — compares live path fingerprints to the plan basis
 3. On drift: refreshes snapshot nodes for diagnostics and returns `applied=False`
 4. On success: dispatches the structured command through `apply_command()`
-5. Updates session `cwd` when needed, records `ActualEffects`, compares to prediction
+5. Read commands populate `ActualEffects.stdout` via `vsh.execute.read_output`
+6. Every dispatch records `ActualEffects.execution_time_ms`
+7. Updates session `cwd` when needed, records `ActualEffects`, compares to prediction
 
 Supported real filesystem operations include navigation reads, file reads, `mkdir`, `touch`,
 `mv`, `cp`, `rm`, `echo` redirection, `chmod`, `ln`, and simple in-place `sed`.

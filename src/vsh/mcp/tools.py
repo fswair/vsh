@@ -4,7 +4,7 @@ import os
 from typing import Any
 
 from vsh.execute import execute_approved as execute_recorded_plan
-from vsh.plans import approve_plan
+from vsh.plans import approve_plan, auto_approve_plan
 from vsh.registry import get_schema as registry_get_schema
 from vsh.registry import registrations
 from vsh.registry import search as registry_search
@@ -47,9 +47,9 @@ def simulate(tool_name: str, snapshot_id: str, params: dict[str, Any]) -> dict[s
     return result.model_dump()
 
 
-def approve(plan_id: str) -> dict[str, Any]:
+def approve(plan_id: str, *, auto: bool = False) -> dict[str, Any]:
     """Approve a persisted simulation plan."""
-    token = approve_plan(plan_id)
+    token = auto_approve_plan(plan_id) if auto else approve_plan(plan_id)
     return token.model_dump()
 
 

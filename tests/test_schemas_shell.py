@@ -48,8 +48,13 @@ def test_echo_to_shell_supports_no_newline_and_append() -> None:
 def test_find_to_shell_renders_all_filters() -> None:
     assert (
         repr(FindCommand(path=".", name="*.py", type="dir", maxdepth=2))
-        == "find . -name *.py -type d -maxdepth 2"
+        == "find . -name '*.py' -type d -maxdepth 2"
     )
+
+
+def test_render_shell_quotes_paths_with_spaces() -> None:
+    command = _ShellProbeCommand(enabled=False, target="my file.txt", count=2)
+    assert render_shell(command) == "probe -c 2 'my file.txt'"
 
 
 def test_sed_validator_requires_paths_and_supports_backup_suffix() -> None:

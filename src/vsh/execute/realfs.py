@@ -6,6 +6,7 @@ from vsh.effects import ActualEffects
 from vsh.execute.dispatch import ExecutionContext, apply_command, effects_match_prediction
 from vsh.execute.revalidate import revalidate_plan
 from vsh.extensions.registry import extensions
+from vsh.perf.timing import elapsed_ms, perf_counter_ns
 from vsh.persistence import persistence_enabled, persistence_store
 from vsh.plans.models import ExecutionResult
 from vsh.plans.store import plan_store
@@ -16,6 +17,7 @@ __all__ = ("execute_approved",)
 
 
 def execute_approved(approval_token: str) -> ExecutionResult:
+    total_start_ns = perf_counter_ns()
     record = plan_store.get_by_token(approval_token)
     if record.approval_token is None:
         raise ValueError(f"plan not approved: {record.plan_id}")
@@ -26,7 +28,9 @@ def execute_approved(approval_token: str) -> ExecutionResult:
         raise ValueError(f"plan already executed: {record.plan_id}")
 
     snapshot = runtime.get_snapshot(record.snapshot_id)
+    revalidation_start_ns = perf_counter_ns()
     revalidation, snapshot = revalidate_plan(record, snapshot)
+    revalidation_time_ms = elapsed_ms(revalidation_start_ns)
     if revalidation.status == "stale":
         runtime.record_snapshot(snapshot)
         if persistence_enabled():
@@ -43,15 +47,21 @@ def execute_approved(approval_token: str) -> ExecutionResult:
             revalidation=revalidation,
             actual_effects=None,
             matches_prediction=None,
+            total_time_ms=elapsed_ms(total_start_ns),
+            revalidation_time_ms=revalidation_time_ms,
         )
 
     ctx = ExecutionContext(
         workspace_root=snapshot.session.workspace_root,
         cwd_logical=snapshot.session.cwd_logical,
     )
+    apply_start_ns = perf_counter_ns()
+    apply_time_ms = 0.0
     try:
         actual_effects = apply_command(record.result.command, ctx)
+        apply_time_ms = elapsed_ms(apply_start_ns)
     except (OSError, ValueError, FileNotFoundError) as exc:
+        apply_time_ms = elapsed_ms(apply_start_ns)
         return ExecutionResult(
             plan_id=record.plan_id,
             approval_token=approval_token,
@@ -63,6 +73,9 @@ def execute_approved(approval_token: str) -> ExecutionResult:
             revalidation=revalidation,
             actual_effects=None,
             matches_prediction=None,
+            total_time_ms=elapsed_ms(total_start_ns),
+            revalidation_time_ms=revalidation_time_ms,
+            apply_time_ms=elapsed_ms(apply_start_ns),
         )
 
     updated_snapshot: WorkspaceSnapshot = _apply_session_updates(snapshot, actual_effects)
@@ -88,6 +101,9 @@ def execute_approved(approval_token: str) -> ExecutionResult:
         revalidation=revalidation,
         actual_effects=actual_effects,
         matches_prediction=matches,
+        total_time_ms=elapsed_ms(total_start_ns),
+        revalidation_time_ms=revalidation_time_ms,
+        apply_time_ms=apply_time_ms,
     )
 
 

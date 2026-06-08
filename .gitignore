@@ -32,3 +32,6 @@ htmlcov/
 .env
 .env.*
 !.env.example
+
+# Playground benchmark artifacts
+playground/reports/2026*

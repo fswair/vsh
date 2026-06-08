@@ -19,6 +19,14 @@ class ActualEffects(BaseModel):
     deletes: list[str] = Field(default_factory=list)
     renames: list[tuple[str, str]] = Field(default_factory=list)
     cwd_after: str | None = None
+    stdout: str | None = Field(
+        default=None,
+        description="Captured command output for read-only commands.",
+    )
+    execution_time_ms: float | None = Field(
+        default=None,
+        description="Wall-clock time spent executing the command body.",
+    )
 
 
 class RevalidationReport(BaseModel):

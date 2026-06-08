@@ -1,5 +1,6 @@
 from __future__ import annotations as _annotations
 
+import shlex
 from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -95,6 +96,11 @@ class CommandSpec(BaseModel):
     )
 
 
+def quote_shell_token(value: object) -> str:
+    """Quote a shell token for canonical preview rendering."""
+    return shlex.quote(str(value))
+
+
 def render_shell(command: StructuredCommand) -> str:
     flag_tokens: list[str] = []
     concatenated_flags: list[str] = []
@@ -121,10 +127,10 @@ def render_shell(command: StructuredCommand) -> str:
         if value in (None, ""):
             continue
         flag_tokens.append(f"-{alias}" if len(alias) == 1 else f"--{alias}")
-        flag_tokens.append(str(value))
+        flag_tokens.append(quote_shell_token(value))
 
     positional_tokens = [
-        str(getattr(command, field_name))
+        quote_shell_token(getattr(command, field_name))
         for field_name in command._positional_fields
         if getattr(command, field_name) not in (None, "")
     ]

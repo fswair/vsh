@@ -242,10 +242,8 @@ def test_execute_approved_rejects_execution_ineligible_plan(tmp_path: Path) -> N
     result = simulate_command(
         LsCommand(path=".", all=True, long=True, raw_command="ls -al ."), snapshot
     )
-    token = approve_plan(result.plan_id)
-
-    with pytest.raises(ValueError, match="plan not eligible for execution"):
-        tools.execute_approved(token.token)
+    with pytest.raises(ValueError, match="not eligible for approval"):
+        approve_plan(result.plan_id)
 
 
 def test_remove_command_rejects_home_shorthand(tmp_path: Path) -> None:

@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny
 
 from vsh.effects import ActualEffects, RevalidationReport
 from vsh.schemas import StructuredCommand
+from vsh.simulate.approval_levels import ApprovalTier
 from vsh.simulate.models import AccessJournal, PolicyDecision, PredictedEffects
 
 
@@ -18,8 +19,14 @@ class SimulationResult(BaseModel):
     raw_matches_shell_preview: bool | None = None
     execution_eligible: bool
     execution_eligibility_reason: str | None = None
+    approval_tier: ApprovalTier = "read_only"
+    requires_manual_approval: bool = False
     predicted_effects: PredictedEffects
     journal: AccessJournal
+    simulation_time_ms: float | None = Field(
+        default=None,
+        description="Wall-clock time spent simulating the command.",
+    )
 
 
 class ApprovalToken(BaseModel):
@@ -56,3 +63,15 @@ class ExecutionResult(BaseModel):
     revalidation: RevalidationReport = Field(default_factory=RevalidationReport)
     actual_effects: ActualEffects | None = None
     matches_prediction: bool | None = None
+    total_time_ms: float | None = Field(
+        default=None,
+        description="Wall-clock time for the full execute_approved pipeline.",
+    )
+    revalidation_time_ms: float | None = Field(
+        default=None,
+        description="Time spent revalidating plan drift before execution.",
+    )
+    apply_time_ms: float | None = Field(
+        default=None,
+        description="Time spent applying the command to the real filesystem.",
+    )

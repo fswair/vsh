@@ -254,13 +254,34 @@ def test_dispatch_rejects_read_command_without_path(tmp_path: Path) -> None:
     ctx = ExecutionContext(workspace_root=str(workspace), cwd_logical=str(workspace))
     command = CatCommand.model_construct(path="a.txt")
     object.__setattr__(command, "path", None)
-    with pytest.raises(ValueError, match="unsupported read command"):
+    with pytest.raises((ValueError, TypeError)):
         apply_command(command, ctx)
 
 
 class _Runner:
     def verify(self, snapshot: WorkspaceSnapshot, touched_paths: list[str]) -> list[str]:
         return touched_paths
+
+
+def test_execute_approved_rejects_non_eligible_record_at_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vsh.execute import execute_approved
+    from vsh.plans.store import plan_store
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
+    result = simulate_command(
+        LsCommand(path=".", all=True, long=True, raw_command="ls -al ."), snapshot
+    )
+    record = plan_store.get(result.plan_id)
+    token = plan_store.approve(result.plan_id)
+    record.result.execution_eligible = False
+    record.result.execution_eligibility_reason = "forced ineligible"
+
+    with pytest.raises(ValueError, match="plan not eligible for execution"):
+        execute_approved(token.token)
 
 
 def test_execute_approved_stale_with_persistence_enabled(

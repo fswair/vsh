@@ -2,6 +2,7 @@ from __future__ import annotations as _annotations
 
 from vsh.schemas import RemoveCommand, StructuredCommand
 from vsh.session import get_protected_path_label, is_same_path_or_ancestor, is_within_workspace
+from vsh.simulate.protected_paths import get_protected_workspace_path_reason
 from vsh.snapshot.models import WorkspaceSnapshot
 
 from .models import Overlay, PolicyDecision
@@ -25,6 +26,10 @@ def decide_policy(
     protected_target_reason = _protected_target_reason(overlay)
     if protected_target_reason is not None:
         return "reject", protected_target_reason
+
+    protected_workspace_reason = _protected_workspace_path_reason(snapshot, overlay)
+    if protected_workspace_reason is not None:
+        return "reject", protected_workspace_reason
 
     outside_workspace_reason = _outside_workspace_reason(snapshot, overlay)
     if outside_workspace_reason is not None:
@@ -59,6 +64,23 @@ def _protected_target_reason(overlay: Overlay) -> str | None:
         protected_label = get_protected_path_label(target)
         if protected_label is not None:
             return f"destructive command cannot target the {protected_label}"
+    return None
+
+
+def protected_read_path_reason(path: str, workspace_root: str) -> str | None:
+    """Reject reads that target protected workspace-relative paths."""
+    return get_protected_workspace_path_reason(path, workspace_root)
+
+
+def _protected_workspace_path_reason(
+    snapshot: WorkspaceSnapshot,
+    overlay: Overlay,
+) -> str | None:
+    workspace_root = snapshot.session.workspace_root
+    for target in sorted(_mutation_targets(overlay)):
+        reason = get_protected_workspace_path_reason(target, workspace_root)
+        if reason is not None:
+            return reason
     return None
 
 

@@ -4,7 +4,7 @@ from typing import ClassVar
 
 from pydantic import Field, model_validator
 
-from .common import CommandKind, SideEffect, StructuredCommand
+from .common import CommandKind, SideEffect, StructuredCommand, quote_shell_token
 
 
 class SedCommand(StructuredCommand):
@@ -52,9 +52,9 @@ class SedCommand(StructuredCommand):
         if self.in_place:
             tokens.append("-i")
             if self.backup_suffix is not None:
-                tokens.append(self.backup_suffix)
+                tokens.append(quote_shell_token(self.backup_suffix))
         elif self.quiet:
             tokens.append("-n")
-        tokens.append(self.script)
-        tokens.extend(self.paths)
+        tokens.append(quote_shell_token(self.script))
+        tokens.extend(quote_shell_token(path) for path in self.paths)
         return " ".join(tokens)

@@ -7,6 +7,7 @@ import stat
 from pathlib import Path
 
 from vsh.effects import ActualEffects
+from vsh.perf.timing import perf_counter_ns, stamp_execution_time
 from vsh.schemas import (
     CatCommand,
     CdCommand,
@@ -57,6 +58,16 @@ class ExecutionContext:
 
 
 def apply_command(command: StructuredCommand, ctx: ExecutionContext) -> ActualEffects:
+    start_ns = perf_counter_ns()
+    effects = _apply_command_body(command, ctx)
+    stamped = stamp_execution_time(effects, start_ns)
+    assert isinstance(stamped, ActualEffects)
+    return stamped
+
+
+def _apply_command_body(command: StructuredCommand, ctx: ExecutionContext) -> ActualEffects:
+    from vsh.execute.read_output import capture_read_output
+
     if isinstance(command, PwdCommand):
         return ActualEffects(reads=[ctx.cwd_logical], cwd_after=ctx.cwd_logical)
     if isinstance(command, CdCommand):
@@ -66,9 +77,8 @@ def apply_command(command: StructuredCommand, ctx: ExecutionContext) -> ActualEf
             raise ValueError(msg)
         return ActualEffects(reads=[target], cwd_after=target)
     if isinstance(command, LsCommand):
-        target = ctx.resolve_within_workspace(command.path)
-        _require_exists(target)
-        return ActualEffects(reads=[target], cwd_after=ctx.cwd_logical)
+        reads, stdout = capture_read_output(command, ctx)
+        return ActualEffects(reads=reads, cwd_after=ctx.cwd_logical, stdout=stdout)
     if isinstance(command, MkdirCommand):
         target = ctx.resolve_within_workspace(command.path)
         if command.parents:
@@ -179,7 +189,8 @@ def apply_command(command: StructuredCommand, ctx: ExecutionContext) -> ActualEf
         return ActualEffects(creates=[dst], cwd_after=ctx.cwd_logical)
     if isinstance(command, SedCommand):
         if not command.in_place:
-            return _verify_read_paths(command.paths, ctx)
+            reads, stdout = capture_read_output(command, ctx)
+            return ActualEffects(reads=reads, cwd_after=ctx.cwd_logical, stdout=stdout)
         updated: list[str] = []
         for relative_path in command.paths:
             target = ctx.resolve_within_workspace(relative_path)
@@ -200,11 +211,8 @@ def apply_command(command: StructuredCommand, ctx: ExecutionContext) -> ActualEf
         | RgCommand
         | FindCommand,
     ):
-        path = getattr(command, "path", None)
-        if path is None:
-            msg = f"unsupported read command for execution: {command.__class__.__name__}"
-            raise ValueError(msg)
-        return _verify_read_paths([path], ctx)
+        reads, stdout = capture_read_output(command, ctx)
+        return ActualEffects(reads=reads, cwd_after=ctx.cwd_logical, stdout=stdout)
     msg = f"unsupported command for real execution: {command.__class__.__name__}"
     raise ValueError(msg)
 
@@ -221,13 +229,6 @@ def effects_match_prediction(predicted: object, actual: ActualEffects) -> bool:
         and sorted(predicted.renames) == sorted(actual.renames)
         and predicted.cwd_after == actual.cwd_after
     )
-
-
-def _verify_read_paths(paths: list[str], ctx: ExecutionContext) -> ActualEffects:
-    resolved = [ctx.resolve_within_workspace(path) for path in paths]
-    for target in resolved:
-        _require_exists(target)
-    return ActualEffects(reads=resolved, cwd_after=ctx.cwd_logical)
 
 
 def _require_exists(path: str) -> None:
