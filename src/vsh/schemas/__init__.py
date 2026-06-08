@@ -5,6 +5,7 @@ from .cd import CdCommand
 from .chmod import ChmodCommand
 from .common import CommandExample, CommandKind, CommandSpec, SideEffect, StructuredCommand
 from .copy import CopyCommand
+from .curl import CurlCommand
 from .du import DuCommand
 from .echo import EchoCommand
 from .find import FindCommand
@@ -24,6 +25,7 @@ from .stat import StatCommand
 from .tail import TailCommand
 from .touch import TouchCommand
 from .wc import WcCommand
+from .wget import WgetCommand
 
 __all__ = (
     "CatCommand",
@@ -33,6 +35,7 @@ __all__ = (
     "CommandKind",
     "CommandSpec",
     "CopyCommand",
+    "CurlCommand",
     "DuCommand",
     "EchoCommand",
     "FindCommand",
@@ -54,4 +57,5 @@ __all__ = (
     "TailCommand",
     "TouchCommand",
     "WcCommand",
+    "WgetCommand",
 )

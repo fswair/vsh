@@ -6,6 +6,7 @@ from typing import Literal
 from vsh.schemas import (
     ChmodCommand,
     CopyCommand,
+    CurlCommand,
     EchoCommand,
     LnCommand,
     MkdirCommand,
@@ -14,6 +15,7 @@ from vsh.schemas import (
     SedCommand,
     StructuredCommand,
     TouchCommand,
+    WgetCommand,
 )
 from vsh.simulate.models import Overlay, PolicyDecision
 
@@ -42,6 +44,13 @@ def classify_approval_requirement(
 ) -> tuple[ApprovalTier, bool]:
     """Return approval tier and whether explicit manual approval is required."""
     if decision == "reject":
+        return "read_only", True
+
+    if isinstance(command, WgetCommand):
+        return "mutation", True
+    if isinstance(command, CurlCommand):
+        if command.output_path is not None:
+            return "mutation", True
         return "read_only", True
 
     if isinstance(command, RemoveCommand):

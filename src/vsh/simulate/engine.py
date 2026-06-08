@@ -11,6 +11,7 @@ from vsh.schemas import (
     CdCommand,
     ChmodCommand,
     CopyCommand,
+    CurlCommand,
     DuCommand,
     EchoCommand,
     FindCommand,
@@ -31,12 +32,14 @@ from vsh.schemas import (
     TailCommand,
     TouchCommand,
     WcCommand,
+    WgetCommand,
 )
 from vsh.session import is_within_workspace, resolve_workspace_path
 from vsh.snapshot.fingerprint import collect_touched_paths, fingerprints_for_paths
 from vsh.snapshot.models import WorkspaceSnapshot
 
 from .approval_levels import classify_approval_requirement, max_touched_paths
+from .http_commands import simulate_curl_command, simulate_wget_command
 from .models import AccessJournal, Overlay, PolicyDecision, PredictedEffects
 from .policy import decide_policy, protected_read_path_reason
 
@@ -117,6 +120,10 @@ def simulate_command(command: StructuredCommand, snapshot: WorkspaceSnapshot) ->
         journal = AccessJournal()
         decision = "approve"
         reason = None
+    elif isinstance(command, CurlCommand):
+        predicted, journal, decision, reason, overlay = simulate_curl_command(command, snapshot)
+    elif isinstance(command, WgetCommand):
+        predicted, journal, decision, reason, overlay = simulate_wget_command(command, snapshot)
     else:
         overlay = _simulate_mutation_overlay(command, snapshot)
         journal = AccessJournal(

@@ -53,6 +53,8 @@ def test_registry_contains_initial_command_surface() -> None:
         "vsh_move",
         "vsh_copy",
         "vsh_remove",
+        "vsh_curl",
+        "vsh_wget",
     }
 
 

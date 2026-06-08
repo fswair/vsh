@@ -7,6 +7,7 @@ from vsh.schemas import (
     CommandExample,
     CommandSpec,
     CopyCommand,
+    CurlCommand,
     DuCommand,
     EchoCommand,
     FindCommand,
@@ -27,6 +28,7 @@ from vsh.schemas import (
     TailCommand,
     TouchCommand,
     WcCommand,
+    WgetCommand,
 )
 
 SchemaModel = type[StructuredCommand]
@@ -354,6 +356,46 @@ registrations: dict[str, CommandRegistration] = {
             examples=[CommandExample(title="Remove file", params={"path": "tmp.txt"})],
         ),
         schema_model=RemoveCommand,
+    ),
+    "vsh_curl": CommandRegistration(
+        spec=CommandSpec(
+            name="vsh_curl",
+            summary="Fetch a URL over HTTP(S).",
+            description="Perform an outbound HTTP request and return the response body or save it to a workspace file.",
+            tags=["read", "network", "http", "curl"],
+            schema_model_name="CurlCommand",
+            examples=[
+                CommandExample(title="GET JSON", params={"url": "https://example.com/data.json"}),
+                CommandExample(
+                    title="Save response",
+                    params={"url": "https://example.com/page.html", "output_path": "page.html"},
+                ),
+            ],
+        ),
+        schema_model=CurlCommand,
+    ),
+    "vsh_wget": CommandRegistration(
+        spec=CommandSpec(
+            name="vsh_wget",
+            summary="Download a URL into the workspace.",
+            description="Fetch an HTTP(S) resource and write the response body to a workspace file.",
+            tags=["mutate", "network", "http", "wget"],
+            mutates_fs=True,
+            schema_model_name="WgetCommand",
+            examples=[
+                CommandExample(
+                    title="Download to basename", params={"url": "https://example.com/readme.txt"}
+                ),
+                CommandExample(
+                    title="Download to path",
+                    params={
+                        "url": "https://example.com/archive.zip",
+                        "output_path": "downloads/archive.zip",
+                    },
+                ),
+            ],
+        ),
+        schema_model=WgetCommand,
     ),
 }
 

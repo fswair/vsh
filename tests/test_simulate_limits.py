@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from vsh.schemas import GrepCommand
+from vsh.schemas import CurlCommand, GrepCommand, WgetCommand
 from vsh.simulate.approval_levels import classify_approval_requirement, max_touched_paths
 from vsh.simulate.engine import simulate_command
 from vsh.simulate.models import Overlay
@@ -48,6 +48,29 @@ def test_classify_approval_requirement_for_rejected_plan() -> None:
     tier, manual = classify_approval_requirement(LsCommand(path="."), decision="reject")
     assert tier == "read_only"
     assert manual is True
+
+
+def test_classify_approval_requirement_for_network_commands() -> None:
+    curl_stdout_tier, curl_stdout_manual = classify_approval_requirement(
+        CurlCommand(url="https://example.com"),
+        decision="approve",
+    )
+    assert curl_stdout_tier == "read_only"
+    assert curl_stdout_manual is True
+
+    curl_output_tier, curl_output_manual = classify_approval_requirement(
+        CurlCommand(url="https://example.com", output_path="page.html"),
+        decision="approve",
+    )
+    assert curl_output_tier == "mutation"
+    assert curl_output_manual is True
+
+    wget_tier, wget_manual = classify_approval_requirement(
+        WgetCommand(url="https://example.com/readme.txt"),
+        decision="approve",
+    )
+    assert wget_tier == "mutation"
+    assert wget_manual is True
 
 
 def test_classify_approval_requirement_for_overlay_delete() -> None:

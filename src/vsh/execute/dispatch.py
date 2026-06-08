@@ -13,6 +13,7 @@ from vsh.schemas import (
     CdCommand,
     ChmodCommand,
     CopyCommand,
+    CurlCommand,
     DuCommand,
     EchoCommand,
     FindCommand,
@@ -33,6 +34,7 @@ from vsh.schemas import (
     TailCommand,
     TouchCommand,
     WcCommand,
+    WgetCommand,
 )
 from vsh.session import is_within_workspace, resolve_workspace_path
 
@@ -187,6 +189,14 @@ def _apply_command_body(command: StructuredCommand, ctx: ExecutionContext) -> Ac
         else:
             os.link(src, dst)
         return ActualEffects(creates=[dst], cwd_after=ctx.cwd_logical)
+    if isinstance(command, CurlCommand):
+        from .http_commands import apply_curl_command
+
+        return apply_curl_command(command, ctx)
+    if isinstance(command, WgetCommand):
+        from .http_commands import apply_wget_command
+
+        return apply_wget_command(command, ctx)
     if isinstance(command, SedCommand):
         if not command.in_place:
             reads, stdout = capture_read_output(command, ctx)
