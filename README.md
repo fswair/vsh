@@ -50,9 +50,9 @@ Flow: **search → get_schema → snapshot → simulate → approve → execute_
 
 ## Documentation
 
-- [Architecture](docs/ARCHITECTURE.md) — modules, lifecycle, drift detection, persistence
-- [API reference](docs/API.md) — public Python/MCP surface
-- [CodeMode MCP server](docs/CODEMODE.md) — discovery-first FastMCP server and prompts
+- [Architecture](https://github.com/fswair/vsh/blob/main/docs/ARCHITECTURE.md) — modules, lifecycle, drift detection, persistence
+- [API reference](https://github.com/fswair/vsh/blob/main/docs/API.md) — public Python/MCP surface
+- [CodeMode MCP server](https://github.com/fswair/vsh/blob/main/docs/CODEMODE.md) — discovery-first FastMCP server and prompts
 
 ## MCP
 
@@ -66,7 +66,7 @@ vsh serve-codemode
 vsh-codemode
 ```
 
-See [docs/CODEMODE.md](docs/CODEMODE.md) for the CodeMode inspiration, prompts, and client config examples.
+See [docs/CODEMODE.md](https://github.com/fswair/vsh/blob/main/docs/CODEMODE.md) for the CodeMode inspiration, prompts, and client config examples.
 
 Both servers expose the same compact tool surface:
 
@@ -123,7 +123,22 @@ Compare every vsh command against native shell (5 runs, median + min/max, plots)
 uv run python playground/benchmark_vsh_vs_native.py
 ```
 
-Reports land in `playground/reports/<timestamp>/`. See [playground/README.md](playground/README.md).
+Reports land in `playground/reports/<timestamp>/`. See [playground/README.md](https://github.com/fswair/vsh/blob/main/playground/README.md).
+
+## PyPI releases
+
+Releases are published with [trusted publishing](https://docs.pypi.org/trusted-publishers/) via
+[`.github/workflows/publish.yml`](https://github.com/fswair/vsh/blob/main/.github/workflows/publish.yml) (`uv build` + `uv publish`).
+
+1. Configure a **pending publisher** on PyPI for project `vsh`:
+   - Owner: your GitHub org/user
+   - Repository: this repo
+   - Workflow: `publish.yml`
+   - Environment: `pypi`
+2. Create a GitHub **environment** named `pypi` (optional approval rules).
+3. Bump `src/vsh/_version.py`, commit, tag `vX.Y.Z`, push the tag.
+
+The workflow requests an OIDC token (`id-token: write`) — no long-lived PyPI API token in secrets.
 
 ## License
 

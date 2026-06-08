@@ -15,6 +15,7 @@ def register_vsh_surface(mcp: FastMCP) -> None:
     mcp.add_tool(tools.simulate)
     mcp.add_tool(tools.approve)
     mcp.add_tool(tools.execute_approved)
+    mcp.add_tool(tools.vsh_sandbox)
 
     mcp.add_resource(resources.workspace_snapshot_current)
     mcp.add_resource(resources.workspace_projection_current)

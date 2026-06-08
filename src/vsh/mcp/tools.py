@@ -9,6 +9,7 @@ from vsh.registry import get_schema as registry_get_schema
 from vsh.registry import registrations
 from vsh.registry import search as registry_search
 from vsh.runtime import runtime
+from vsh.sandbox import SandboxPolicy, run_vsh_sandbox
 from vsh.schemas import CommandSpec
 from vsh.simulate.engine import simulate_command
 from vsh.snapshot.builder import snapshot_workspace as build_snapshot_workspace
@@ -56,4 +57,15 @@ def approve(plan_id: str, *, auto: bool = False) -> dict[str, Any]:
 def execute_approved(approval_token: str) -> dict[str, Any]:
     """Execute an approved plan."""
     result = execute_recorded_plan(approval_token)
+    return result.model_dump()
+
+
+def vsh_sandbox(
+    code: str,
+    snapshot_id: str,
+    *,
+    policy: SandboxPolicy = "read_only",
+) -> dict[str, Any]:
+    """Run Monty sandbox code that chains vsh simulate calls in one batch."""
+    result = run_vsh_sandbox(code, snapshot_id, policy=policy)
     return result.model_dump()

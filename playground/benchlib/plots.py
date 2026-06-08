@@ -152,10 +152,10 @@ def write_plots(output_dir: Path, rows: list[BenchmarkStats]) -> list[Path]:
 
         matrix = []
         for cmd in commands:
-            row = [
-                by_key.get((cmd, mode)).median_ms if by_key.get((cmd, mode)) else float("nan")
-                for mode in heatmap_modes
-            ]
+            row = []
+            for mode in heatmap_modes:
+                stats = by_key.get((cmd, mode))
+                row.append(stats.median_ms if stats is not None else float("nan"))
             matrix.append(row)
         fig, ax = plt.subplots(figsize=(8, max(6, len(commands) * 0.3)))
         image = ax.imshow(matrix, aspect="auto", cmap="YlOrRd")

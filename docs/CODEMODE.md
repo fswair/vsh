@@ -23,6 +23,7 @@ agents should explore unfamiliar APIs: discover first, then specialize.
 | get_schema | Gemini-safe inlined JSON schema |
 | — | `snapshot_workspace` for a stable workspace graph |
 | — | `simulate` with journal + predicted effects |
+| — | `vsh_sandbox` for CodeMode-style batch simulation in Monty |
 | — | `approve` as an immutable plan gate |
 | — | `execute_approved` with drift revalidation |
 
@@ -53,6 +54,7 @@ client that launches local servers.
 | `get_schema` | Pull one JSON schema when needed |
 | `snapshot_workspace` | Capture workspace graph once per session |
 | `simulate` | Dry-run typed params against the snapshot |
+| `vsh_sandbox` | Batch multiple `simulate()` calls in one Monty Python run |
 | `approve` | Promote a plan to an approval token |
 | `execute_approved` | Apply an approved, revalidated plan |
 
@@ -142,6 +144,8 @@ the server.
 
 ## Recommended agent loop
 
+### Single-command flow
+
 ```text
 search("list")
   -> pick vsh_list
@@ -161,6 +165,37 @@ approve(plan_id)
 execute_approved(approval_token)
   -> applied + actual_effects
 ```
+
+### Batch flow (`vsh_sandbox`)
+
+When the agent needs several simulations in one turn, prefer `vsh_sandbox` instead of
+many separate `simulate` calls. The model writes Monty Python that chains
+`search()`, `get_schema()`, and `simulate()`; vsh returns one structured result with
+stdout, return value, and per-call records.
+
+```python
+# Example sandbox code (executed inside Monty)
+simulate("vsh_touch", {"path": "x.txt"})
+simulate("vsh_mkdir", {"path": "foo", "parents": True})
+return "done"
+```
+
+`policy` controls which predicted effect kinds are allowed inside the sandbox:
+
+| Policy | Allowed effects |
+|--------|-----------------|
+| `read_only` | read |
+| `read_write` | read, write |
+| `write_only` | write |
+| `delete_only` | delete |
+| `read_delete_write` | read, write, delete, rename |
+| `no_delete` | read, write, rename |
+| `no_write` | read, delete, rename |
+| `no_read` | write, delete, rename |
+| `yolo` | all |
+
+Workspace is mounted at `/workspace` for Monty introspection; simulations still go
+through vsh policy + snapshot validation.
 
 ## Cursor / Claude Desktop config sketch
 
@@ -192,7 +227,7 @@ If the project virtualenv is already active:
 
 | | `vsh serve` | `vsh serve-codemode` |
 |---|-------------|----------------------|
-| Tools/resources | same 6 + 4 | same 6 + 4 |
+| Tools/resources | same 7 + 4 | same 7 + 4 |
 | Server name | `vsh` | `vsh-codemode` |
 | Server instructions | default | CodeMode workflow + rules |
 | MCP prompts | none | discovery / simulate / read |

@@ -104,6 +104,7 @@ def test_create_vsh_function_toolset_registers_tools() -> None:
         "vsh_simulate",
         "vsh_approve",
         "vsh_execute_approved",
+        "vsh_sandbox",
     }
 
 
@@ -235,6 +236,59 @@ def test_vsh_approve_requires_plan_id() -> None:
 
     with pytest.raises(Exception, match="plan_id is missing"):
         agent.run_sync("approve", deps=VshAgentDeps(workspace_root="/tmp"))
+
+
+def test_vsh_sandbox_requires_snapshot() -> None:
+    toolset = create_vsh_function_toolset()
+    test_model = TestModel(call_tools=["vsh_sandbox"])
+    agent = Agent(test_model, deps_type=VshAgentDeps, toolsets=[toolset])
+
+    with pytest.raises(Exception, match="snapshot_id is missing"):
+        agent.run_sync(
+            "sandbox now",
+            deps=VshAgentDeps(workspace_root="/tmp"),
+        )
+
+
+def test_vsh_sandbox_runs_through_agent(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    deps = VshAgentDeps.from_path(workspace)
+    toolset = create_vsh_function_toolset()
+    step = 0
+
+    def next_step(_messages: object, _info: object) -> ModelResponse:
+        nonlocal step
+        step += 1
+        if step == 1:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        tool_name="vsh_snapshot_workspace",
+                        args={},
+                        tool_call_id="snap",
+                    )
+                ]
+            )
+        if step == 2:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        tool_name="vsh_sandbox",
+                        args={
+                            "code": 'return simulate("vsh_list", {"path": "."})["decision"]',
+                            "policy": "read_only",
+                        },
+                        tool_call_id="sandbox",
+                    )
+                ]
+            )
+        return ModelResponse(parts=[TextPart(content="done")])
+
+    agent = Agent(FunctionModel(next_step), deps_type=VshAgentDeps, toolsets=[toolset])
+    result = agent.run_sync("batch simulate", deps=deps)
+
+    assert result.output == "done"
 
 
 def test_vsh_execute_requires_approval_token() -> None:

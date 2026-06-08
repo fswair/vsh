@@ -5,6 +5,7 @@ from typing import Any
 from pydantic_ai import FunctionToolset, RunContext
 
 from vsh.mcp import tools as vsh_tools
+from vsh.sandbox import SandboxPolicy
 
 from .deps import VshAgentDeps
 
@@ -14,8 +15,9 @@ Use vsh tools to validate workspace commands before touching the real filesystem
 Workflow:
 1. Call vsh_search or vsh_get_schema to discover structured commands.
 2. Call vsh_snapshot_workspace once per workspace session.
-3. Call vsh_simulate with a registry tool name (for example vsh_list) and typed params.
-4. Only call vsh_approve and vsh_execute_approved when simulation.execution_eligible is true.
+3. Prefer vsh_sandbox to batch multiple simulate() calls in one Monty code run.
+4. Or call vsh_simulate for a single command when a sandbox batch is unnecessary.
+5. Only call vsh_approve and vsh_execute_approved when simulation.execution_eligible is true.
 
 Prefer structured params from JSON schemas over raw shell strings.
 """
@@ -86,5 +88,19 @@ def create_vsh_function_toolset() -> FunctionToolset[VshAgentDeps]:
             msg = "approval_token is missing; call vsh_approve first"
             raise ValueError(msg)
         return vsh_tools.execute_approved(token)
+
+    @toolset.tool
+    def vsh_sandbox(
+        ctx: RunContext[VshAgentDeps],
+        code: str,
+        snapshot_id: str | None = None,
+        policy: SandboxPolicy = "read_only",
+    ) -> dict[str, Any]:
+        """Run Monty sandbox code that chains vsh simulate() calls in one batch."""
+        active_snapshot_id = snapshot_id or ctx.deps.snapshot_id
+        if active_snapshot_id is None:
+            msg = "snapshot_id is missing; call vsh_snapshot_workspace first"
+            raise ValueError(msg)
+        return vsh_tools.vsh_sandbox(code, active_snapshot_id, policy=policy)
 
     return toolset

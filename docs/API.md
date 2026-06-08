@@ -121,7 +121,32 @@ toolset = create_vsh_function_toolset()
 ```
 
 Registered tools: `vsh_search`, `vsh_get_schema`, `vsh_snapshot_workspace`,
-`vsh_simulate`, `vsh_approve`, `vsh_execute_approved`.
+`vsh_simulate`, `vsh_sandbox`, `vsh_approve`, `vsh_execute_approved`.
+
+## Sandbox (Monty batch execution)
+
+```python
+from vsh.sandbox import SandboxPolicy, run_vsh_sandbox
+
+result = run_vsh_sandbox(
+    code='simulate("vsh_touch", {"path": "x.txt"})\nreturn "ok"',
+    snapshot_id=snapshot.snapshot_id,
+    policy="read_write",
+)
+```
+
+`SandboxResult` fields:
+
+| Field | Meaning |
+|-------|---------|
+| `output` | Monty return value |
+| `stdout` | Captured `print()` output |
+| `calls` | Ordered `SandboxCallRecord` list (tool, params, plan_id, decision) |
+| `policy` | Policy applied for the run |
+| `error` | Syntax/runtime/policy error message when the run failed |
+| `execution_time_ms` | Wall-clock sandbox duration |
+
+MCP tool: `vsh_sandbox(code, snapshot_id, policy="read_only")`.
 
 ## MCP servers
 
