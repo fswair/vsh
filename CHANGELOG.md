@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- `vsh_list` now rejects workspace escapes (`/`, `..`, paths outside the root) during simulation
+- Execution layer enforces workspace boundaries via `ExecutionContext.resolve_within_workspace`
+
 ## [0.2.0] - 2026-06-08
 
 ### Added

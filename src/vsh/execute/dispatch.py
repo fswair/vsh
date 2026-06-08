@@ -33,7 +33,7 @@ from vsh.schemas import (
     TouchCommand,
     WcCommand,
 )
-from vsh.session import resolve_workspace_path
+from vsh.session import is_within_workspace, resolve_workspace_path
 
 __all__ = ("ExecutionContext", "apply_command", "effects_match_prediction")
 
@@ -48,29 +48,36 @@ class ExecutionContext:
     def resolve(self, candidate: str) -> str:
         return resolve_workspace_path(self.cwd_logical, candidate)
 
+    def resolve_within_workspace(self, candidate: str) -> str:
+        target = self.resolve(candidate)
+        if not is_within_workspace(target, self.workspace_root):
+            msg = f"path escapes workspace root: {target}"
+            raise ValueError(msg)
+        return target
+
 
 def apply_command(command: StructuredCommand, ctx: ExecutionContext) -> ActualEffects:
     if isinstance(command, PwdCommand):
         return ActualEffects(reads=[ctx.cwd_logical], cwd_after=ctx.cwd_logical)
     if isinstance(command, CdCommand):
-        target = ctx.resolve(command.path)
+        target = ctx.resolve_within_workspace(command.path)
         if not Path(target).is_dir():
             msg = f"cd target is not a directory: {target}"
             raise ValueError(msg)
         return ActualEffects(reads=[target], cwd_after=target)
     if isinstance(command, LsCommand):
-        target = ctx.resolve(command.path)
+        target = ctx.resolve_within_workspace(command.path)
         _require_exists(target)
         return ActualEffects(reads=[target], cwd_after=ctx.cwd_logical)
     if isinstance(command, MkdirCommand):
-        target = ctx.resolve(command.path)
+        target = ctx.resolve_within_workspace(command.path)
         if command.parents:
             Path(target).mkdir(parents=True, exist_ok=True)
         else:
             Path(target).mkdir()
         return ActualEffects(creates=[target], cwd_after=ctx.cwd_logical)
     if isinstance(command, TouchCommand):
-        target = ctx.resolve(command.path)
+        target = ctx.resolve_within_workspace(command.path)
         path = Path(target)
         if command.no_create and not path.exists():
             msg = f"touch target does not exist: {target}"
@@ -82,8 +89,8 @@ def apply_command(command: StructuredCommand, ctx: ExecutionContext) -> ActualEf
             return ActualEffects(updates=[target], cwd_after=ctx.cwd_logical)
         return ActualEffects(creates=[target], cwd_after=ctx.cwd_logical)
     if isinstance(command, MoveCommand):
-        src = ctx.resolve(command.src)
-        dst = ctx.resolve(command.dst)
+        src = ctx.resolve_within_workspace(command.src)
+        dst = ctx.resolve_within_workspace(command.dst)
         _require_exists(src)
         if Path(dst).exists() and not command.overwrite:
             msg = f"move destination already exists: {dst}"
@@ -97,8 +104,8 @@ def apply_command(command: StructuredCommand, ctx: ExecutionContext) -> ActualEf
             cwd_after=ctx.cwd_logical,
         )
     if isinstance(command, CopyCommand):
-        src = ctx.resolve(command.src)
-        dst = ctx.resolve(command.dst)
+        src = ctx.resolve_within_workspace(command.src)
+        dst = ctx.resolve_within_workspace(command.dst)
         _require_exists(src)
         source_path = Path(src)
         destination_path = Path(dst)
@@ -116,7 +123,7 @@ def apply_command(command: StructuredCommand, ctx: ExecutionContext) -> ActualEf
             shutil.copy2(src, dst)
         return ActualEffects(creates=[dst], cwd_after=ctx.cwd_logical)
     if isinstance(command, RemoveCommand):
-        target = ctx.resolve(command.path)
+        target = ctx.resolve_within_workspace(command.path)
         path = Path(target)
         _require_exists(target)
         if path.is_dir():
@@ -131,7 +138,7 @@ def apply_command(command: StructuredCommand, ctx: ExecutionContext) -> ActualEf
     if isinstance(command, EchoCommand):
         if command.output_path is None:
             return ActualEffects(cwd_after=ctx.cwd_logical)
-        target = ctx.resolve(command.output_path)
+        target = ctx.resolve_within_workspace(command.output_path)
         path = Path(target)
         path.parent.mkdir(parents=True, exist_ok=True)
         existed_before = path.exists()
@@ -144,7 +151,7 @@ def apply_command(command: StructuredCommand, ctx: ExecutionContext) -> ActualEf
             return ActualEffects(updates=[target], cwd_after=ctx.cwd_logical)
         return ActualEffects(creates=[target], cwd_after=ctx.cwd_logical)
     if isinstance(command, ChmodCommand):
-        target = ctx.resolve(command.path)
+        target = ctx.resolve_within_workspace(command.path)
         path = Path(target)
         _require_exists(target)
         mode = _parse_mode(command.mode, path.stat().st_mode)
@@ -159,8 +166,8 @@ def apply_command(command: StructuredCommand, ctx: ExecutionContext) -> ActualEf
             os.chmod(target, mode)
         return ActualEffects(updates=[target], cwd_after=ctx.cwd_logical)
     if isinstance(command, LnCommand):
-        src = ctx.resolve(command.src)
-        dst = ctx.resolve(command.dst)
+        src = ctx.resolve_within_workspace(command.src)
+        dst = ctx.resolve_within_workspace(command.dst)
         _require_exists(src)
         if Path(dst).exists() and not command.force:
             msg = f"link destination already exists: {dst}"
@@ -175,7 +182,7 @@ def apply_command(command: StructuredCommand, ctx: ExecutionContext) -> ActualEf
             return _verify_read_paths(command.paths, ctx)
         updated: list[str] = []
         for relative_path in command.paths:
-            target = ctx.resolve(relative_path)
+            target = ctx.resolve_within_workspace(relative_path)
             _apply_sed_script(target, command.script, command.backup_suffix)
             updated.append(target)
         return ActualEffects(updates=updated, cwd_after=ctx.cwd_logical)
@@ -217,7 +224,7 @@ def effects_match_prediction(predicted: object, actual: ActualEffects) -> bool:
 
 
 def _verify_read_paths(paths: list[str], ctx: ExecutionContext) -> ActualEffects:
-    resolved = [ctx.resolve(path) for path in paths]
+    resolved = [ctx.resolve_within_workspace(path) for path in paths]
     for target in resolved:
         _require_exists(target)
     return ActualEffects(reads=resolved, cwd_after=ctx.cwd_logical)

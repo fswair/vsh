@@ -67,9 +67,14 @@ def simulate_command(command: StructuredCommand, snapshot: WorkspaceSnapshot) ->
         if node is not None:
             reads.extend(node.children)
         journal = AccessJournal(metadata_reads=set(reads))
-        predicted = PredictedEffects(reads=reads, cwd_after=snapshot.session.cwd_logical)
-        decision = "approve"
-        reason = None
+        if not is_within_workspace(target, snapshot.session.workspace_root):
+            predicted = PredictedEffects(reads=[target], cwd_after=snapshot.session.cwd_logical)
+            decision = "reject"
+            reason = "target path escapes workspace root"
+        else:
+            predicted = PredictedEffects(reads=reads, cwd_after=snapshot.session.cwd_logical)
+            decision = "approve"
+            reason = None
     elif isinstance(
         command, CatCommand | HeadCommand | NlCommand | SortCommand | TailCommand | WcCommand
     ):

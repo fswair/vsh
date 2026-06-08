@@ -72,6 +72,18 @@ def test_ls_lists_known_and_unknown_directories(tmp_path: Path) -> None:
     assert len(current.predicted_effects.reads) >= 1
 
 
+def test_ls_rejects_workspace_escape(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    snapshot = _snapshot(workspace)
+
+    for path in ("/", "..", "../outside"):
+        result = simulate_command(LsCommand(path=path), snapshot)
+        assert result.decision == "reject"
+        assert result.reason == "target path escapes workspace root"
+        assert result.execution_eligible is False
+
+
 def test_read_commands_reject_outside_targets(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

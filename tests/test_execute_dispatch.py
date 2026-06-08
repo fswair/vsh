@@ -7,8 +7,10 @@ import pytest
 from vsh.execute.dispatch import ExecutionContext, apply_command
 from vsh.plans.approval import approve_plan
 from vsh.schemas import (
+    CatCommand,
     CopyCommand,
     EchoCommand,
+    LsCommand,
     MkdirCommand,
     MoveCommand,
     RemoveCommand,
@@ -104,3 +106,15 @@ def test_execute_approved_rejects_stale_plan(
     assert execution.revalidation.status == "stale"
     assert execution.reason is not None
     assert "stale" in execution.reason
+
+
+def test_apply_command_rejects_workspace_escape_at_execution_layer(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    ctx = ExecutionContext(workspace_root=str(workspace), cwd_logical=str(workspace))
+
+    with pytest.raises(ValueError, match="path escapes workspace root"):
+        apply_command(LsCommand(path=".."), ctx)
+
+    with pytest.raises(ValueError, match="path escapes workspace root"):
+        apply_command(CatCommand(path="../outside.txt"), ctx)

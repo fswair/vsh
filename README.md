@@ -2,7 +2,7 @@
 
 Validation-first command engine for AI agents operating on workspaces.
 
-`vsh` turns shell-like intent into typed `StructuredCommand` models, simulates side effects on a workspace snapshot graph, approves immutable plans, revalidates filesystem drift, and executes approved plans on the real filesystem.
+`vsh` is not a POSIX shell emulator. It is a **safe command planning and execution control layer** for AI agents: shell-like intent becomes typed `StructuredCommand` models, side effects are simulated on a workspace snapshot, plans are approved, drift is revalidated, and only then are mutations applied to the real filesystem. Read commands validate path access; they do not stream file contents back to the agent today.
 
 ## Install
 
