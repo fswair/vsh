@@ -1,5 +1,5 @@
 [project]
-name = "vsh"
+name = "vbash"
 dynamic = ["version"]
 description = "vsh is a validation-first command engine for agent workspaces."
 readme = "README.md"
