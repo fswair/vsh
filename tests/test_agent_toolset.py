@@ -60,6 +60,7 @@ def test_create_vsh_function_toolset_import_error_is_actionable(
         return real_import_module(name, package)
 
     monkeypatch.setattr(importlib, "import_module", fake_import_module)
+    assert importlib.import_module("json").__name__ == "json"
 
     with pytest.raises(ImportError, match="pydantic-ai is required for vsh.agent"):
         agent_module._load_create_vsh_function_toolset()
@@ -82,6 +83,7 @@ def test_create_vsh_function_toolset_propagates_unrelated_import_errors(
         return real_import_module(name, package)
 
     monkeypatch.setattr(importlib, "import_module", fake_import_module)
+    assert importlib.import_module("json").__name__ == "json"
 
     with pytest.raises(ModuleNotFoundError, match="totally_missing"):
         agent_module._load_create_vsh_function_toolset()

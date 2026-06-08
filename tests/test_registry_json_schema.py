@@ -74,6 +74,11 @@ def test_get_schema_returns_inlined_json_schema() -> None:
     assert schema["title"] == "LsCommand"
 
 
+def test_collect_refs_gathers_ref_values() -> None:
+    assert _collect_refs({"$ref": "#/defs/Foo"}) == ["#/defs/Foo"]
+    assert _collect_refs([{"$ref": "#/a"}, {"b": 1}]) == ["#/a"]
+
+
 def _collect_refs(node: object) -> list[str]:
     refs: list[str] = []
     if isinstance(node, dict):

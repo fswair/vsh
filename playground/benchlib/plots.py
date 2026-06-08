@@ -32,8 +32,8 @@ def write_plots(output_dir: Path, rows: list[BenchmarkStats]) -> list[Path]:
     y_positions = list(range(len(commands)))
     bar_height = 0.24
     for mode_index, mode in enumerate(modes):
-        medians = [by_key.get((cmd, mode)) for cmd in commands]
-        values = [item.median_ms if item else 0.0 for item in medians]
+        mode_stats = [by_key.get((cmd, mode)) for cmd in commands]
+        values = [item.median_ms if item else 0.0 for item in mode_stats]
         offsets = [y + (mode_index - 1) * bar_height for y in y_positions]
         bars = ax.barh(
             offsets,
@@ -43,7 +43,7 @@ def write_plots(output_dir: Path, rows: list[BenchmarkStats]) -> list[Path]:
             color=MODE_COLORS[mode],
             alpha=0.9,
         )
-        for bar, item in zip(bars, medians, strict=True):
+        for bar, item in zip(bars, mode_stats, strict=True):
             if item is None:
                 continue
             ax.text(

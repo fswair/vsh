@@ -293,20 +293,58 @@ def test_find_filters_by_name_and_node_type(tmp_path: Path) -> None:
 def test_find_can_match_symlink_entries(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    source = workspace / "source.txt"
-    source.write_text("x\n", encoding="utf-8")
+    (workspace / "source.txt").write_text("x\n", encoding="utf-8")
     link = workspace / "link.txt"
-    try:
-        os.symlink("source.txt", link)
-    except OSError:
-        pytest.skip("symlink creation unavailable on this platform")
-    if not link.is_symlink():
-        pytest.skip("platform did not create a symlink entry")
 
-    effects = apply_command(FindCommand(path=".", type="symlink"), _ctx(workspace))
+    effects = _run_find_symlink_test(workspace)
 
     assert str(link.resolve()) in _stdout(effects.stdout)
     assert len(effects.reads) >= 2
+
+
+def test_find_skips_when_symlink_creation_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "source.txt").write_text("x\n", encoding="utf-8")
+
+    def fail_symlink(*_args: object, **_kwargs: object) -> None:
+        raise OSError("symlink unavailable")
+
+    monkeypatch.setattr(os, "symlink", fail_symlink)
+
+    with pytest.raises(pytest.skip.Exception, match="symlink creation unavailable"):
+        _run_find_symlink_test(workspace)
+
+
+def test_find_skips_when_symlink_entry_is_not_created(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "source.txt").write_text("x\n", encoding="utf-8")
+    link = workspace / "link.txt"
+    os.symlink("source.txt", link)
+    monkeypatch.setattr(Path, "is_symlink", lambda _self: False)
+
+    with pytest.raises(pytest.skip.Exception, match="platform did not create a symlink entry"):
+        _run_find_symlink_test(workspace)
+
+
+def _run_find_symlink_test(workspace: Path):
+    link = workspace / "link.txt"
+    if not link.exists():
+        try:
+            os.symlink("source.txt", link)
+        except OSError:
+            pytest.skip("symlink creation unavailable on this platform")
+    if not link.is_symlink():
+        pytest.skip("platform did not create a symlink entry")
+
+    return apply_command(FindCommand(path=".", type="symlink"), _ctx(workspace))
 
 
 def test_iter_files_skips_hidden_entries(tmp_path: Path) -> None:
