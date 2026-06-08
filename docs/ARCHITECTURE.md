@@ -20,6 +20,8 @@ simulate(tool_name, snapshot_id, params)
   -> SimulationResult(plan_id, shell_preview, journal, predicted_effects, decision)
 
 approve(plan_id)
+  -> simulate policy checks
+  -> optional approval handlers (visitor)
   -> ApprovalToken
 
 execute_approved(approval_token)
@@ -56,6 +58,30 @@ or `VSH_PROTECTED_PATTERNS_FILE`.
 
 Each result includes an `approval_tier` (`read_only`, `mutation`, `destructive`) and
 `requires_manual_approval`. Use `auto_approve_plan()` only for read-only plans.
+
+## Approval
+
+Simulate policy is the **primary** approval gate. It is computed during simulation and
+re-checked at approval time:
+
+| Check | Where enforced | Typical failure |
+|-------|----------------|-----------------|
+| `execution_eligible` | `approve_plan()` | `ValueError` — rejected simulation, shell preview mismatch, protected paths |
+| `requires_manual_approval` | `approve_plan(auto=True)` | `ValueError` — mutation/destructive tier with auto-approve |
+| `approval_tier` | simulate + approve | Drives manual vs auto approval rules |
+
+**Approval handlers** are an optional second layer. They behave like visitors:
+
+- Registered on `extensions.approval_handlers`.
+- Invoked only when the list is non-empty.
+- Called after simulate policy passes, before an `ApprovalToken` is minted.
+- May veto by raising `ApprovalDeniedError`.
+- Do not replace simulate policy; they cannot approve ineligible plans.
+
+When no handlers are registered, `approve_plan()` mints a token using simulate policy only.
+This keeps default vsh behavior unchanged while allowing org-specific gates (ticketing,
+audit, human-in-the-loop UI, external policy engines) to plug in without forking core
+approval logic.
 
 Mutation commands usually return `approve_with_warning`. Both `approve` and
 `approve_with_warning` are execution-eligible unless `raw_command` fails the shell preview
@@ -94,6 +120,7 @@ Plan JSON stores `command_model_name` so concrete command types round-trip corre
 
 Register optional collaborators on `vsh.extensions.extensions`:
 
+- `ApprovalHandler` — optional approval visitors (`handler(ctx, item)`); see [API.md](API.md#approval-handlers)
 - `ContentHydrator` — lazy file hydration for future content-aware commands
 - `SemanticAnalyzer` — Python/TS checks after execution
 - `ShadowWorkspaceRunner` — external verification tools

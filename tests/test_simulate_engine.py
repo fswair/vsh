@@ -3,6 +3,8 @@ from __future__ import annotations as _annotations
 from pathlib import Path
 from typing import ClassVar
 
+from pytest import MonkeyPatch
+
 from vsh.plans.models import SimulationResult
 from vsh.schemas import (
     CatCommand,
@@ -171,7 +173,7 @@ def test_read_scope_handles_missing_file_and_directory_prefixes(tmp_path: Path) 
 
 
 def test_read_scope_uses_tree_traversal_for_large_subtrees(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     import vsh.simulate.engine as engine_module
 

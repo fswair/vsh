@@ -239,7 +239,10 @@ def _read_scope(snapshot: WorkspaceSnapshot, target: str) -> list[str]:
         return [target]
     if node.kind != "dir":
         return [target]
-    if target == snapshot.session.workspace_root or len(snapshot.nodes) <= _READ_SCOPE_TREE_MIN_NODES:
+    if (
+        target == snapshot.session.workspace_root
+        or len(snapshot.nodes) <= _READ_SCOPE_TREE_MIN_NODES
+    ):
         prefix = f"{target.rstrip('/')}/"
         return [path for path in snapshot.nodes if path == target or path.startswith(prefix)]
     scoped: list[str] = []

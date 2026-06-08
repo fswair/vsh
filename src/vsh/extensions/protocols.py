@@ -1,14 +1,22 @@
 from __future__ import annotations as _annotations
 
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from vsh.snapshot.models import WorkspaceSnapshot
 
+if TYPE_CHECKING:
+    from vsh.plans.approval_models import ApprovalContext, ApproveItem
+
 __all__ = (
+    "ApprovalHandler",
     "ContentHydrator",
     "SemanticAnalyzer",
     "ShadowWorkspaceRunner",
 )
+
+
+class ApprovalHandler(Protocol):
+    def __call__(self, ctx: ApprovalContext, item: ApproveItem) -> None: ...
 
 
 class ContentHydrator(Protocol):

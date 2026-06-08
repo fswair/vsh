@@ -1,5 +1,6 @@
 from __future__ import annotations as _annotations
 
+from .approval_handler import run_approval_handlers
 from .models import ApprovalToken
 from .store import plan_store
 
@@ -15,6 +16,7 @@ def approve_plan(plan_id: str, *, auto: bool = False) -> ApprovalToken:
     if not record.result.execution_eligible:
         reason = record.result.execution_eligibility_reason or "plan is not execution-eligible"
         raise ValueError(f"plan not eligible for approval: {reason}")
+    run_approval_handlers(record, auto=auto)
     return plan_store.approve(plan_id)
 
 
