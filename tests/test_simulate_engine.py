@@ -245,3 +245,33 @@ def test_simulation_result_is_typed(tmp_path: Path) -> None:
     result = simulate_command(PwdCommand(), _snapshot(workspace))
 
     assert isinstance(result, SimulationResult)
+
+
+def test_snapshot_dot_cwd_ignores_process_cwd_for_workspace_commands(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    src = workspace / "src"
+    src.mkdir()
+    (src / "notes.txt").write_text("artifact-demo marker\n", encoding="utf-8")
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.chdir(other)
+
+    snapshot = snapshot_workspace(str(workspace), cwd=".")
+    grep_result = simulate_command(
+        GrepCommand(pattern="artifact-demo", path="src", recursive=True),
+        snapshot,
+    )
+    touch_result = simulate_command(
+        with_execution_reason(TouchCommand(path="src/agent-notes.txt")),
+        snapshot,
+    )
+
+    assert grep_result.decision == "approve"
+    assert touch_result.decision in {"approve", "approve_with_warning"}
+    assert touch_result.decision != "reject"
+    assert "escapes workspace root" not in (grep_result.reason or "")
+    assert "escapes workspace root" not in (touch_result.reason or "")

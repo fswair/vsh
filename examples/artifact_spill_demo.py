@@ -26,9 +26,13 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import logfire
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logfire.configure()
+logfire.instrument_pydantic_ai()
 
 from pydantic_ai.agent import AgentRunResult
 from pydantic_ai.messages import ModelRequest, ToolCallPart, ToolReturnPart

@@ -47,6 +47,40 @@ def test_get_protected_path_label_matches_static_roots() -> None:
     assert get_protected_path_label("/Applications") == "Applications directory"
 
 
+def test_session_from_workspace_root_resolves_relative_cwd_against_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    nested = workspace / "src"
+    nested.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.chdir(other)
+
+    session = SessionState.from_workspace_root(str(workspace), cwd="src")
+
+    assert session.cwd_logical == str(nested.resolve())
+    assert is_within_workspace(session.cwd_logical, session.workspace_root)
+
+
+def test_session_from_workspace_root_dot_cwd_is_workspace_not_process_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.chdir(other)
+
+    session = SessionState.from_workspace_root(str(workspace), cwd=".")
+
+    assert session.cwd_logical == str(workspace.resolve())
+    assert session.cwd_logical != str(other.resolve())
+
+
 def test_session_state_with_cwd_updates_oldpwd(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

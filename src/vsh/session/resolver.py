@@ -42,10 +42,10 @@ def resolve_workspace_path(base: str, candidate: str) -> str:
 
 
 def is_within_workspace(path: str, workspace_root: str) -> bool:
-    resolved_path = _resolved_path(path)
-    resolved_root = _resolved_path(workspace_root)
+    resolved_path = Path(_resolved_path(path)).resolve()
+    resolved_root = Path(_resolved_path(workspace_root)).resolve()
     try:
-        Path(resolved_path).relative_to(resolved_root)
+        resolved_path.relative_to(resolved_root)
     except ValueError:
         return False
     return True

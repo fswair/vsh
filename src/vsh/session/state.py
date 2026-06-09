@@ -1,10 +1,8 @@
 from __future__ import annotations as _annotations
 
-from pathlib import Path
-
 from pydantic import BaseModel, ConfigDict
 
-from .resolver import ensure_safe_workspace_root
+from .resolver import ensure_safe_workspace_root, resolve_workspace_path
 
 
 class SessionState(BaseModel):
@@ -17,12 +15,12 @@ class SessionState(BaseModel):
 
     @classmethod
     def from_workspace_root(cls, workspace_root: str, cwd: str | None = None) -> SessionState:
-        root = Path(ensure_safe_workspace_root(workspace_root))
-        current = root if cwd is None else Path(cwd).expanduser().resolve()
+        root = ensure_safe_workspace_root(workspace_root)
+        current = root if cwd is None else resolve_workspace_path(root, cwd)
         return cls(
-            workspace_root=str(root),
-            cwd_logical=str(current),
-            cwd_physical=str(current),
+            workspace_root=root,
+            cwd_logical=current,
+            cwd_physical=current,
             oldpwd=None,
         )
 

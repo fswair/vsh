@@ -1,17 +1,19 @@
 from __future__ import annotations as _annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import Capability
-from pydantic_ai.messages import ToolCallPart
+from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.tools import RunContext, ToolDefinition
 
 from vsh.artifacts import ArtifactStore, create_artifact_store
 
 from . import _artifact_spill
+from ._tool_names import normalize_agent_tool_name
 from .deps import VshAgentDeps
 from .toolset import _VSH_TOOLSET_INSTRUCTIONS, register_vsh_tools
 
@@ -68,6 +70,27 @@ class VshCapability(Capability[VshAgentDeps]):
     @property
     def workspace_root(self) -> str:
         return self._deps.workspace_root
+
+    async def after_model_request(
+        self,
+        ctx: RunContext[VshAgentDeps],
+        *,
+        request_context: ModelRequestContext,
+        response: ModelResponse,
+    ) -> ModelResponse:
+        new_parts: list[Any] = []
+        changed = False
+        for part in response.parts:
+            if isinstance(part, ToolCallPart):
+                normalized = normalize_agent_tool_name(part.tool_name)
+                if normalized != part.tool_name:
+                    changed = True
+                    new_parts.append(replace(part, tool_name=normalized))
+                    continue
+            new_parts.append(part)
+        if changed:
+            return replace(response, parts=new_parts)
+        return response
 
     async def after_tool_execute(
         self,
