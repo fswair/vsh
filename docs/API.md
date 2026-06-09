@@ -238,6 +238,8 @@ Environment:
 | `VSH_ARTIFACT_SPILL_BYTES` | `8192` | Spill threshold for agent tool JSON payloads |
 | `VSH_ARTIFACT_STORE` | `filesystem` | `filesystem` or `memory` (`memory` when `VSH_PERSIST=0`) |
 
+See [Artifacts & execution_reason](ARTIFACTS.md) for the full guide and runnable demo.
+
 ### Legacy toolset
 
 ```python

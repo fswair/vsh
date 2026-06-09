@@ -108,6 +108,9 @@ Filesystem layout: `$VSH_DATA_DIR/artifacts/tool_outputs/{tool_name}_{artifact_i
 a sidecar `.manifest.json` per artifact. `artifact_id` is a lowercase hex string
 (`^[0-9a-f]{8,16}$`).
 
+Full guide: [Artifacts & execution_reason](ARTIFACTS.md). Runnable demo:
+`examples/artifact_spill_demo.py`.
+
 `VSH_MAX_TOUCHED_PATHS` caps how many paths a single simulation may touch.
 
 Each plan stores:

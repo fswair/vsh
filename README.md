@@ -52,6 +52,7 @@ Flow: **search → get_schema → snapshot → simulate → approve → execute_
 
 - [Architecture](https://github.com/fswair/vsh/blob/main/docs/ARCHITECTURE.md) — modules, lifecycle, drift detection, persistence
 - [API reference](https://github.com/fswair/vsh/blob/main/docs/API.md) — public Python/MCP surface
+- [Artifacts & execution_reason](https://github.com/fswair/vsh/blob/main/docs/ARTIFACTS.md) — spill store, agent tools, mutation rationale
 - [CodeMode MCP server](https://github.com/fswair/vsh/blob/main/docs/CODEMODE.md) — discovery-first FastMCP server and prompts
 
 ## MCP
@@ -80,6 +81,9 @@ cp .env.example .env
 # fill in MODEL_NAME and OPENROUTER_API_KEY
 
 uv run python examples/pydantic_ai_agent_demo.py --mode live
+
+# Artifact spill + execution_reason (no API key)
+uv run python examples/artifact_spill_demo.py
 ```
 
 ```python
