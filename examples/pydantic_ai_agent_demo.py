@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""pydantic-ai agent demo using the vsh FunctionToolset."""
+"""pydantic-ai agent demo using the vsh capability."""
 
 # ruff: noqa: E402
 
@@ -14,12 +14,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from pydantic_ai import Agent
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
 
-from vsh.agent import VshAgentDeps, create_vsh_function_toolset
+from vsh.agent import create_vsh_agent
 
 
 def _prepare_workspace(root: Path) -> None:
@@ -126,9 +125,6 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="vsh-pydantic-ai-") as tmp:
         workspace = Path(tmp)
         _prepare_workspace(workspace)
-        deps = VshAgentDeps.from_path(workspace)
-        toolset = create_vsh_function_toolset()
-
         instructions = (
             _live_instructions()
             if args.mode == "live"
@@ -141,16 +137,12 @@ def main() -> None:
         if args.mode == "live":
             model: str | TestModel | FunctionModel = _resolve_live_model(args.model)
         elif args.mode == "tools":
-            model = TestModel()
+            model = TestModel(call_tools=[])
         else:
             model = _build_scripted_model()
 
-        agent: Agent[VshAgentDeps, str] = Agent(
-            model,
-            deps_type=VshAgentDeps,
-            toolsets=[toolset],
-            instructions=instructions,
-        )
+        agent, vsh = create_vsh_agent(model, workspace, instructions=instructions)
+        deps = vsh.deps
 
         print("workspace:", deps.workspace_root)
         print("mode:", args.mode)

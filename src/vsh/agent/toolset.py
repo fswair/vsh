@@ -26,24 +26,23 @@ Workflow:
 Prefer structured params from JSON schemas over raw shell strings.
 """
 
+__all__ = ("create_vsh_function_toolset",)
 
-def create_vsh_function_toolset() -> FunctionToolset[VshAgentDeps]:
-    """Build a pydantic-ai FunctionToolset wrapping the vsh MCP tool surface."""
-    toolset: FunctionToolset[VshAgentDeps] = FunctionToolset(
-        instructions=_VSH_TOOLSET_INSTRUCTIONS,
-    )
 
-    @toolset.tool_plain
+def register_vsh_tools(registrar: Any) -> None:
+    """Register vsh MCP tools on a pydantic-ai FunctionToolset or Capability."""
+
+    @registrar.tool_plain
     def vsh_search(query: str) -> list[dict[str, Any]]:
         """Find vsh command specs by name, tag, alias, or description."""
         return [spec.model_dump() for spec in vsh_tools.search(query)]
 
-    @toolset.tool_plain
+    @registrar.tool_plain
     def vsh_get_schema(name: str) -> dict[str, Any]:
         """Return the JSON schema for a structured vsh command."""
         return vsh_tools.get_schema(name)
 
-    @toolset.tool
+    @registrar.tool
     def vsh_snapshot_workspace(
         ctx: RunContext[VshAgentDeps],
         cwd: str | None = None,
@@ -53,7 +52,7 @@ def create_vsh_function_toolset() -> FunctionToolset[VshAgentDeps]:
         ctx.deps.snapshot_id = payload["snapshot_id"]
         return payload
 
-    @toolset.tool
+    @registrar.tool
     def vsh_simulate(
         ctx: RunContext[VshAgentDeps],
         tool_name: str,
@@ -69,7 +68,7 @@ def create_vsh_function_toolset() -> FunctionToolset[VshAgentDeps]:
         ctx.deps.last_plan_id = result["plan_id"]
         return result
 
-    @toolset.tool
+    @registrar.tool
     def vsh_approve(ctx: RunContext[VshAgentDeps], plan_id: str | None = None) -> dict[str, Any]:
         """Approve a persisted simulation plan."""
         target_plan_id = plan_id or ctx.deps.last_plan_id
@@ -81,7 +80,7 @@ def create_vsh_function_toolset() -> FunctionToolset[VshAgentDeps]:
         ctx.deps.last_approval_token = token["token"]
         return token
 
-    @toolset.tool
+    @registrar.tool
     def vsh_execute_approved(
         ctx: RunContext[VshAgentDeps],
         approval_token: str | None = None,
@@ -93,7 +92,7 @@ def create_vsh_function_toolset() -> FunctionToolset[VshAgentDeps]:
             raise ValueError(msg)
         return vsh_tools.execute_approved(token)
 
-    @toolset.tool
+    @registrar.tool
     def vsh_sandbox(
         ctx: RunContext[VshAgentDeps],
         code: str,
@@ -107,4 +106,11 @@ def create_vsh_function_toolset() -> FunctionToolset[VshAgentDeps]:
             raise ValueError(msg)
         return vsh_tools.vsh_sandbox(code, active_snapshot_id, policy=policy)
 
+
+def create_vsh_function_toolset() -> FunctionToolset[VshAgentDeps]:
+    """Build a standalone FunctionToolset for legacy `toolsets=[...]` wiring."""
+    toolset: FunctionToolset[VshAgentDeps] = FunctionToolset(
+        instructions=_VSH_TOOLSET_INSTRUCTIONS,
+    )
+    register_vsh_tools(toolset)
     return toolset

@@ -44,7 +44,7 @@ The canonical path is **simulate → approve → execute_approved**. There is no
 | `vsh.persistence` | Optional JSON persistence under `VSH_DATA_DIR` |
 | `vsh.extensions` | Optional hooks for hydration and analyzers |
 | `vsh.mcp` | FastMCP tools/resources |
-| `vsh.agent` | pydantic-ai `FunctionToolset` adapter |
+| `vsh.agent` | pydantic-ai `VshCapability` + `FunctionToolset` adapter |
 
 ## Simulation
 
@@ -152,16 +152,27 @@ Resources:
 
 ## Agent integration
 
+Primary API: a pydantic-ai [capability](https://ai.pydantic.dev/capabilities/) bundles
+instructions and tools; workspace runtime state lives on `vsh.deps`.
+
+```python
+from vsh.agent import create_vsh_agent
+
+agent, vsh = create_vsh_agent(os.environ["MODEL_NAME"], "/path/to/workspace")
+result = agent.run_sync("List files safely.", deps=vsh.deps)
+```
+
+For progressive disclosure (CodeMode-style), defer the whole workflow:
+
 ```python
 from pydantic_ai import Agent
-from vsh.agent import VshAgentDeps, create_vsh_function_toolset
+from vsh.agent import VshAgentDeps, VshCapability
 
-deps = VshAgentDeps.from_path("/path/to/workspace")
-agent = Agent(
-    os.environ["MODEL_NAME"],
-    deps_type=VshAgentDeps,
-    toolsets=[create_vsh_function_toolset()],
-)
+vsh = VshCapability("/path/to/workspace", defer_loading=True)
+agent = Agent(model, deps_type=VshAgentDeps, capabilities=[vsh])
+result = agent.run_sync("List files safely.", deps=vsh.deps)
 ```
+
+Legacy `toolsets=[create_vsh_function_toolset()]` remains available.
 
 See `examples/pydantic_ai_agent_demo.py` for `.env` loading and live mode.

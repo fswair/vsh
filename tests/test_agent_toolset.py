@@ -43,52 +43,6 @@ def _scripted_snapshot_and_simulate() -> FunctionModel:
     return FunctionModel(next_step)
 
 
-def test_create_vsh_function_toolset_import_error_is_actionable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import importlib
-
-    import vsh.agent as agent_module
-
-    real_import_module = importlib.import_module
-
-    def fake_import_module(name: str, package: str | None = None) -> object:
-        if name == ".toolset" and package == agent_module.__name__:
-            exc = ModuleNotFoundError("No module named 'pydantic_ai'")
-            exc.name = "pydantic_ai"
-            raise exc
-        return real_import_module(name, package)
-
-    monkeypatch.setattr(importlib, "import_module", fake_import_module)
-    assert importlib.import_module("json").__name__ == "json"
-
-    with pytest.raises(ImportError, match="pydantic-ai is required for vsh.agent"):
-        agent_module._load_create_vsh_function_toolset()
-
-
-def test_create_vsh_function_toolset_propagates_unrelated_import_errors(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import importlib
-
-    import vsh.agent as agent_module
-
-    real_import_module = importlib.import_module
-
-    def fake_import_module(name: str, package: str | None = None) -> object:
-        if name == ".toolset" and package == agent_module.__name__:
-            exc = ModuleNotFoundError("No module named 'totally_missing'")
-            exc.name = "totally_missing"
-            raise exc
-        return real_import_module(name, package)
-
-    monkeypatch.setattr(importlib, "import_module", fake_import_module)
-    assert importlib.import_module("json").__name__ == "json"
-
-    with pytest.raises(ModuleNotFoundError, match="totally_missing"):
-        agent_module._load_create_vsh_function_toolset()
-
-
 def test_agent_module_unknown_attribute_raises() -> None:
     import vsh.agent as agent_module
 

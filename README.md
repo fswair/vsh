@@ -83,15 +83,10 @@ uv run python examples/pydantic_ai_agent_demo.py --mode live
 ```
 
 ```python
-from pydantic_ai import Agent
-from vsh.agent import VshAgentDeps, create_vsh_function_toolset
+from vsh.agent import create_vsh_agent
 
-deps = VshAgentDeps.from_path("/path/to/workspace")
-agent = Agent(
-    os.environ["MODEL_NAME"],
-    deps_type=VshAgentDeps,
-    toolsets=[create_vsh_function_toolset()],
-)
+agent, vsh = create_vsh_agent(os.environ["MODEL_NAME"], "/path/to/workspace")
+result = agent.run_sync("List files safely.", deps=vsh.deps)
 ```
 
 ## Configuration

@@ -183,16 +183,46 @@ extensions.content_hydrator = MyHydrator()
 
 See [Approval handlers](#approval-handlers) for the optional approval visitor API.
 
-## Agent toolset
+## Agent capability
+
+Primary pydantic-ai integration. [`VshCapability`](https://ai.pydantic.dev/capabilities/)
+bundles workflow instructions and function tools. Workspace runtime state is on
+`vsh.deps` (`VshAgentDeps`).
 
 ```python
-from vsh.agent import VshAgentDeps, create_vsh_function_toolset
+from vsh.agent import create_vsh_agent
+
+agent, vsh = create_vsh_agent(model, "/path/to/workspace")
+result = agent.run_sync("Inspect the workspace.", deps=vsh.deps)
+```
+
+Or construct the capability directly:
+
+```python
+from pydantic_ai import Agent
+from vsh.agent import VshAgentDeps, VshCapability
+
+vsh = VshCapability("/path/to/workspace")
+agent = Agent(model, deps_type=VshAgentDeps, capabilities=[vsh])
+result = agent.run_sync("Inspect the workspace.", deps=vsh.deps)
+```
+
+Set `defer_loading=True` to collapse the workflow to a catalog entry until the model
+calls pydantic-ai's `load_capability` tool — useful when vsh shares an agent with other
+workflows.
+
+Registered tools: `vsh_search`, `vsh_get_schema`, `vsh_snapshot_workspace`,
+`vsh_simulate`, `vsh_sandbox`, `vsh_approve`, `vsh_execute_approved`.
+
+### Legacy toolset
+
+```python
+from vsh.agent import create_vsh_function_toolset
 
 toolset = create_vsh_function_toolset()
 ```
 
-Registered tools: `vsh_search`, `vsh_get_schema`, `vsh_snapshot_workspace`,
-`vsh_simulate`, `vsh_sandbox`, `vsh_approve`, `vsh_execute_approved`.
+Prefer `VshCapability` / `create_vsh_agent` for new agents.
 
 ## Sandbox (Monty batch execution)
 
