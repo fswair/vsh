@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --all-groups
+      - run: uv run ruff check
+      - run: uv run ruff format --check
+      - run: uv run ty check
+      - run: uv run basedpyright
+      - run: uv run pytest
+
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --all-groups
+      - run: uv run python playground/benchmark_vsh_vs_native.py --iterations 5 --file-count 50 --no-plots
+      - run: uv run python playground/benchmark_vsh_vs_native.py --iterations 3 --file-count 1000 --file-size 128 --no-plots
+      - run: uv run python playground/benchmark_vsh_vs_native.py --iterations 1 --file-count 10000 --file-size 32 --no-plots --modes native

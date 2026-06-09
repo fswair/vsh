@@ -38,9 +38,11 @@ The live demo uses a low `artifact_spill_bytes` threshold (default 1024) so recu
 | Important outputs get lost among spills | `vsh_index_artifact` + `vsh_search_artifacts` |
 | No audit trail for *why* a write was requested | `execution_reason` on every `StructuredCommand` |
 
-**Scope (current phase):** spill applies to **pydantic-ai `vsh_*` agent tools** only. MCP
-tool responses are not spilled yet. `execution_reason` is enforced everywhere simulation
-runs (Python, MCP, sandbox, agent).
+**Scope (current phase):** spill runs in **pydantic-ai agent hooks** (`VshCapability`).
+Candidate tool names include legacy `vsh_*` tools and CodeMode MCP tools when wired through
+the agent (`apply`, `apply_batch`, `simulate`, `vsh_sandbox`, `search`, `get_schema` — see
+`src/vsh/agent/_artifact_spill.py`). Standalone MCP server responses are **not** spilled
+yet. `execution_reason` is enforced everywhere simulation runs (Python, MCP, sandbox, agent).
 
 ## Architecture
 
@@ -105,8 +107,9 @@ Example:
 | Rule | Behavior |
 |------|----------|
 | Name starts with `vsh_` | Candidate for spill |
+| CodeMode MCP tools via agent (`apply`, `apply_batch`, `simulate`, …) | Candidate when listed in `_CODEMODE_MCP_SPILL_TOOLS` |
 | `vsh_get_artifact`, `vsh_index_artifact`, `vsh_search_artifacts` | **Never** spill (loop prevention) |
-| Non-`vsh_*` tools | Passthrough |
+| Standalone MCP client (no agent hooks) | Passthrough — full JSON returned |
 | Already an `ArtifactRef` shape (`artifact_id` + `content_hash`) | Passthrough |
 
 ### Threshold

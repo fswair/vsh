@@ -1,7 +1,8 @@
 from __future__ import annotations as _annotations
 
 import json
-from collections.abc import Iterable
+import statistics
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from genai_prices import calc_price
@@ -10,11 +11,13 @@ from pydantic_ai.usage import RunUsage
 
 __all__ = (
     "AgentRunMetrics",
+    "MultiRunSummary",
     "compare_metrics",
     "estimate_history_bytes",
     "estimate_tool_return_bytes",
     "model_ref_for_pricing",
     "request_usage_breakdown",
+    "summarize_multi_run",
     "usage_cost_usd",
 )
 
@@ -115,6 +118,39 @@ def usage_cost_usd(usage: RunUsage, model_name: str) -> float | None:
     except Exception:  # noqa: BLE001 — pricing tables may not list every model
         return None
     return float(calculation.total_price)
+
+
+@dataclass(frozen=True, slots=True)
+class MultiRunSummary:
+    runs: int
+    vsh_duration_ms_median: float
+    native_duration_ms_median: float
+    vsh_input_tokens_median: float
+    native_input_tokens_median: float
+    vsh_tool_calls_median: float
+    native_tool_calls_median: float
+    vsh_validation_passed_all: bool
+    native_validation_passed_all: bool
+
+
+def _median(values: Sequence[float | int]) -> float:
+    if not values:
+        return 0.0
+    return float(statistics.median(values))
+
+
+def summarize_multi_run(comparisons: Sequence[MetricsComparison]) -> MultiRunSummary:
+    return MultiRunSummary(
+        runs=len(comparisons),
+        vsh_duration_ms_median=_median([item.vsh.duration_ms for item in comparisons]),
+        native_duration_ms_median=_median([item.native.duration_ms for item in comparisons]),
+        vsh_input_tokens_median=_median([item.vsh.input_tokens for item in comparisons]),
+        native_input_tokens_median=_median([item.native.input_tokens for item in comparisons]),
+        vsh_tool_calls_median=_median([item.vsh.tool_call_count for item in comparisons]),
+        native_tool_calls_median=_median([item.native.tool_call_count for item in comparisons]),
+        vsh_validation_passed_all=all(item.vsh.validation_passed for item in comparisons),
+        native_validation_passed_all=all(item.native.validation_passed for item in comparisons),
+    )
 
 
 def compare_metrics(vsh: AgentRunMetrics, native: AgentRunMetrics) -> MetricsComparison:

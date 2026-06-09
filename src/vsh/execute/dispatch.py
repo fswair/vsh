@@ -9,6 +9,7 @@ from pathlib import Path
 from vsh.effects import ActualEffects
 from vsh.perf.timing import perf_counter_ns, stamp_execution_time
 from vsh.schemas import (
+    ApplyPatchCommand,
     CatCommand,
     CdCommand,
     ChmodCommand,
@@ -17,6 +18,8 @@ from vsh.schemas import (
     DuCommand,
     EchoCommand,
     FindCommand,
+    GitDiffCommand,
+    GitStatusCommand,
     GrepCommand,
     HeadCommand,
     LnCommand,
@@ -189,6 +192,27 @@ def _apply_command_body(command: StructuredCommand, ctx: ExecutionContext) -> Ac
         else:
             os.link(src, dst)
         return ActualEffects(creates=[dst], cwd_after=ctx.cwd_logical)
+    if isinstance(command, ApplyPatchCommand):
+        from vsh.execute.patch import apply_patch_to_file
+
+        target = ctx.resolve_within_workspace(command.path)
+        existed_before = Path(target).exists()
+        apply_patch_to_file(command, target)
+        if existed_before:
+            return ActualEffects(updates=[target], cwd_after=ctx.cwd_logical)
+        return ActualEffects(creates=[target], cwd_after=ctx.cwd_logical)
+    if isinstance(command, GitStatusCommand):
+        from vsh.execute.git_commands import run_git_status
+
+        resolved_path = ctx.resolve_within_workspace(command.path)
+        stdout = run_git_status(resolved_path)
+        return ActualEffects(reads=[resolved_path], cwd_after=ctx.cwd_logical, stdout=stdout)
+    if isinstance(command, GitDiffCommand):
+        from vsh.execute.git_commands import run_git_diff
+
+        workspace_path = ctx.resolve_within_workspace(command.path)
+        stdout = run_git_diff(command, workspace_path)
+        return ActualEffects(reads=[workspace_path], cwd_after=ctx.cwd_logical, stdout=stdout)
     if isinstance(command, CurlCommand):
         from .http_commands import apply_curl_command
 

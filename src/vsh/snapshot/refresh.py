@@ -2,7 +2,8 @@ from __future__ import annotations as _annotations
 
 from pathlib import Path
 
-from vsh.snapshot.builder import IGNORED_DIRECTORIES, node_for_path
+from vsh.snapshot.builder import node_for_path
+from vsh.snapshot.constants import IGNORED_DIRECTORIES
 from vsh.snapshot.models import SnapshotNode, WorkspaceSnapshot
 
 __all__ = ("refresh_directory_children", "refresh_snapshot_paths")

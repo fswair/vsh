@@ -78,6 +78,15 @@ def time_vsh_apply(
     return timings
 
 
+def _with_benchmark_execution_reason(command: Any) -> Any:
+    reason = getattr(command, "execution_reason", None)
+    if isinstance(reason, str) and reason.strip():
+        return command
+    if hasattr(command, "model_copy"):
+        return command.model_copy(update={"execution_reason": "playground benchmark"})
+    return command
+
+
 def time_vsh_full(
     workspace: Path,
     command_builder: Callable[[Path], Any],
@@ -89,8 +98,11 @@ def time_vsh_full(
     for _ in range(iterations):
         if prepare is not None:
             prepare(workspace)
-        command = command_builder(workspace)
+        command = _with_benchmark_execution_reason(command_builder(workspace))
         start_ns = perf_counter_ns()
+        from vsh.snapshot.cache import snapshot_cache
+
+        snapshot_cache.clear()
         snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
         result = simulate_command(command, snapshot)
         token = approve_plan(result.plan_id)

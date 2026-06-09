@@ -1,0 +1,76 @@
+{
+  "metadata": {
+    "generated_at": "2026-06-09T20:59:36.912593+00:00",
+    "model": "openrouter:google/gemini-3-flash-preview",
+    "codemode_mcp": true,
+    "vsh_prompt_chars": 932,
+    "native_prompt_chars": 932,
+    "runs": 3,
+    "git_commit": "c60cfe5e5784a2c21a32f5d52066a5b46e049f71",
+    "baseline_dir": "/Users/mert/Desktop/vsh/playground/reports/baseline-pre-roadmap-20260609-193413"
+  },
+  "summary": {
+    "runs": 3,
+    "vsh_duration_ms_median": 8151.210334,
+    "native_duration_ms_median": 8410.481209,
+    "vsh_input_tokens_median": 3416.0,
+    "native_input_tokens_median": 4127.0,
+    "vsh_tool_calls_median": 3.0,
+    "native_tool_calls_median": 5.0,
+    "vsh_validation_passed_all": true,
+    "native_validation_passed_all": true
+  },
+  "runs": [
+    {
+      "input_tokens": 3175,
+      "cache_write_tokens": 0,
+      "cache_read_tokens": 0,
+      "output_tokens": 674,
+      "input_audio_tokens": 0,
+      "cache_audio_read_tokens": 0,
+      "output_audio_tokens": 0,
+      "details": {
+        "is_byok": 0,
+        "audio_tokens": 0,
+        "reasoning_tokens": 0,
+        "image_tokens": 0
+      },
+      "requests": 4,
+      "tool_calls": 3
+    },
+    {
+      "input_tokens": 3416,
+      "cache_write_tokens": 0,
+      "cache_read_tokens": 0,
+      "output_tokens": 809,
+      "input_audio_tokens": 0,
+      "cache_audio_read_tokens": 0,
+      "output_audio_tokens": 0,
+      "details": {
+        "is_byok": 0,
+        "audio_tokens": 0,
+        "reasoning_tokens": 0,
+        "image_tokens": 0
+      },
+      "requests": 4,
+      "tool_calls": 3
+    },
+    {
+      "input_tokens": 4606,
+      "cache_write_tokens": 0,
+      "cache_read_tokens": 0,
+      "output_tokens": 819,
+      "input_audio_tokens": 0,
+      "cache_audio_read_tokens": 0,
+      "output_audio_tokens": 0,
+      "details": {
+        "is_byok": 0,
+        "audio_tokens": 0,
+        "reasoning_tokens": 0,
+        "image_tokens": 0
+      },
+      "requests": 5,
+      "tool_calls": 4
+    }
+  ]
+}

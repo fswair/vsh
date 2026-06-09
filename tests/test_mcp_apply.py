@@ -130,7 +130,10 @@ def test_apply_batch_reuses_updated_snapshot_between_steps(tmp_path: Path) -> No
     assert result["completed_steps"] == 5
     assert [step["status"] for step in result["steps"]] == ["applied"] * 5
     grep_step = result["steps"][2]
-    assert "bench-marker-42" in (grep_step["stdout"] or "")
+    assert grep_step.get("tool_name") == "GrepCommand"
+    grep_stdout = grep_step["stdout"] or ""
+    assert "bench-marker-42" in grep_stdout
+    assert "summary.md" in grep_stdout
     snapshot = runtime.get_snapshot(result["snapshot_id"])
     assert str((workspace / "bench" / "output" / "summary.md").resolve()) in snapshot.nodes
     assert str((workspace / "bench" / "output" / "status.json").resolve()) in snapshot.nodes
@@ -278,6 +281,64 @@ def test_apply_batch_reports_bad_step_params(tmp_path: Path) -> None:
     assert result["status"] == "error"
     assert result["completed_steps"] == 1
     assert result["steps"][0]["reason"] == "step params must be a dict"
+    assert result["steps"][0]["error_code"] == "invalid_step"
+
+
+def test_apply_batch_normalizes_baseline_directory_and_file_path_aliases(tmp_path: Path) -> None:
+    """Regression for pre-roadmap baseline param aliases that caused agent retries."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    result = tools.apply_batch(
+        [
+            {
+                "tool_name": "vsh_mkdir",
+                "params": {"directory": "bench/output/", "parents": True},
+                "execution_reason": "create output directory",
+            },
+            {
+                "tool_name": "vsh_echo",
+                "params": {
+                    "content": "marker: bench-marker-42\\n",
+                    "file_path": "bench/output/summary.md",
+                },
+                "execution_reason": "write marker",
+            },
+            {
+                "tool_name": "vsh_grep",
+                "params": {
+                    "pattern": "bench-marker-42",
+                    "root_directory": "bench/output/",
+                    "recursive": True,
+                },
+            },
+            {
+                "tool_name": "vsh_list",
+                "params": {"directory": "bench/output/"},
+            },
+        ],
+        workspace_root=str(workspace),
+        cwd=".",
+    )
+
+    assert result["status"] == "ok"
+    assert [step["status"] for step in result["steps"]] == ["applied"] * 4
+    assert "bench-marker-42" in (result["steps"][2]["stdout"] or "")
+
+
+def test_apply_unknown_tool_includes_error_code_and_hint(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    receipt = tools.apply(
+        "vsh_missing",
+        {},
+        workspace_root=str(workspace),
+        cwd=".",
+    )
+
+    assert receipt["error_code"] == "unknown_tool"
+    assert "hint" in receipt
 
 
 def test_apply_batch_can_continue_after_error(tmp_path: Path) -> None:

@@ -1,10 +1,12 @@
 from __future__ import annotations as _annotations
 
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from user_agent import generate_user_agent
+
+from vsh.http.ssrf import validate_outbound_url
 
 __all__ = (
     "HttpFetchResult",
@@ -36,7 +38,7 @@ def validate_http_url(url: str) -> str:
     if not parsed.netloc:
         msg = f"URL is missing a host: {url!r}"
         raise ValueError(msg)
-    return url.strip()
+    return validate_outbound_url(url.strip())
 
 
 def build_request_headers(headers: dict[str, str] | None) -> dict[str, str]:
@@ -118,13 +120,27 @@ def fetch_http(
     if content is not None and isinstance(content, str):
         content = content.encode("utf-8")
 
-    with httpx.Client(follow_redirects=follow_redirects, timeout=timeout_secs) as client:
+    with httpx.Client(follow_redirects=False, timeout=timeout_secs) as client:
         response = client.request(
             normalized_method,
             validated_url,
             headers=request_headers,
             content=content,
         )
+        if follow_redirects:
+            hops = 0
+            while 300 <= response.status_code < 400 and hops < 5:
+                location = response.headers.get("location")
+                if location is None:
+                    break
+                next_url = validate_http_url(urljoin(str(response.url), location))
+                response = client.request(
+                    normalized_method,
+                    next_url,
+                    headers=request_headers,
+                    content=content,
+                )
+                hops += 1
 
     if fail_on_error:
         response.raise_for_status()

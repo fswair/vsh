@@ -47,23 +47,29 @@ def _pad_to_length(text: str, target_len: int, *, pad_label: str) -> str:
 
 def build_scenario_prompts() -> ScenarioPrompts:
     vsh_body = """\
-Complete this workspace checklist using vsh CodeMode MCP tools only.
-Prefer one apply_batch call for the full workflow. Do not use raw shell commands.
+Complete this workspace checklist with exactly ONE apply_batch call. No raw shell.
 
-Checklist:
-1) Create bench/output/ if missing.
-2) Write bench/output/summary.md containing exactly one line: marker: bench-marker-42
-3) Recursive grep for bench-marker-42; confirm summary.md is in the hits.
-4) Write bench/output/status.json with JSON:
-   {"marker":"bench-marker-42","phase":"complete"}
-5) List bench/output/ and confirm summary.md and status.json exist.
+Checklist (all steps in the single batch):
+1) vsh_mkdir path=bench/output parents=true
+2) vsh_echo output_path=bench/output/summary.md text=marker: bench-marker-42
+3) vsh_grep pattern=bench-marker-42 path=bench/output recursive=true
+4) vsh_echo output_path=bench/output/status.json text={"marker":"bench-marker-42","phase":"complete"}
+5) vsh_list path=bench/output
+
+Example (use this shape; adjust only if receipts report errors):
+apply_batch steps=[
+  {tool_name:vsh_mkdir, execution_reason:..., params:{path:bench/output, parents:true}},
+  {tool_name:vsh_echo, execution_reason:..., params:{output_path:bench/output/summary.md, text:marker: bench-marker-42}},
+  {tool_name:vsh_grep, params:{pattern:bench-marker-42, path:bench/output, recursive:true}},
+  {tool_name:vsh_echo, execution_reason:..., params:{output_path:bench/output/status.json, text:{"marker":"bench-marker-42","phase":"complete"}}},
+  {tool_name:vsh_list, params:{path:bench/output}}
+]
 
 Rules:
-- Use apply_batch steps with tool_name/params. Use vsh_mkdir, vsh_echo, vsh_grep, vsh_echo, vsh_list.
-- Every mutation step MUST include execution_reason.
-- Do not create files outside bench/output/ except directories needed to reach it.
-- Reuse the returned snapshot_id; do not call snapshot_workspace unless apply_batch fails.
-- Finish with a short summary of receipts and whether each step passed.
+- Exactly one apply_batch. If status is ok, stop — do not retry grep with shell.
+- Mutations require execution_reason. Params: path, output_path, text/content only.
+- Grep stdout containing the marker and summary.md path confirms step 3.
+- Finish with a short receipt summary.
 """
 
     native_body = """\
@@ -90,8 +96,8 @@ Rules:
     native_user = _pad_to_length(native_body, target_len, pad_label="native-checklist")
 
     vsh_system = """\
-You are a vsh CodeMode agent. Follow simulate-before-execute for every filesystem change.
-For known benchmark steps, use apply_batch directly and keep verbosity compact.
+You are a vsh CodeMode agent. For this benchmark, issue exactly one apply_batch with all
+five steps, then answer from the receipts. Never call apply_batch twice. Never use shell.
 """
     native_system = """\
 You are a workspace agent with structured filesystem tools (mkdir, write_file, read_file,

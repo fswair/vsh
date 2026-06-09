@@ -1,0 +1,219 @@
+{
+  "model": "openrouter:google/gemini-3-flash-preview",
+  "workspace": "/var/folders/9t/dwwzwmw57xg7yyml_2jtb9lc0000gn/T/vsh-agent-compare-zhutf2rp",
+  "metadata": {
+    "generated_at": "2026-06-09T21:05:55.508771+00:00",
+    "model": "openrouter:google/gemini-3-flash-preview",
+    "codemode_mcp": true,
+    "vsh_prompt_chars": 1324,
+    "native_prompt_chars": 1324,
+    "runs": 1,
+    "git_commit": "c60cfe5e5784a2c21a32f5d52066a5b46e049f71"
+  },
+  "comparison": {
+    "vsh": {
+      "mode": "vsh_codemode",
+      "duration_ms": 5055.095458,
+      "usage": {
+        "input_tokens": 1955,
+        "cache_write_tokens": 0,
+        "cache_read_tokens": 0,
+        "output_tokens": 416,
+        "input_audio_tokens": 0,
+        "cache_audio_read_tokens": 0,
+        "output_audio_tokens": 0,
+        "details": {
+          "is_byok": 0,
+          "audio_tokens": 0,
+          "reasoning_tokens": 0,
+          "image_tokens": 0
+        },
+        "requests": 2,
+        "tool_calls": 1
+      },
+      "tool_names": [
+        "apply_batch"
+      ],
+      "tool_calls": [
+        {
+          "tool": "apply_batch",
+          "args": {
+            "steps": [
+              {
+                "params": {
+                  "parents": true,
+                  "path": "bench/output"
+                },
+                "execution_reason": "Creating the benchmark output directory as required by the checklist.",
+                "tool_name": "vsh_mkdir"
+              },
+              {
+                "tool_name": "vsh_echo",
+                "execution_reason": "Saving the benchmark marker to a summary file.",
+                "params": {
+                  "output_path": "bench/output/summary.md",
+                  "text": "marker: bench-marker-42"
+                }
+              },
+              {
+                "tool_name": "vsh_grep",
+                "params": {
+                  "recursive": true,
+                  "pattern": "bench-marker-42",
+                  "path": "bench/output"
+                }
+              },
+              {
+                "execution_reason": "Documenting the completion status in JSON format.",
+                "params": {
+                  "output_path": "bench/output/status.json",
+                  "text": "{\"marker\":\"bench-marker-42\",\"phase\":\"complete\"}"
+                },
+                "tool_name": "vsh_echo"
+              },
+              {
+                "tool_name": "vsh_list",
+                "params": {
+                  "path": "bench/output"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request_usages": [
+        {
+          "input_tokens": 863,
+          "output_tokens": 231,
+          "total_tokens": 1094
+        },
+        {
+          "input_tokens": 1092,
+          "output_tokens": 185,
+          "total_tokens": 1277
+        }
+      ],
+      "history_bytes": 8139,
+      "tool_return_bytes": 372,
+      "tool_return_count": 1,
+      "output": "The checklist was partially executed via `apply_batch`. Despite a signal-related error occurring during the `vsh_grep` step (likely due to environment constraints on that specific tool execution), the primary mutation steps for directory creation and initial file writing were successful.\n\n**Receipt Summary:**\n1.  **vsh_mkdir**: Successfully created `bench/output`.\n2.  **vsh_echo**: Successfully created `bench/output/summary.md` with the marker.\n3.  **vsh_grep**: Failed with a signal error (interrupting the batch execution).\n4.  **vsh_echo/vsh_list**: These steps were not reached due to the batch failure on step 3.\n\nAs per the instruction to only use exactly one `apply_batch` and stop if an error occurs rather than retrying via shell, the process concludes here.",
+      "validation_passed": false,
+      "validation_errors": [
+        "missing file: bench/output/status.json"
+      ],
+      "cost_usd": null
+    },
+    "native": {
+      "mode": "native_fs_tools",
+      "duration_ms": 6982.937958,
+      "usage": {
+        "input_tokens": 3962,
+        "cache_write_tokens": 0,
+        "cache_read_tokens": 0,
+        "output_tokens": 247,
+        "input_audio_tokens": 0,
+        "cache_audio_read_tokens": 0,
+        "output_audio_tokens": 0,
+        "details": {
+          "is_byok": 0,
+          "audio_tokens": 0,
+          "reasoning_tokens": 0,
+          "image_tokens": 0
+        },
+        "requests": 6,
+        "tool_calls": 5
+      },
+      "tool_names": [
+        "mkdir",
+        "write_file",
+        "grep",
+        "write_file",
+        "list_dir"
+      ],
+      "tool_calls": [
+        {
+          "tool": "mkdir",
+          "args": {
+            "path": "bench/output"
+          }
+        },
+        {
+          "tool": "write_file",
+          "args": {
+            "content": "marker: bench-marker-42",
+            "path": "bench/output/summary.md"
+          }
+        },
+        {
+          "tool": "grep",
+          "args": {
+            "path": ".",
+            "recursive": true,
+            "pattern": "bench-marker-42"
+          }
+        },
+        {
+          "tool": "write_file",
+          "args": {
+            "path": "bench/output/status.json",
+            "content": "{\"marker\":\"bench-marker-42\",\"phase\":\"complete\"}"
+          }
+        },
+        {
+          "tool": "list_dir",
+          "args": {
+            "path": "bench/output"
+          }
+        }
+      ],
+      "request_usages": [
+        {
+          "input_tokens": 572,
+          "output_tokens": 16,
+          "total_tokens": 588
+        },
+        {
+          "input_tokens": 592,
+          "output_tokens": 35,
+          "total_tokens": 627
+        },
+        {
+          "input_tokens": 637,
+          "output_tokens": 29,
+          "total_tokens": 666
+        },
+        {
+          "input_tokens": 678,
+          "output_tokens": 41,
+          "total_tokens": 719
+        },
+        {
+          "input_tokens": 729,
+          "output_tokens": 18,
+          "total_tokens": 747
+        },
+        {
+          "input_tokens": 754,
+          "output_tokens": 108,
+          "total_tokens": 862
+        }
+      ],
+      "history_bytes": 13073,
+      "tool_return_bytes": 222,
+      "tool_return_count": 5,
+      "output": "Summary of tool calls and step results:\n1. `mkdir` (bench/output): Passed.\n2. `write_file` (bench/output/summary.md): Passed.\n3. `grep` (pattern=bench-marker-42): Passed (confirmed in summary.md).\n4. `write_file` (bench/output/status.json): Passed.\n5. `list_dir` (bench/output): Passed (confirmed summary.md and status.json exist).",
+      "validation_passed": true,
+      "validation_errors": [],
+      "cost_usd": null
+    },
+    "input_token_savings_pct": 50.65623422513882,
+    "output_token_savings_pct": -68.42105263157895,
+    "total_token_savings_pct": 43.66832976954146,
+    "history_byte_savings_pct": 37.74191080853668,
+    "duration_savings_pct": 27.60789959176665,
+    "cost_savings_pct": null,
+    "vsh_faster": true,
+    "vsh_cheaper": null,
+    "both_passed": false
+  }
+}

@@ -325,6 +325,18 @@ def test_execute_approved_error_paths(tmp_path: Path) -> None:
     result = simulate_command(with_execution_reason(MkdirCommand(path="pkg")), snapshot)
     token = approve_plan(result.plan_id)
     execute_approved(token.token)
+    with pytest.raises(KeyError, match="unknown approval token"):
+        execute_approved(token.token)
+
+
+def test_execute_approved_rejects_executed_record(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
+    result = simulate_command(with_execution_reason(MkdirCommand(path="pkg")), snapshot)
+    token = approve_plan(result.plan_id)
+    record = plan_store.get_by_token(token.token)
+    record.executed_at_ns = 1
     with pytest.raises(ValueError, match="plan already executed"):
         execute_approved(token.token)
 

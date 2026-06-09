@@ -113,10 +113,43 @@ def extract_tool_calls(messages: Iterable[object]) -> list[dict[str, Any]]:
     return calls
 
 
-def validate_vsh_history(tool_names: list[str]) -> list[str]:
+def _normalized_batch_step_names(tool_calls: list[dict[str, Any]]) -> list[str]:
+    for call in tool_calls:
+        if call.get("tool") != "apply_batch":
+            continue
+        steps = call.get("args", {}).get("steps", {})
+        if not isinstance(steps, list):
+            return []
+        names: list[str] = []
+        for step in steps:
+            if not isinstance(step, dict):
+                return []
+            tool_name = step.get("tool_name")
+            if not isinstance(tool_name, str):
+                return []
+            names.append(_normalize_tool(tool_name))
+        return names
+    return []
+
+
+def validate_vsh_history(
+    tool_names: list[str], tool_calls: list[dict[str, Any]] | None = None
+) -> list[str]:
     errors: list[str] = []
     normalized = [_normalize_tool(name) for name in tool_names]
-    if "apply_batch" in normalized:
+    apply_batch_count = normalized.count("apply_batch")
+    if apply_batch_count == 1:
+        steps = _normalized_batch_step_names(tool_calls or [])
+        if not steps:
+            return errors
+        if any(name in {"vsh_shell", "vsh_run_command"} for name in steps):
+            errors.append("apply_batch used shell-like steps instead of structured vsh tools")
+        expected = ["vsh_mkdir", "vsh_echo", "vsh_grep", "vsh_echo", "vsh_list"]
+        if steps != expected:
+            errors.append(f"unexpected apply_batch step sequence: {steps}")
+        return errors
+    if apply_batch_count > 1:
+        errors.append(f"expected exactly 1 apply_batch, got {apply_batch_count}")
         return errors
     if "apply" in normalized:
         apply_count = normalized.count("apply")
@@ -186,7 +219,7 @@ def validate_run(
 ) -> RunValidation:
     workspace_errors = validate_workspace(workspace)
     if mode == "vsh":
-        history_errors = validate_vsh_history(tool_names)
+        history_errors = validate_vsh_history(tool_names, tool_calls or [])
     else:
         history_errors = validate_native_history(tool_names, tool_calls or [])
     return RunValidation(

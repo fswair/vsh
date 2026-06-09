@@ -6,6 +6,7 @@ from typing import Any, Literal
 from pydantic import ValidationError
 
 from vsh.execute import execute_approved as execute_recorded_plan
+from vsh.mcp.receipts import ApplyReceipt, BatchReceipt
 from vsh.plans import approve_plan, auto_approve_plan
 from vsh.plans.models import ExecutionResult, SimulationResult
 from vsh.registry import get_schema as registry_get_schema
@@ -16,6 +17,14 @@ from vsh.sandbox import SandboxPolicy, run_vsh_sandbox
 from vsh.schemas import CommandSpec
 from vsh.simulate.engine import simulate_command
 from vsh.snapshot.builder import snapshot_workspace as build_snapshot_workspace
+
+ErrorCode = Literal[
+    "unknown_tool",
+    "validation_error",
+    "policy_reject",
+    "drift_stale",
+    "invalid_step",
+]
 
 Verbosity = Literal["compact", "full"]
 
@@ -129,26 +138,33 @@ def apply(
             execution_reason=execution_reason,
         )
     except (KeyError, ValueError, ValidationError) as exc:
-        return _compact_error(
-            tool_name=tool_name,
-            snapshot_id=snapshot.snapshot_id,
-            reason=str(exc),
+        return _validated_apply_receipt(
+            _compact_error(
+                tool_name=tool_name,
+                snapshot_id=snapshot.snapshot_id,
+                reason=str(exc),
+                exc=exc,
+            )
         )
     if not execute or not result.execution_eligible:
-        return _compact_apply_result(
-            result,
-            snapshot_id=snapshot.snapshot_id,
-            execution=None,
-            verbosity=verbosity,
+        return _validated_apply_receipt(
+            _compact_apply_result(
+                result,
+                snapshot_id=snapshot.snapshot_id,
+                execution=None,
+                verbosity=verbosity,
+            )
         )
 
     token = approve_plan(result.plan_id)
     execution = execute_recorded_plan(token.token)
-    return _compact_apply_result(
-        result,
-        snapshot_id=runtime.latest_snapshot_id or snapshot.snapshot_id,
-        execution=execution,
-        verbosity=verbosity,
+    return _validated_apply_receipt(
+        _compact_apply_result(
+            result,
+            snapshot_id=runtime.latest_snapshot_id or snapshot.snapshot_id,
+            execution=execution,
+            verbosity=verbosity,
+        )
     )
 
 
@@ -159,23 +175,40 @@ def apply_batch(
     cwd: str | None = None,
     snapshot_id: str | None = None,
     continue_on_error: bool = False,
+    transactional: bool = False,
     verbosity: Verbosity = "compact",
 ) -> dict[str, Any]:
-    """Run multiple vsh apply steps while reusing the current runtime snapshot."""
+    """Run multiple vsh apply steps while reusing the current runtime snapshot.
+
+    Use one ``apply_batch`` call per agent task. Each step needs ``tool_name``,
+    ``params`` (use ``path``, ``output_path``, ``text``/``content``, ``pattern``),
+    and ``execution_reason`` on mutations. Read steps include ``stdout`` in receipts
+    when output is available.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from vsh.execute.rollback import RollbackSession, restore_session
+
     snapshot = _ensure_snapshot(workspace_root=workspace_root, cwd=cwd, snapshot_id=snapshot_id)
     current_snapshot_id = snapshot.snapshot_id
     receipts: list[dict[str, Any]] = []
+    rollback: RollbackSession | None = None
+    if transactional:
+        rollback = RollbackSession(backup_root=Path(tempfile.mkdtemp(prefix="vsh-rollback-")))
 
     for index, raw_step in enumerate(steps):
         tool_name = str(raw_step.get("tool_name", ""))
         params = raw_step.get("params", {})
         if not isinstance(params, dict):
-            receipt = {
-                "status": "error",
-                "step": index,
-                "tool_name": tool_name,
-                "reason": "step params must be a dict",
-            }
+            receipt = _compact_error(
+                tool_name=tool_name,
+                snapshot_id=current_snapshot_id,
+                reason="step params must be a dict",
+                error_code="invalid_step",
+                hint="each step params must be a JSON object",
+            )
+            receipt["step"] = index
             receipts.append(receipt)
             if not continue_on_error:
                 break
@@ -197,14 +230,20 @@ def apply_batch(
                 tool_name=tool_name,
                 snapshot_id=current_snapshot_id,
                 reason=str(exc),
+                exc=exc,
             )
             receipt["step"] = index
             receipts.append(receipt)
             if not continue_on_error:
+                if rollback is not None:
+                    restore_session(rollback)
                 break
             continue
         execution: ExecutionResult | None = None
         if should_execute and result.execution_eligible:
+            if rollback is not None:
+                for path in _touched_paths(result):
+                    rollback.record(Path(path), Path(path).exists())
             token = approve_plan(result.plan_id)
             execution = execute_recorded_plan(token.token)
             current_snapshot_id = runtime.latest_snapshot_id or current_snapshot_id
@@ -217,21 +256,24 @@ def apply_batch(
         if verbosity == "compact":
             receipt.pop("snapshot_id", None)
             receipt.pop("execution_eligible", None)
-            receipt.pop("tool_name", None)
             receipt.pop("applied", None)
         receipt["step"] = index
         receipts.append(receipt)
         if receipt["status"] not in {"applied", "simulated"} and not continue_on_error:
+            if rollback is not None:
+                restore_session(rollback)
             break
 
-    return {
-        "status": "ok"
-        if all(item["status"] in {"applied", "simulated"} for item in receipts)
-        else "error",
-        "snapshot_id": current_snapshot_id,
-        "completed_steps": len(receipts),
-        "steps": receipts,
-    }
+    return _validated_batch_receipt(
+        {
+            "status": "ok"
+            if all(item["status"] in {"applied", "simulated"} for item in receipts)
+            else "error",
+            "snapshot_id": current_snapshot_id,
+            "completed_steps": len(receipts),
+            "steps": receipts,
+        }
+    )
 
 
 def _ensure_snapshot(
@@ -282,31 +324,53 @@ def _normalize_apply_tool_name(tool_name: str) -> str:
     return aliases.get(tool_name, tool_name)
 
 
+_PATH_ALIASES = ("dir", "directory", "folder", "dir_path")
+_GREP_PATH_ALIASES = ("root", "root_dir", "root_directory", "search_path", "parent")
+_ECHO_OUTPUT_ALIASES = ("output_file", "dest", "filepath", "file", "file_path", "filename")
+
+
+def _sanitize_path_value(value: str) -> str:
+    return value.strip()
+
+
+def _pop_path_alias(params: dict[str, Any], aliases: tuple[str, ...]) -> str | None:
+    for key in aliases:
+        if key in params:
+            value = params.pop(key)
+            if isinstance(value, str):
+                return _sanitize_path_value(value)
+    return None
+
+
 def _normalize_apply_params(tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(params)
-    if tool_name in {"vsh_mkdir", "vsh_list"} and "path" not in normalized and "dir" in normalized:
-        normalized["path"] = normalized.pop("dir")
+    if isinstance(normalized.get("path"), str):
+        normalized["path"] = _sanitize_path_value(normalized["path"])
+    if isinstance(normalized.get("output_path"), str):
+        normalized["output_path"] = _sanitize_path_value(normalized["output_path"])
+    if tool_name in {"vsh_mkdir", "vsh_list"} and "path" not in normalized:
+        path_value = _pop_path_alias(normalized, _PATH_ALIASES)
+        if path_value is not None:
+            normalized["path"] = path_value
     if tool_name == "vsh_mkdir" and "recursive" in normalized:
         normalized["parents"] = normalized.pop("recursive")
     if tool_name == "vsh_mkdir" and "parents" not in normalized:
         normalized["parents"] = True
-    if tool_name == "vsh_grep" and "path" not in normalized and "root" in normalized:
-        normalized["path"] = normalized.pop("root")
-    if tool_name == "vsh_grep" and "path" not in normalized and "root_dir" in normalized:
-        normalized["path"] = normalized.pop("root_dir")
+    if tool_name == "vsh_grep" and "path" not in normalized:
+        path_value = _pop_path_alias(normalized, _GREP_PATH_ALIASES)
+        if path_value is not None:
+            normalized["path"] = path_value
     if tool_name == "vsh_echo":
         if "text" not in normalized and "content" in normalized:
             normalized["text"] = normalized.pop("content")
         if "output_path" not in normalized:
-            if "output_file" in normalized:
-                normalized["output_path"] = normalized.pop("output_file")
-            elif "dest" in normalized:
-                normalized["output_path"] = normalized.pop("dest")
-            elif "filepath" in normalized:
-                normalized["output_path"] = normalized.pop("filepath")
-            elif "file" in normalized:
-                normalized["output_path"] = normalized.pop("file")
-            elif "path" in normalized:
+            moved = False
+            for key in _ECHO_OUTPUT_ALIASES:
+                if key in normalized:
+                    normalized["output_path"] = normalized.pop(key)
+                    moved = True
+                    break
+            if not moved and "path" in normalized:
                 normalized["output_path"] = normalized.pop("path")
         if "output_path" in normalized and "no_newline" not in normalized:
             text = normalized.get("text")
@@ -407,15 +471,79 @@ def _compact_execution(
     }
 
 
-def _compact_error(*, tool_name: str, snapshot_id: str | None, reason: str) -> dict[str, Any]:
-    return {
+def _classify_apply_error(
+    exc: BaseException | None,
+    *,
+    tool_name: str,
+    reason: str,
+    error_code: ErrorCode | None = None,
+) -> tuple[ErrorCode, str | None]:
+    if error_code is not None:
+        return error_code, None
+    if isinstance(exc, KeyError):
+        return "unknown_tool", f"use a registered vsh command name instead of {tool_name!r}"
+    if isinstance(exc, ValidationError):
+        hint = _validation_error_hint(exc, tool_name=tool_name)
+        return "validation_error", hint
+    lowered = reason.lower()
+    if "stale" in lowered or "drift" in lowered:
+        return "drift_stale", "refresh snapshot_id and re-simulate before execute"
+    if "execution_reason" in lowered or "reject" in lowered or "policy" in lowered:
+        return "policy_reject", "include execution_reason for mutation commands"
+    return "validation_error", None
+
+
+def _validation_error_hint(exc: ValidationError, *, tool_name: str) -> str | None:
+    for error in exc.errors():
+        loc = error.get("loc", ())
+        if not loc:
+            continue
+        field = str(loc[-1])
+        if field in _PATH_ALIASES or field in {"directory", "folder", "dir_path"}:
+            return f"use params.path instead of params.{field}"
+        if field in _GREP_PATH_ALIASES or field in {"root_directory", "search_path", "parent"}:
+            return f"use params.path instead of params.{field}"
+        if field in _ECHO_OUTPUT_ALIASES or field in {"file_path", "filename"}:
+            return f"use params.output_path (and params.text or params.content) for {tool_name}"
+    return "check get_schema for required fields"
+
+
+def _compact_error(
+    *,
+    tool_name: str,
+    snapshot_id: str | None,
+    reason: str,
+    exc: BaseException | None = None,
+    error_code: ErrorCode | None = None,
+    hint: str | None = None,
+) -> dict[str, Any]:
+    code, inferred_hint = _classify_apply_error(
+        exc,
+        tool_name=tool_name,
+        reason=reason,
+        error_code=error_code,
+    )
+    receipt: dict[str, Any] = {
         "status": "error",
         "snapshot_id": snapshot_id,
         "tool_name": tool_name,
         "reason": reason,
+        "error_code": code,
         "execution_eligible": False,
         "applied": False,
     }
+    resolved_hint = hint if hint is not None else inferred_hint
+    if resolved_hint is not None:
+        receipt["hint"] = resolved_hint
+    return receipt
+
+
+def _validated_apply_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+    return ApplyReceipt.model_validate(receipt).model_dump(exclude_none=True)
+
+
+def _validated_batch_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+    return BatchReceipt.model_validate(receipt).model_dump(exclude_none=True)
 
 
 def _actual_effect_counts(actual: Any) -> dict[str, int] | None:

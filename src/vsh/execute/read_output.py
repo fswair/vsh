@@ -6,6 +6,12 @@ import re
 import stat
 from pathlib import Path
 
+from vsh.limits import (
+    compile_grep_pattern,
+    grep_max_file_bytes,
+    grep_max_matches,
+    read_max_file_bytes,
+)
 from vsh.schemas import (
     CatCommand,
     DuCommand,
@@ -22,6 +28,7 @@ from vsh.schemas import (
     TailCommand,
     WcCommand,
 )
+from vsh.snapshot.constants import IGNORED_DIRECTORIES
 
 from .dispatch import ExecutionContext
 
@@ -100,7 +107,11 @@ def _render_ls_directory(path: Path, command: LsCommand, *, prefix: str = "") ->
 def _cat_output(command: CatCommand, ctx: ExecutionContext) -> tuple[list[str], str]:
     target = ctx.resolve_within_workspace(command.path)
     _require_exists(target)
-    content = Path(target).read_text(encoding="utf-8")
+    raw = Path(target).read_bytes()
+    if len(raw) > read_max_file_bytes():
+        msg = f"file exceeds read max bytes ({read_max_file_bytes()})"
+        raise ValueError(msg)
+    content = raw.decode("utf-8")
     lines = content.splitlines()
     if command.squeeze_blank:
         lines = [line for index, line in enumerate(lines) if line or index == 0 or lines[index - 1]]
@@ -222,6 +233,7 @@ def _grep_output(command: GrepCommand, ctx: ExecutionContext) -> tuple[list[str]
         ignore_case=command.ignore_case,
         line_number=command.line_number,
         fixed_strings=command.fixed_strings,
+        extended_regexp=command.extended_regexp,
         recursive=command.recursive,
     )
     return reads, "".join(matches)
@@ -306,18 +318,27 @@ def _search_paths(
     ignore_case: bool,
     line_number: bool,
     fixed_strings: bool,
+    extended_regexp: bool = False,
     recursive: bool,
     include_hidden: bool = False,
 ) -> tuple[list[str], list[str]]:
     files = _iter_files(root, recursive=recursive, include_hidden=include_hidden)
     matches: list[str] = []
     reads: list[str] = []
-    flags = re.IGNORECASE if ignore_case else 0
-    compiled = None if fixed_strings else re.compile(pattern, flags)
+    compiled = compile_grep_pattern(
+        pattern,
+        ignore_case=ignore_case,
+        fixed_strings=fixed_strings,
+        extended_regexp=extended_regexp,
+    )
+    max_matches = grep_max_matches()
+    max_file_bytes = grep_max_file_bytes()
     for file_path in files:
         resolved = str(file_path.resolve())
         reads.append(resolved)
         try:
+            if file_path.stat().st_size > max_file_bytes:
+                continue
             lines = file_path.read_text(encoding="utf-8").splitlines()
         except (OSError, UnicodeDecodeError):
             continue
@@ -329,8 +350,10 @@ def _search_paths(
                 matched = compiled.search(line) is not None
             if not matched:
                 continue
-            prefix = f"{file_path}:{line_number_index}:" if line_number else ""
+            prefix = f"{file_path}:{line_number_index}:" if line_number else f"{file_path}:"
             matches.append(f"{prefix}{line}\n")
+            if len(matches) >= max_matches:
+                return matches, sorted(set(reads))
     return matches, sorted(set(reads))
 
 
@@ -340,8 +363,12 @@ def _iter_files(root: Path, *, recursive: bool, include_hidden: bool) -> list[Pa
     files: list[Path] = []
     if recursive:
         for current_root, dirs, filenames in os.walk(root):
+            dirs[:] = [
+                name
+                for name in dirs
+                if name not in IGNORED_DIRECTORIES and (include_hidden or not name.startswith("."))
+            ]
             if not include_hidden:
-                dirs[:] = [name for name in dirs if not name.startswith(".")]
                 filenames = [name for name in filenames if not name.startswith(".")]
             for name in filenames:
                 files.append(Path(current_root) / name)

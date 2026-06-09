@@ -5,6 +5,9 @@ import os
 from pathlib import Path
 from typing import Any
 
+from filelock import FileLock
+
+from vsh.io.atomic import atomic_write_text
 from vsh.plans.models import PlanRecord, SimulationResult
 from vsh.registry import registrations
 from vsh.schemas import StructuredCommand
@@ -25,10 +28,9 @@ class PersistenceStore:
         directory = self.root / "snapshots"
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"{snapshot.snapshot_id}.json"
-        path.write_text(
-            json.dumps(snapshot.model_dump(mode="json"), indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        payload = json.dumps(snapshot.model_dump(mode="json"), indent=2, sort_keys=True)
+        with FileLock(str(path) + ".lock"):
+            atomic_write_text(path, payload)
         return path
 
     def load_snapshot(self, snapshot_id: str) -> WorkspaceSnapshot:
@@ -42,7 +44,9 @@ class PersistenceStore:
         path = directory / f"{record.plan_id}.json"
         payload = record.model_dump(mode="json")
         payload["result"]["command_model_name"] = type(record.result.command).__name__
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        text = json.dumps(payload, indent=2, sort_keys=True)
+        with FileLock(str(path) + ".lock"):
+            atomic_write_text(path, text)
         return path
 
     def load_plan(self, plan_id: str) -> PlanRecord:

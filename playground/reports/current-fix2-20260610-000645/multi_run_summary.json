@@ -1,0 +1,75 @@
+{
+  "metadata": {
+    "generated_at": "2026-06-09T21:06:46.523973+00:00",
+    "model": "openrouter:google/gemini-3-flash-preview",
+    "codemode_mcp": true,
+    "vsh_prompt_chars": 1324,
+    "native_prompt_chars": 1324,
+    "runs": 3,
+    "git_commit": "c60cfe5e5784a2c21a32f5d52066a5b46e049f71"
+  },
+  "summary": {
+    "runs": 3,
+    "vsh_duration_ms_median": 4370.235,
+    "native_duration_ms_median": 7933.301875,
+    "vsh_input_tokens_median": 2098.0,
+    "native_input_tokens_median": 4037.0,
+    "vsh_tool_calls_median": 1.0,
+    "native_tool_calls_median": 5.0,
+    "vsh_validation_passed_all": true,
+    "native_validation_passed_all": true
+  },
+  "runs": [
+    {
+      "input_tokens": 2026,
+      "cache_write_tokens": 0,
+      "cache_read_tokens": 0,
+      "output_tokens": 385,
+      "input_audio_tokens": 0,
+      "cache_audio_read_tokens": 0,
+      "output_audio_tokens": 0,
+      "details": {
+        "is_byok": 0,
+        "audio_tokens": 0,
+        "reasoning_tokens": 0,
+        "image_tokens": 0
+      },
+      "requests": 2,
+      "tool_calls": 1
+    },
+    {
+      "input_tokens": 2101,
+      "cache_write_tokens": 0,
+      "cache_read_tokens": 0,
+      "output_tokens": 372,
+      "input_audio_tokens": 0,
+      "cache_audio_read_tokens": 0,
+      "output_audio_tokens": 0,
+      "details": {
+        "is_byok": 0,
+        "audio_tokens": 0,
+        "reasoning_tokens": 0,
+        "image_tokens": 0
+      },
+      "requests": 2,
+      "tool_calls": 1
+    },
+    {
+      "input_tokens": 2098,
+      "cache_write_tokens": 0,
+      "cache_read_tokens": 0,
+      "output_tokens": 392,
+      "input_audio_tokens": 0,
+      "cache_audio_read_tokens": 0,
+      "output_audio_tokens": 0,
+      "details": {
+        "is_byok": 0,
+        "audio_tokens": 0,
+        "reasoning_tokens": 0,
+        "image_tokens": 0
+      },
+      "requests": 2,
+      "tool_calls": 1
+    }
+  ]
+}

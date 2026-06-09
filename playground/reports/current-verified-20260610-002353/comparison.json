@@ -1,0 +1,217 @@
+{
+  "model": "openrouter:google/gemini-3-flash-preview",
+  "workspace": "/var/folders/9t/dwwzwmw57xg7yyml_2jtb9lc0000gn/T/vsh-agent-compare-b48_opdc",
+  "metadata": {
+    "generated_at": "2026-06-09T21:23:55.138381+00:00",
+    "model": "openrouter:google/gemini-3-flash-preview",
+    "codemode_mcp": true,
+    "vsh_prompt_chars": 1324,
+    "native_prompt_chars": 1324,
+    "runs": 3,
+    "git_commit": "c60cfe5e5784a2c21a32f5d52066a5b46e049f71"
+  },
+  "comparison": {
+    "vsh": {
+      "mode": "vsh_codemode",
+      "duration_ms": 3674.09075,
+      "usage": {
+        "input_tokens": 2093,
+        "cache_write_tokens": 0,
+        "cache_read_tokens": 0,
+        "output_tokens": 360,
+        "input_audio_tokens": 0,
+        "cache_audio_read_tokens": 0,
+        "output_audio_tokens": 0,
+        "details": {
+          "is_byok": 0,
+          "audio_tokens": 0,
+          "reasoning_tokens": 0,
+          "image_tokens": 0
+        },
+        "requests": 2,
+        "tool_calls": 1
+      },
+      "tool_names": [
+        "apply_batch"
+      ],
+      "tool_calls": [
+        {
+          "tool": "apply_batch",
+          "args": {
+            "steps": [
+              {
+                "tool_name": "vsh_mkdir",
+                "execution_reason": "Creating output directory for benchmark results.",
+                "params": {
+                  "parents": true,
+                  "path": "bench/output"
+                }
+              },
+              {
+                "params": {
+                  "output_path": "bench/output/summary.md",
+                  "text": "marker: bench-marker-42"
+                },
+                "execution_reason": "Creating summary file with benchmark marker.",
+                "tool_name": "vsh_echo"
+              },
+              {
+                "params": {
+                  "pattern": "bench-marker-42",
+                  "recursive": true,
+                  "path": "bench/output"
+                },
+                "tool_name": "vsh_grep"
+              },
+              {
+                "params": {
+                  "output_path": "bench/output/status.json",
+                  "text": "{\"marker\":\"bench-marker-42\",\"phase\":\"complete\"}"
+                },
+                "tool_name": "vsh_echo",
+                "execution_reason": "Creating status file to signal completion."
+              },
+              {
+                "params": {
+                  "path": "bench/output"
+                },
+                "tool_name": "vsh_list"
+              }
+            ]
+          }
+        }
+      ],
+      "request_usages": [
+        {
+          "input_tokens": 863,
+          "output_tokens": 223,
+          "total_tokens": 1086
+        },
+        {
+          "input_tokens": 1230,
+          "output_tokens": 137,
+          "total_tokens": 1367
+        }
+      ],
+      "history_bytes": 8171,
+      "tool_return_bytes": 746,
+      "tool_return_count": 1,
+      "output": "I have completed the workspace checklist in a single batch.\n\n**Receipt Summary:**\n1.  **vsh_mkdir**: Created directory `bench/output`.\n2.  **vsh_echo**: Created `bench/output/summary.md` with marker `bench-marker-42`.\n3.  **vsh_grep**: Successfully found `bench-marker-42` in `summary.md`.\n4.  **vsh_echo**: Created `bench/output/status.json` with completion status.\n5.  **vsh_list**: Confirmed both files exist in the `bench/output` directory.",
+      "validation_passed": true,
+      "validation_errors": [],
+      "cost_usd": null
+    },
+    "native": {
+      "mode": "native_fs_tools",
+      "duration_ms": 7496.95775,
+      "usage": {
+        "input_tokens": 4037,
+        "cache_write_tokens": 0,
+        "cache_read_tokens": 0,
+        "output_tokens": 302,
+        "input_audio_tokens": 0,
+        "cache_audio_read_tokens": 0,
+        "output_audio_tokens": 0,
+        "details": {
+          "is_byok": 0,
+          "audio_tokens": 0,
+          "reasoning_tokens": 0,
+          "image_tokens": 0
+        },
+        "requests": 6,
+        "tool_calls": 5
+      },
+      "tool_names": [
+        "mkdir",
+        "write_file",
+        "grep",
+        "write_file",
+        "list_dir"
+      ],
+      "tool_calls": [
+        {
+          "tool": "mkdir",
+          "args": {
+            "path": "bench/output"
+          }
+        },
+        {
+          "tool": "write_file",
+          "args": {
+            "path": "bench/output/summary.md",
+            "content": "marker: bench-marker-42"
+          }
+        },
+        {
+          "tool": "grep",
+          "args": {
+            "pattern": "bench-marker-42",
+            "path": ".",
+            "recursive": true
+          }
+        },
+        {
+          "tool": "write_file",
+          "args": {
+            "path": "bench/output/status.json",
+            "content": "{\"marker\":\"bench-marker-42\",\"phase\":\"complete\"}"
+          }
+        },
+        {
+          "tool": "list_dir",
+          "args": {
+            "path": "bench/output"
+          }
+        }
+      ],
+      "request_usages": [
+        {
+          "input_tokens": 572,
+          "output_tokens": 16,
+          "total_tokens": 588
+        },
+        {
+          "input_tokens": 592,
+          "output_tokens": 35,
+          "total_tokens": 627
+        },
+        {
+          "input_tokens": 637,
+          "output_tokens": 29,
+          "total_tokens": 666
+        },
+        {
+          "input_tokens": 703,
+          "output_tokens": 41,
+          "total_tokens": 744
+        },
+        {
+          "input_tokens": 754,
+          "output_tokens": 18,
+          "total_tokens": 772
+        },
+        {
+          "input_tokens": 779,
+          "output_tokens": 163,
+          "total_tokens": 942
+        }
+      ],
+      "history_bytes": 13446,
+      "tool_return_bytes": 338,
+      "tool_return_count": 5,
+      "output": "The checklist steps have been completed successfully:\n\n1.  **mkdir**: Path `bench/output` was created. (Pass)\n2.  **write_file**: `bench/output/summary.md` was created with the content `marker: bench-marker-42`. (Pass)\n3.  **grep**: A search for `bench-marker-42` confirmed the presence of the marker in `bench/output/summary.md`. (Pass)\n4.  **write_file**: `bench/output/status.json` was created with the required JSON content. (Pass)\n5.  **list_dir**: Confirmed that both `summary.md` and `status.json` exist in `bench/output`. (Pass)",
+      "validation_passed": true,
+      "validation_errors": [],
+      "cost_usd": null
+    },
+    "input_token_savings_pct": 48.15457022541491,
+    "output_token_savings_pct": -19.205298013245034,
+    "total_token_savings_pct": 43.46623646001383,
+    "history_byte_savings_pct": 39.23099806633943,
+    "duration_savings_pct": 50.992244153970326,
+    "cost_savings_pct": null,
+    "vsh_faster": true,
+    "vsh_cheaper": null,
+    "both_passed": true
+  }
+}

@@ -9,6 +9,7 @@ from .curl import CurlCommand
 from .du import DuCommand
 from .echo import EchoCommand
 from .find import FindCommand
+from .git import GitDiffCommand, GitStatusCommand
 from .grep import GrepCommand
 from .head import HeadCommand
 from .ln import LnCommand
@@ -16,6 +17,7 @@ from .ls import LsCommand
 from .mkdir import MkdirCommand
 from .move import MoveCommand
 from .nl import NlCommand
+from .patch import ApplyPatchCommand
 from .pwd import PwdCommand
 from .remove import RemoveCommand
 from .rg import RgCommand
@@ -28,6 +30,7 @@ from .wc import WcCommand
 from .wget import WgetCommand
 
 __all__ = (
+    "ApplyPatchCommand",
     "CatCommand",
     "CdCommand",
     "ChmodCommand",
@@ -39,6 +42,8 @@ __all__ = (
     "DuCommand",
     "EchoCommand",
     "FindCommand",
+    "GitDiffCommand",
+    "GitStatusCommand",
     "GrepCommand",
     "HeadCommand",
     "LnCommand",

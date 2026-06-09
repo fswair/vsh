@@ -1,6 +1,7 @@
 from __future__ import annotations as _annotations
 
 from vsh.schemas import (
+    ApplyPatchCommand,
     CatCommand,
     CdCommand,
     ChmodCommand,
@@ -11,6 +12,8 @@ from vsh.schemas import (
     DuCommand,
     EchoCommand,
     FindCommand,
+    GitDiffCommand,
+    GitStatusCommand,
     GrepCommand,
     HeadCommand,
     LnCommand,
@@ -373,6 +376,49 @@ registrations: dict[str, CommandRegistration] = {
             ],
         ),
         schema_model=CurlCommand,
+    ),
+    "vsh_apply_patch": CommandRegistration(
+        spec=CommandSpec(
+            name="vsh_apply_patch",
+            summary="Apply a search-replace patch to a file.",
+            description="Apply old===new patch blocks to workspace files with simulation preview.",
+            tags=["mutate", "filesystem", "patch", "edit"],
+            mutates_fs=True,
+            schema_model_name="ApplyPatchCommand",
+            examples=[
+                CommandExample(
+                    title="Replace marker",
+                    params={
+                        "path": "src/main.py",
+                        "patch": "old text\n===\nnew text",
+                        "execution_reason": "update marker",
+                    },
+                )
+            ],
+        ),
+        schema_model=ApplyPatchCommand,
+    ),
+    "vsh_git_status": CommandRegistration(
+        spec=CommandSpec(
+            name="vsh_git_status",
+            summary="Show git status porcelain output.",
+            description="Read git working tree status within the workspace.",
+            tags=["read", "git", "vcs"],
+            schema_model_name="GitStatusCommand",
+            examples=[CommandExample(title="Status", params={"path": "."})],
+        ),
+        schema_model=GitStatusCommand,
+    ),
+    "vsh_git_diff": CommandRegistration(
+        spec=CommandSpec(
+            name="vsh_git_diff",
+            summary="Show git diff output.",
+            description="Read git diff for workspace repository.",
+            tags=["read", "git", "vcs"],
+            schema_model_name="GitDiffCommand",
+            examples=[CommandExample(title="Diff", params={"path": ".", "staged": False})],
+        ),
+        schema_model=GitDiffCommand,
     ),
     "vsh_wget": CommandRegistration(
         spec=CommandSpec(

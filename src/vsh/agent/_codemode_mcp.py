@@ -23,9 +23,15 @@ CODEMODE_MCP_TOOL_NAMES = frozenset(
 )
 
 _CODEMODE_WORKSPACE_SUPPLEMENT = """\
-Workspace root is injected automatically for apply and apply_batch. Use apply_batch for
-multi-step filesystem work and apply for a single command. Reuse the returned snapshot_id.
-Use verbosity="full" only when debugging.
+Workspace root is injected automatically for apply and apply_batch.
+
+- Use exactly ONE apply_batch per task. Do not call apply_batch again after status=ok.
+- Never invent tools such as vsh_shell, vsh_run_command, or raw shell commands.
+- Step params use schema field names: path, output_path, text (or content), pattern,
+  recursive, parents. Do not use directory, root, file_path, or shell snippets.
+- Grep/list read receipts include stdout when available; that is enough to confirm hits.
+- Reuse the returned snapshot_id. Use apply only for a single extra command.
+- Use verbosity="full" only when debugging.
 """
 
 

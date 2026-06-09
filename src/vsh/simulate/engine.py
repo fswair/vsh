@@ -7,6 +7,7 @@ from vsh.plans.fingerprint import compute_plan_fingerprint
 from vsh.plans.models import SimulationResult
 from vsh.runtime import runtime
 from vsh.schemas import (
+    ApplyPatchCommand,
     CatCommand,
     CdCommand,
     ChmodCommand,
@@ -15,6 +16,8 @@ from vsh.schemas import (
     DuCommand,
     EchoCommand,
     FindCommand,
+    GitDiffCommand,
+    GitStatusCommand,
     GrepCommand,
     HeadCommand,
     LnCommand,
@@ -102,7 +105,16 @@ def simulate_command(command: StructuredCommand, snapshot: WorkspaceSnapshot) ->
         target = resolve_workspace_path(snapshot.session.cwd_logical, command.path)
         reads = _read_scope(snapshot, target)
         predicted, journal, decision, reason = _evaluate_read_target(snapshot, target, reads=reads)
-    elif isinstance(command, GrepCommand | RgCommand):
+    elif isinstance(command, GrepCommand):
+        target = resolve_workspace_path(snapshot.session.cwd_logical, command.path)
+        reads = _grep_read_scope(snapshot, target, recursive=command.recursive)
+        predicted, journal, decision, reason = _evaluate_read_target(
+            snapshot,
+            target,
+            reads=reads,
+            include_content_reads=True,
+        )
+    elif isinstance(command, RgCommand):
         target = resolve_workspace_path(snapshot.session.cwd_logical, command.path)
         reads = _read_scope(snapshot, target)
         predicted, journal, decision, reason = _evaluate_read_target(
@@ -110,6 +122,11 @@ def simulate_command(command: StructuredCommand, snapshot: WorkspaceSnapshot) ->
             target,
             reads=reads,
             include_content_reads=True,
+        )
+    elif isinstance(command, GitStatusCommand | GitDiffCommand):
+        target = resolve_workspace_path(snapshot.session.cwd_logical, command.path)
+        predicted, journal, decision, reason = _evaluate_read_target(
+            snapshot, target, reads=[target]
         )
     elif isinstance(command, FindCommand):
         target = resolve_workspace_path(snapshot.session.cwd_logical, command.path)
@@ -238,6 +255,9 @@ def _simulate_mutation_overlay(command: StructuredCommand, snapshot: WorkspaceSn
         src = resolve_workspace_path(cwd, command.src)
         dst = resolve_workspace_path(cwd, command.dst)
         overlay.created[dst] = {"source": src, "symbolic": command.symbolic, "force": command.force}
+    elif isinstance(command, ApplyPatchCommand):
+        target = resolve_workspace_path(cwd, command.path)
+        overlay.updated[target] = {"kind": "file", "patch": True}
     elif isinstance(command, SedCommand):
         for path in command.paths:
             target = resolve_workspace_path(cwd, path)
@@ -245,6 +265,21 @@ def _simulate_mutation_overlay(command: StructuredCommand, snapshot: WorkspaceSn
     else:
         overlay.updated[cwd] = {"command": command.__class__.__name__}
     return overlay
+
+
+def _grep_read_scope(snapshot: WorkspaceSnapshot, target: str, *, recursive: bool) -> list[str]:
+    node = snapshot.nodes.get(target)
+    if node is None:
+        return [target]
+    if node.kind != "dir":
+        return [target]
+    if not recursive:
+        return [
+            child
+            for child in node.children
+            if snapshot.nodes.get(child) is not None and snapshot.nodes[child].kind == "file"
+        ] or [target]
+    return _read_scope(snapshot, target)
 
 
 def _read_scope(snapshot: WorkspaceSnapshot, target: str) -> list[str]:

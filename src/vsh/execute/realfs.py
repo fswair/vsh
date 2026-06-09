@@ -1,6 +1,5 @@
 from __future__ import annotations as _annotations
 
-import time
 from pathlib import Path
 
 from vsh.effects import ActualEffects
@@ -87,7 +86,7 @@ def execute_approved(approval_token: str) -> ExecutionResult:
 
     _run_extension_hooks(updated_snapshot, actual_effects)
 
-    record.executed_at_ns = time.time_ns()
+    record = plan_store.mark_executed(approval_token)
     if persistence_enabled():
         persistence_store.save_plan(record)
 

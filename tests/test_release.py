@@ -6,7 +6,7 @@ from vsh.registry import registrations
 
 
 def test_public_version_matches_package_metadata() -> None:
-    assert vsh.__version__ == "0.2.0"
+    assert vsh.__version__ == "0.3.0"
 
 
 def test_every_registered_command_exposes_schema() -> None:
@@ -19,4 +19,4 @@ def test_every_registered_command_exposes_schema() -> None:
 
 
 def test_registry_surface_matches_current_release() -> None:
-    assert len(registry) == 25
+    assert len(registry) == 28

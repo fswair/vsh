@@ -4,6 +4,7 @@ import os
 from typing import Literal
 
 from vsh.schemas import (
+    ApplyPatchCommand,
     ChmodCommand,
     CopyCommand,
     CurlCommand,
@@ -71,7 +72,13 @@ def classify_approval_requirement(
 def _is_mutation_command(command: StructuredCommand, overlay: Overlay | None) -> bool:
     if isinstance(
         command,
-        MkdirCommand | TouchCommand | MoveCommand | CopyCommand | ChmodCommand | LnCommand,
+        MkdirCommand
+        | TouchCommand
+        | MoveCommand
+        | CopyCommand
+        | ChmodCommand
+        | LnCommand
+        | ApplyPatchCommand,
     ):
         return True
     if isinstance(command, EchoCommand) and command.output_path:
