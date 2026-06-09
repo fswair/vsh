@@ -4,6 +4,7 @@
 from __future__ import annotations as _annotations
 
 import argparse
+import os
 import shutil
 import sys
 import tempfile
@@ -28,6 +29,11 @@ from benchlib import (  # noqa: E402
 def _default_output_dir() -> Path:
     stamp = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S")
     return PLAYGROUND_DIR / "reports" / stamp
+
+
+def _benchmark_max_touched_paths(file_count: int) -> int:
+    # Synthetic scale benches should not trip the default interactive safety ceiling.
+    return max(500, (file_count * 2) + 50)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -59,10 +65,13 @@ def main(argv: list[str] | None = None) -> int:
         "file_size": args.file_size,
         "modes": sorted(modes),
         "commands": len(cases),
+        "benchmark_max_touched_paths": _benchmark_max_touched_paths(args.file_count),
     }
 
     workspace_dir = Path(tempfile.mkdtemp(prefix="vsh-bench-"))
+    previous_max_touched = os.environ.get("VSH_MAX_TOUCHED_PATHS")
     try:
+        os.environ["VSH_MAX_TOUCHED_PATHS"] = str(_benchmark_max_touched_paths(args.file_count))
         prepare_workspace(workspace_dir, file_count=args.file_count, file_size=args.file_size)
         all_stats = []
         for case in cases:
@@ -103,6 +112,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
     finally:
+        if previous_max_touched is None:
+            os.environ.pop("VSH_MAX_TOUCHED_PATHS", None)
+        else:
+            os.environ["VSH_MAX_TOUCHED_PATHS"] = previous_max_touched
         shutil.rmtree(workspace_dir, ignore_errors=True)
     return 0
 
