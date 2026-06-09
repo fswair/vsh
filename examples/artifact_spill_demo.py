@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Artifact spill + execution_reason demo for vsh pydantic-ai agents.
+"""Live pydantic-ai agent demo: artifact spill + execution_reason.
+
+Requires a real model (OpenRouter, OpenAI, etc.) via MODEL_NAME in .env.
+
+Setup:
+    cp .env.example .env
+    # set MODEL_NAME and OPENROUTER_API_KEY (or your provider key)
 
 Run:
     uv run python examples/artifact_spill_demo.py
-    uv run python examples/artifact_spill_demo.py --section reason
-    uv run python examples/artifact_spill_demo.py --section store
-    uv run python examples/artifact_spill_demo.py --section spill --spill-bytes 256
+    uv run python examples/artifact_spill_demo.py --model openrouter:anthropic/claude-sonnet-4
+    uv run python examples/artifact_spill_demo.py --workspace ./playground/demo-ws --spill-bytes 1024
+    uv run python examples/artifact_spill_demo.py --policy-only   # no agent, pure Python policy demo
 """
 
 # ruff: noqa: E402
@@ -13,309 +19,273 @@ Run:
 from __future__ import annotations as _annotations
 
 import argparse
-import json
+import os
+import shutil
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
-from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
-from pydantic_ai.models.function import FunctionModel
+from dotenv import load_dotenv
 
-from vsh.agent import VshAgentDeps, VshCapability, _artifact_spill, create_vsh_agent
+load_dotenv()
+
+from pydantic_ai.agent import AgentRunResult
+from pydantic_ai.messages import ModelRequest, ToolCallPart, ToolReturnPart
+
+from vsh.agent import VshCapability, create_vsh_agent
 from vsh.artifacts import MemoryArtifactStore
 from vsh.schemas import TouchCommand
 from vsh.simulate.engine import simulate_command
 from vsh.snapshot.builder import snapshot_workspace
 
 
-def _banner(title: str) -> None:
-    line = "=" * len(title)
-    print(f"\n{title}\n{line}")
-
-
-def _prepare_large_grep_workspace(root: Path, *, file_count: int = 80) -> None:
+def _prepare_workspace(root: Path, *, file_count: int) -> None:
     src = root / "src"
-    src.mkdir()
-    (root / "README.md").write_text("# Artifact demo\n", encoding="utf-8")
+    src.mkdir(parents=True, exist_ok=True)
+    (root / "README.md").write_text(
+        "# Artifact spill demo workspace\n\nGenerated for vsh agent demo.\n",
+        encoding="utf-8",
+    )
     for index in range(file_count):
         (src / f"module_{index:03d}.py").write_text(
-            f"# module {index}\nVALUE = 'needle-{index}'\n",
+            f"# module {index}\nNEEDLE = 'artifact-demo-{index}'\n",
             encoding="utf-8",
         )
 
 
-def _find_spilled_artifact_id(messages: object) -> str | None:
-    if not isinstance(messages, list):
-        return None
-    for message in reversed(messages):
+def _resolve_model(cli_model: str | None) -> str:
+    model = cli_model or os.environ.get("MODEL_NAME")
+    if model is None:
+        print("Set MODEL_NAME in .env or pass --model.", file=sys.stderr)
+        raise SystemExit(1)
+    return model
+
+
+def _artifact_instructions() -> str:
+    return """\
+You operate on a workspace using vsh structured commands only.
+
+Artifact spill:
+- Large vsh tool outputs may return an ArtifactRef (artifact_id, preview, byte_size) instead of full JSON.
+- Use vsh_get_artifact(artifact_id, offset=0, limit=...) to read slices of spilled content.
+- Use vsh_index_artifact to tag important artifacts and vsh_search_artifacts to find them later.
+
+execution_reason:
+- Every mutation or destructive vsh_simulate call MUST include execution_reason
+  (in params or the vsh_simulate execution_reason argument).
+- Simulation rejects mutations without it.
+
+Workflow:
+1. vsh_snapshot_workspace
+2. vsh_search / vsh_get_schema when needed
+3. vsh_simulate for reads first; if you get ArtifactRef, fetch details with vsh_get_artifact
+4. vsh_simulate mutations only with execution_reason; do not approve/execute unless asked
+
+Be concise in the final answer. Report artifact_id values you spilled or indexed.
+"""
+
+
+def _default_user_prompt() -> str:
+    return """\
+Work through this checklist on the workspace:
+
+1. Snapshot the workspace.
+2. Run a recursive grep for "artifact-demo" under src/ via vsh_simulate.
+   If the simulate result is an ArtifactRef (not a full simulation dict), call
+   vsh_get_artifact for the first 500 bytes and summarize the preview.
+3. Index that artifact with title "grep artifact-demo hits" and tags ["demo", "grep"].
+4. Search artifacts for "grep" and confirm your index entry appears.
+5. Simulate creating src/agent-notes.txt with vsh_touch TWICE:
+   - first WITHOUT execution_reason (expect rejection — report the reason),
+   - then WITH execution_reason explaining why the file is needed.
+
+Do not approve or execute any mutation. End with a short summary of spill + policy behavior.
+"""
+
+
+def _tool_names_from_history(result: AgentRunResult[object]) -> list[str]:
+    names: list[str] = []
+    for message in result.all_messages():
+        for part in getattr(message, "parts", []):
+            if isinstance(part, ToolCallPart):
+                names.append(part.tool_name)
+    return names
+
+
+def _artifact_refs_from_history(result: AgentRunResult[object]) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    for message in result.all_messages():
         if not isinstance(message, ModelRequest):
             continue
         for part in message.parts:
             if not isinstance(part, ToolReturnPart):
                 continue
-            if part.tool_name != "vsh_simulate":
-                continue
             content = part.content
-            if isinstance(content, dict) and "artifact_id" in content:
-                artifact_id = content["artifact_id"]
-                if isinstance(artifact_id, str):
-                    return artifact_id
-    return None
+            if isinstance(content, dict) and "artifact_id" in content and "content_hash" in content:
+                refs.append(content)
+    return refs
 
 
-def _build_spill_script() -> FunctionModel:
-    """Scripted model: snapshot → large grep → get/index/search artifacts."""
-    step = 0
-
-    def next_step(messages: object, _info: object) -> ModelResponse:
-        nonlocal step
-        step += 1
-        if step == 1:
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        tool_name="vsh_snapshot_workspace",
-                        args={},
-                        tool_call_id="demo-snapshot",
-                    )
-                ]
-            )
-        if step == 2:
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        tool_name="vsh_simulate",
-                        args={
-                            "tool_name": "vsh_grep",
-                            "params": {
-                                "pattern": "needle",
-                                "path": "src",
-                                "recursive": True,
-                            },
-                        },
-                        tool_call_id="demo-grep",
-                    )
-                ]
-            )
-        artifact_id = _find_spilled_artifact_id(messages) or "0000000000000000"
-        if step == 3:
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        tool_name="vsh_get_artifact",
-                        args={"artifact_id": artifact_id, "offset": 0, "limit": 400},
-                        tool_call_id="demo-get",
-                    )
-                ]
-            )
-        if step == 4:
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        tool_name="vsh_index_artifact",
-                        args={
-                            "artifact_id": artifact_id,
-                            "title": "grep needle hits",
-                            "tags": ["demo", "grep", "src"],
-                        },
-                        tool_call_id="demo-index",
-                    )
-                ]
-            )
-        if step == 5:
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        tool_name="vsh_search_artifacts",
-                        args={"query": "grep"},
-                        tool_call_id="demo-search",
-                    )
-                ]
-            )
-        return ModelResponse(parts=[TextPart(content="artifact spill demo complete")])
-
-    return FunctionModel(next_step)
-
-
-def _extract_last_tool_return(result: object, tool_name: str) -> Any:
-    from pydantic_ai.agent import AgentRunResult
-
-    assert isinstance(result, AgentRunResult)
-    for message in reversed(result.all_messages()):
+def _simulate_returns_from_history(result: AgentRunResult[object]) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    for message in result.all_messages():
         if not isinstance(message, ModelRequest):
             continue
         for part in message.parts:
-            if isinstance(part, ToolReturnPart) and part.tool_name == tool_name:
-                return part.content
-    msg = f"no tool return found for {tool_name}"
-    raise RuntimeError(msg)
+            if not isinstance(part, ToolReturnPart) or part.tool_name != "vsh_simulate":
+                continue
+            content = part.content
+            if isinstance(content, dict) and "plan_id" in content:
+                payloads.append(content)
+    return payloads
 
 
-def demo_store_api() -> None:
-    _banner("Direct ArtifactStore API")
-    store = MemoryArtifactStore()
-    payload = json.dumps({"rows": [{"id": index} for index in range(200)]}).encode()
-    record = store.put(
-        tool_name="vsh_simulate",
-        payload=payload,
-        content_type="application/json",
-        plan_id="plan_demo",
-    )
-    print("put:", record.ref.artifact_id, "bytes:", record.ref.byte_size)
-    print("preview:", record.ref.preview[:80], "...")
-    indexed = store.index(record.ref.artifact_id, title="sim output", tags=["demo"])
-    print("index title:", indexed.title, "tags:", indexed.tags)
-    hits = store.search("demo")
-    print("search hits:", [entry.artifact_id for entry in hits])
-    slice_bytes = store.read_bytes(record.ref.artifact_id, offset=0, limit=32)
-    print("read_bytes[0:32]:", slice_bytes)
-
-
-def demo_execution_reason(workspace: Path) -> None:
-    _banner("execution_reason policy")
+def demo_policy_only(workspace: Path) -> None:
+    print("\n=== execution_reason policy (Python only, no agent) ===\n")
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-
-    without = simulate_command(TouchCommand(path="scratch.txt"), snapshot)
+    reject = simulate_command(TouchCommand(path="scratch.txt"), snapshot)
     print("without execution_reason:")
-    print("  decision:", without.decision)
-    print("  reason:  ", without.reason)
-
-    with_reason = simulate_command(
-        TouchCommand(path="scratch.txt", execution_reason="Create agent scratch file"),
+    print("  decision:", reject.decision)
+    print("  reason:  ", reject.reason)
+    ok = simulate_command(
+        TouchCommand(path="scratch.txt", execution_reason="Bootstrap scratch file for demo"),
         snapshot,
     )
     print("\nwith execution_reason:")
-    print("  decision:", with_reason.decision)
-    print("  tier:    ", with_reason.approval_tier)
-    print("  command: ", with_reason.command.execution_reason)
+    print("  decision:", ok.decision)
+    print("  tier:    ", ok.approval_tier)
 
 
-def demo_spill_flow(workspace: Path, *, spill_bytes: int) -> None:
-    _banner("Agent artifact spill flow")
+def run_live_agent(
+    workspace: Path,
+    *,
+    model: str,
+    spill_bytes: int,
+    user_prompt: str,
+    cleanup_workspace: bool,
+) -> None:
     store = MemoryArtifactStore()
     capability = VshCapability(workspace)
     capability.deps.artifact_store = store
     capability.deps.artifact_spill_bytes = spill_bytes
-    deps = capability.deps
 
-    agent, _ = create_vsh_agent(_build_spill_script(), workspace, vsh=capability)
+    agent, vsh = create_vsh_agent(
+        model,
+        workspace,
+        vsh=capability,
+        instructions=_artifact_instructions(),
+    )
+    deps = vsh.deps
 
+    print("\n=== Live agent: artifact spill + execution_reason ===\n")
     print("workspace:   ", deps.workspace_root)
+    print("model:       ", model)
     print("spill_bytes: ", spill_bytes)
+    print("store:       ", type(store).__name__)
+    print()
 
-    result = agent.run_sync("Run full artifact spill demo.", deps=deps)
+    result = agent.run_sync(user_prompt, deps=deps)
 
-    grep_return = _extract_last_tool_return(result, "vsh_simulate")
-    print("\n[vsh_simulate → vsh_grep]")
-    if isinstance(grep_return, dict) and "artifact_id" in grep_return:
-        print("  spilled! artifact_id:", grep_return["artifact_id"])
-        print("  byte_size:", grep_return["byte_size"])
-        print("  preview:", str(grep_return.get("preview", ""))[:120], "...")
-    else:
-        print("  NOT spilled — try --spill-bytes 256 or --file-count 120")
-        if isinstance(grep_return, dict):
-            print("  decision:", grep_return.get("decision"))
+    tools = _tool_names_from_history(result)
+    refs = _artifact_refs_from_history(result)
+    sims = _simulate_returns_from_history(result)
 
-    get_return = _extract_last_tool_return(result, "vsh_get_artifact")
-    if isinstance(get_return, dict):
-        print("\n[vsh_get_artifact]")
-        print("  truncated:", get_return.get("truncated"))
-        content = str(get_return.get("content", ""))
-        print("  content[0:120]:", content[:120], "...")
+    print("tools called:", tools)
+    print("artifact refs in history:", len(refs))
+    for ref in refs:
+        print(
+            "  -",
+            ref.get("artifact_id"),
+            f"({ref.get('byte_size')} bytes, tool={ref.get('tool_name')})",
+        )
 
-    search_return = _extract_last_tool_return(result, "vsh_search_artifacts")
-    if isinstance(search_return, list):
-        print("\n[vsh_search_artifacts]")
-        print("  hits:", len(search_return))
-        if search_return:
-            print("  first title:", search_return[0].get("title"))
+    print("\nsimulate results:")
+    for sim in sims:
+        command = sim.get("command", {})
+        reason = command.get("execution_reason") if isinstance(command, dict) else None
+        print(
+            "  -",
+            sim.get("decision"),
+            command.get("path") if isinstance(command, dict) else command,
+            f"execution_reason={reason!r}" if reason else "",
+        )
+        if sim.get("reason"):
+            print("    policy reason:", sim.get("reason"))
 
-    print("\nfinal output:", result.output)
-    print("store records:", len(store._records))  # noqa: SLF001
-    print("is_spillable(vsh_simulate):", _artifact_spill.is_spillable_vsh_tool("vsh_simulate"))
+    print("\nagent output:\n", result.output)
+    print("\nstore records:", len(store._records))  # noqa: SLF001
+    print("snapshot_id:", deps.snapshot_id)
+    print("last_plan_id:", deps.last_plan_id)
 
-
-def demo_mutation_via_agent(workspace: Path) -> None:
-    _banner("Agent vsh_simulate + execution_reason kwarg")
-    step = 0
-
-    def next_step(_messages: object, _info: object) -> ModelResponse:
-        nonlocal step
-        step += 1
-        if step == 1:
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        tool_name="vsh_snapshot_workspace",
-                        args={},
-                        tool_call_id="snap",
-                    )
-                ]
-            )
-        if step == 2:
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        tool_name="vsh_simulate",
-                        args={
-                            "tool_name": "vsh_touch",
-                            "params": {"path": "agent-notes.txt"},
-                            "execution_reason": "Create notes file for agent session",
-                        },
-                        tool_call_id="touch-ok",
-                    )
-                ]
-            )
-        return ModelResponse(parts=[TextPart(content="mutation demo ok")])
-
-    deps = VshAgentDeps.from_path(workspace)
-    agent, _ = create_vsh_agent(FunctionModel(next_step), workspace)
-    result = agent.run_sync("Simulate touch with reason.", deps=deps)
-    sim_return = _extract_last_tool_return(result, "vsh_simulate")
-    if isinstance(sim_return, dict):
-        print("decision:", sim_return.get("decision"))
-        command = sim_return.get("command", {})
-        if isinstance(command, dict):
-            print("execution_reason:", command.get("execution_reason"))
-    print("output:", result.output)
+    if cleanup_workspace:
+        shutil.rmtree(workspace, ignore_errors=True)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Artifact spill + execution_reason demo.")
-    parser.add_argument(
-        "--section",
-        choices=("all", "store", "reason", "spill", "mutation"),
-        default="all",
-        help="Which demo section to run (default: all)",
+    parser = argparse.ArgumentParser(
+        description="Live pydantic-ai demo for artifact spill and execution_reason.",
     )
     parser.add_argument(
-        "--spill-bytes",
-        type=int,
-        default=512,
-        help="artifact_spill_bytes override for the spill demo (default: 512)",
+        "--model",
+        default=None,
+        help="Model id (default: MODEL_NAME from .env)",
+    )
+    parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Use an existing workspace directory (default: temp dir with generated files)",
     )
     parser.add_argument(
         "--file-count",
         type=int,
         default=80,
-        help="Number of source files to generate for grep spill (default: 80)",
+        help="Generated src/*.py files when using a temp workspace (default: 80)",
+    )
+    parser.add_argument(
+        "--spill-bytes",
+        type=int,
+        default=1024,
+        help="artifact_spill_bytes on VshAgentDeps (default: 1024)",
+    )
+    parser.add_argument(
+        "--prompt",
+        default=None,
+        help="Override the default user prompt",
+    )
+    parser.add_argument(
+        "--policy-only",
+        action="store_true",
+        help="Run execution_reason policy demo only (no LLM / no API key)",
     )
     args = parser.parse_args()
 
-    with tempfile.TemporaryDirectory(prefix="vsh-artifact-demo-") as tmp:
+    cleanup = args.workspace is None
+    if args.workspace is not None:
+        workspace = args.workspace.resolve()
+        workspace.mkdir(parents=True, exist_ok=True)
+    else:
+        tmp = tempfile.mkdtemp(prefix="vsh-artifact-live-")
         workspace = Path(tmp)
-        _prepare_large_grep_workspace(workspace, file_count=args.file_count)
+        _prepare_workspace(workspace, file_count=args.file_count)
 
-        if args.section in ("all", "store"):
-            demo_store_api()
-        if args.section in ("all", "reason"):
-            demo_execution_reason(workspace)
-        if args.section in ("all", "spill"):
-            demo_spill_flow(workspace, spill_bytes=args.spill_bytes)
-        if args.section in ("all", "mutation"):
-            demo_mutation_via_agent(workspace)
+    if args.policy_only:
+        demo_policy_only(workspace)
+        if cleanup:
+            shutil.rmtree(workspace, ignore_errors=True)
+        return
 
-    print("\nDone. See docs/ARTIFACTS.md for the full reference.")
+    model = _resolve_model(args.model)
+    run_live_agent(
+        workspace,
+        model=model,
+        spill_bytes=args.spill_bytes,
+        user_prompt=args.prompt or _default_user_prompt(),
+        cleanup_workspace=cleanup,
+    )
+
+    print("\nDone. See docs/ARTIFACTS.md for reference.")
 
 
 if __name__ == "__main__":

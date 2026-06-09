@@ -82,7 +82,7 @@ cp .env.example .env
 
 uv run python examples/pydantic_ai_agent_demo.py --mode live
 
-# Artifact spill + execution_reason (no API key)
+# Artifact spill + execution_reason (live model — set MODEL_NAME in .env)
 uv run python examples/artifact_spill_demo.py
 ```
 

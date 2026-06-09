@@ -13,15 +13,20 @@ This guide covers both features end-to-end for pydantic-ai agents.
 ## Quick run
 
 ```bash
-# Scripted demo — no API key required
+cp .env.example .env
+# MODEL_NAME + provider API key (e.g. OPENROUTER_API_KEY)
+
+# Live pydantic-ai agent — real model, real tool calls
 uv run python examples/artifact_spill_demo.py
 
-# Only the execution_reason policy walkthrough
-uv run python examples/artifact_spill_demo.py --section reason
-
-# Direct store API (no agent)
-uv run python examples/artifact_spill_demo.py --section store
+# Policy demo only (no LLM)
+uv run python examples/artifact_spill_demo.py --policy-only
 ```
+
+The live demo uses a low `artifact_spill_bytes` threshold (default 1024) so recursive
+`vsh_grep` results spill to `ArtifactRef`. The model is prompted to call
+`vsh_get_artifact`, `vsh_index_artifact`, `vsh_search_artifacts`, and to demonstrate
+`execution_reason` rejection on mutation.
 
 ## Problem and design goals
 
