@@ -13,6 +13,7 @@ from pydantic_ai.tools import RunContext, ToolDefinition
 from vsh.artifacts import ArtifactStore, create_artifact_store
 
 from . import _artifact_spill
+from ._codemode_mcp import codemode_workspace_supplement, create_vsh_codemode_mcp_toolset
 from ._tool_names import normalize_agent_tool_name
 from .deps import VshAgentDeps
 from .toolset import _VSH_TOOLSET_INSTRUCTIONS, register_vsh_tools
@@ -45,22 +46,33 @@ class VshCapability(Capability[VshAgentDeps]):
         *,
         artifact_store: ArtifactStore | None = None,
         artifact_spill_bytes: int | None = None,
+        codemode_mcp: bool = True,
         id: str = "vsh",
         defer_loading: bool = False,
         description: str | None = None,
     ) -> None:
+        self._codemode_mcp = codemode_mcp
         self._deps = VshAgentDeps(
             workspace_root=str(Path(workspace_root).resolve()),
             artifact_store=artifact_store or create_artifact_store(),
             artifact_spill_bytes=artifact_spill_bytes,
         )
-        super().__init__(
-            id=id,
-            description=description or _VSH_CAPABILITY_DESCRIPTION,
-            instructions=_VSH_TOOLSET_INSTRUCTIONS,
-            defer_loading=defer_loading,
-        )
-        register_vsh_tools(self)
+        if codemode_mcp:
+            super().__init__(
+                id=id,
+                description=description or _VSH_CAPABILITY_DESCRIPTION,
+                instructions=codemode_workspace_supplement(),
+                toolsets=[create_vsh_codemode_mcp_toolset()],
+                defer_loading=defer_loading,
+            )
+        else:
+            super().__init__(
+                id=id,
+                description=description or _VSH_CAPABILITY_DESCRIPTION,
+                instructions=_VSH_TOOLSET_INSTRUCTIONS,
+                defer_loading=defer_loading,
+            )
+            register_vsh_tools(self)
 
     @property
     def deps(self) -> VshAgentDeps:
@@ -101,7 +113,19 @@ class VshCapability(Capability[VshAgentDeps]):
         args: dict[str, Any],
         result: Any,
     ) -> Any:
-        plan_id = ctx.deps.last_plan_id if call.tool_name == "vsh_simulate" else None
+        spill_plan_id: str | None = None
+        if call.tool_name in {"vsh_simulate", "simulate"} and isinstance(result, dict):
+            spill_plan_id = (
+                result.get("plan_id") if isinstance(result.get("plan_id"), str) else None
+            )
+            ctx.deps.last_plan_id = spill_plan_id
+        elif call.tool_name in {"vsh_snapshot_workspace", "snapshot_workspace"} and isinstance(
+            result, dict
+        ):
+            snapshot_id = result.get("snapshot_id")
+            if isinstance(snapshot_id, str):
+                ctx.deps.snapshot_id = snapshot_id
+        plan_id = spill_plan_id
         return _artifact_spill.maybe_spill_tool_result(
             ctx.deps.artifact_store,
             tool_name=call.tool_name,
@@ -131,6 +155,7 @@ def create_vsh_agent(
     vsh: VshCapability | None = None,
     artifact_store: ArtifactStore | None = None,
     artifact_spill_bytes: int | None = None,
+    codemode_mcp: bool = True,
     defer_loading: bool = False,
     **agent_kwargs: Any,
 ) -> tuple[Agent[VshAgentDeps, str], VshCapability]:
@@ -139,6 +164,7 @@ def create_vsh_agent(
         workspace_root,
         artifact_store=artifact_store,
         artifact_spill_bytes=artifact_spill_bytes,
+        codemode_mcp=codemode_mcp,
         defer_loading=defer_loading,
     )
     agent = Agent(

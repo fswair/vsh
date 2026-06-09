@@ -13,6 +13,7 @@ from vsh.mcp import (
     CODEMODE_SERVER_NAME,
     build_codemode_instructions,
     codemode_mcp,
+    create_agent_codemode_server,
     create_codemode_server,
     load_custom_instructions,
     run_codemode_server,
@@ -35,6 +36,16 @@ def test_create_codemode_server_registers_name_instructions_and_prompts() -> Non
         "vsh_simulate_and_execute",
         "vsh_read_workspace",
     }
+
+
+def test_create_agent_codemode_server_registers_minimal_tool_surface() -> None:
+    server = create_agent_codemode_server()
+
+    assert server.name == CODEMODE_SERVER_NAME
+    assert server.instructions is None
+    tools = asyncio.run(server.list_tools())
+    tool_names = {tool.name for tool in tools}
+    assert tool_names == {"apply", "apply_batch"}
 
 
 def test_build_codemode_instructions_appends_custom_section() -> None:

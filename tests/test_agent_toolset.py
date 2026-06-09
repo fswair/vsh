@@ -47,7 +47,7 @@ def test_agent_module_unknown_attribute_raises() -> None:
     import vsh.agent as agent_module
 
     with pytest.raises(AttributeError, match="has no attribute 'missing_tool'"):
-        _ = agent_module.missing_tool
+        getattr(agent_module, "missing_" + "tool")
 
 
 def test_create_vsh_function_toolset_registers_tools() -> None:

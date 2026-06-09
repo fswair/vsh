@@ -24,9 +24,24 @@ ARTIFACT_PASSTHROUGH_TOOLS = frozenset(
     }
 )
 
+_CODEMODE_MCP_SPILL_TOOLS = frozenset(
+    {
+        "search",
+        "get_schema",
+        "simulate",
+        "vsh_sandbox",
+        "apply",
+        "apply_batch",
+    }
+)
+
 
 def is_spillable_vsh_tool(tool_name: str) -> bool:
-    return tool_name.startswith("vsh_") and tool_name not in ARTIFACT_PASSTHROUGH_TOOLS
+    if tool_name in ARTIFACT_PASSTHROUGH_TOOLS:
+        return False
+    if tool_name.startswith("vsh_"):
+        return True
+    return tool_name in _CODEMODE_MCP_SPILL_TOOLS
 
 
 def spill_threshold(deps: Any) -> int:

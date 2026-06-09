@@ -6,7 +6,7 @@ from pathlib import Path
 from fastmcp import FastMCP
 
 from .prompts import register_codemode_prompts
-from .surface import register_vsh_surface
+from .surface import register_vsh_agent_surface, register_vsh_surface
 
 CODEMODE_SERVER_NAME = "vsh-codemode"
 
@@ -17,15 +17,21 @@ Inspired by CodeMode-style agent tooling: expose a compact tool surface and let 
 model discover command schemas on demand instead of loading every tool definition up
 front. vsh extends that pattern with simulation, approval, and drift-aware execution.
 
-Workflow:
-  search -> get_schema -> snapshot_workspace -> simulate -> approve -> execute_approved
+Default workflow:
+  apply_batch for known multi-step filesystem work
+  apply for one command
+  search/get_schema only when command parameters are unfamiliar
 
 Rules:
-- Discover commands with `search`; fetch one schema with `get_schema`.
-- Snapshot once per session before simulating.
-- Simulate every command before approval.
-- Execute only approved, execution-eligible plans.
-- Use resources for stateful context instead of bloating tool responses.
+- Prefer `apply_batch` for ordinary agent tasks. It snapshots when needed, simulates,
+  approves eligible plans, executes, and returns compact receipts.
+- Prefer `apply` for one command.
+- Every mutation step must include `execution_reason`.
+- Reuse returned `snapshot_id`; do not call `snapshot_workspace` again after execution
+  unless a receipt reports drift/stale state.
+- Use `simulate -> approve -> execute_approved` only for debugging or when the user
+  explicitly asks to inspect plans before execution.
+- Use `verbosity="full"` only for debugging; compact receipts are the normal agent path.
 
 Batch simulation (`vsh_sandbox`):
 - The `code` argument is a Monty Python program. Built-in helpers look like normal
@@ -35,12 +41,12 @@ Batch simulation (`vsh_sandbox`):
 - When useful, you may also assign results to variables, pass them into later calls,
   slice/filter, etc.
 - `simulate(...)` yields a SimulationResult dict (`plan_id`, `decision`,
-  `predicted_effects`, `journal`, ...).
+  `predicted_effects`, `journal`, ...) unless compact verbosity is requested.
 - Add a return expression at the end of the program; Monty treats it as the program
   result → `vsh_sandbox` field `output`. Example: `paths[:5]`. Use `print(...)` for
   debug text; that goes to `stdout`, not `output`.
 - Each `simulate(...)` is recorded in `calls[]` (plan_id per step) for later
-  `approve` / `execute_approved`. A compact program result does not drop plans.
+  `approve` / `execute_approved`. Prefer `apply_batch` when you want execution too.
 - Read-command file/listing content is not in simulate output; it appears after
   `execute_approved`. Summarize from `predicted_effects` / `journal` when needed.
 
@@ -58,6 +64,7 @@ __all__ = (
     "CODEMODE_SERVER_NAME",
     "build_codemode_instructions",
     "codemode_mcp",
+    "create_agent_codemode_server",
     "create_codemode_server",
     "load_custom_instructions",
     "main",
@@ -112,6 +119,17 @@ def create_codemode_server(*, custom_instructions: str | None = None) -> FastMCP
     )
     register_vsh_surface(server)
     register_codemode_prompts(server)
+    return server
+
+
+def create_agent_codemode_server() -> FastMCP:
+    """Build a minimal CodeMode MCP server for pydantic-ai agent runs."""
+    server = FastMCP(
+        CODEMODE_SERVER_NAME,
+        instructions=None,
+        version="0.2.0",
+    )
+    register_vsh_agent_surface(server)
     return server
 
 

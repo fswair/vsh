@@ -4,7 +4,7 @@ from fastmcp import FastMCP
 
 from . import resources, tools
 
-__all__ = ("register_vsh_surface",)
+__all__ = ("register_vsh_agent_surface", "register_vsh_surface")
 
 
 def register_vsh_surface(mcp: FastMCP) -> None:
@@ -16,8 +16,16 @@ def register_vsh_surface(mcp: FastMCP) -> None:
     mcp.add_tool(tools.approve)
     mcp.add_tool(tools.execute_approved)
     mcp.add_tool(tools.vsh_sandbox)
+    mcp.add_tool(tools.apply)
+    mcp.add_tool(tools.apply_batch)
 
     mcp.add_resource(resources.workspace_snapshot_current)
     mcp.add_resource(resources.workspace_projection_current)
     mcp.add_resource(resources.command_spec)
     mcp.add_resource(resources.simulation_record)
+
+
+def register_vsh_agent_surface(mcp: FastMCP) -> None:
+    """Register the minimal vsh surface for pydantic-ai agent runs."""
+    mcp.add_tool(tools.apply)
+    mcp.add_tool(tools.apply_batch)

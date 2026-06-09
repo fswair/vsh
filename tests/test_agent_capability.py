@@ -2,6 +2,7 @@ from __future__ import annotations as _annotations
 
 import tempfile
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
@@ -43,10 +44,11 @@ def _scripted_snapshot_and_simulate() -> FunctionModel:
 
 
 def test_vsh_capability_registers_tools() -> None:
-    capability = VshCapability("/tmp/workspace")
+    capability = VshCapability("/tmp/workspace", codemode_mcp=False)
     toolset = capability.get_toolset()
     assert toolset is not None
-    assert set(toolset.tools) == {
+    toolset_with_tools = cast(Any, toolset)
+    assert set(toolset_with_tools.tools) == {
         "vsh_search",
         "vsh_get_schema",
         "vsh_snapshot_workspace",
@@ -80,7 +82,7 @@ def test_vsh_capability_exposes_workspace_deps() -> None:
 
 def test_create_vsh_agent_wires_capability_tools() -> None:
     test_model = TestModel(call_tools=[])
-    agent, capability = create_vsh_agent(test_model, "/tmp/workspace")
+    agent, capability = create_vsh_agent(test_model, "/tmp/workspace", codemode_mcp=False)
 
     agent.run_sync("list tools", deps=capability.deps)
     params = test_model.last_model_request_parameters
@@ -103,7 +105,11 @@ def test_vsh_capability_updates_deps_during_agent_run() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         workspace = Path(tmp)
         (workspace / "README.md").write_text("hello\n", encoding="utf-8")
-        agent, capability = create_vsh_agent(_scripted_snapshot_and_simulate(), workspace)
+        agent, capability = create_vsh_agent(
+            _scripted_snapshot_and_simulate(),
+            workspace,
+            codemode_mcp=False,
+        )
 
         agent.run_sync("Inspect the workspace.", deps=capability.deps)
 
@@ -113,7 +119,7 @@ def test_vsh_capability_updates_deps_during_agent_run() -> None:
 
 def test_vsh_capability_simulate_requires_snapshot() -> None:
     test_model = TestModel(call_tools=["vsh_simulate"])
-    agent, capability = create_vsh_agent(test_model, "/tmp/workspace")
+    agent, capability = create_vsh_agent(test_model, "/tmp/workspace", codemode_mcp=False)
 
     with pytest.raises(Exception, match="snapshot_id is missing"):
         agent.run_sync("simulate now", deps=capability.deps)

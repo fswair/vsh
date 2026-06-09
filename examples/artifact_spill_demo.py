@@ -24,7 +24,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import logfire
 from dotenv import load_dotenv
@@ -127,7 +127,7 @@ def _artifact_refs_from_history(result: AgentRunResult[object]) -> list[dict[str
                 continue
             content = part.content
             if isinstance(content, dict) and "artifact_id" in content and "content_hash" in content:
-                refs.append(content)
+                refs.append(cast(dict[str, Any], content))
     return refs
 
 
@@ -141,7 +141,7 @@ def _simulate_returns_from_history(result: AgentRunResult[object]) -> list[dict[
                 continue
             content = part.content
             if isinstance(content, dict) and "plan_id" in content:
-                payloads.append(content)
+                payloads.append(cast(dict[str, Any], content))
     return payloads
 
 

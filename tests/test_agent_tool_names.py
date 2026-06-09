@@ -2,6 +2,7 @@ from __future__ import annotations as _annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from pydantic_ai.messages import ModelResponse, ToolCallPart
@@ -27,22 +28,15 @@ def test_normalize_agent_tool_name(raw: str, expected: str) -> None:
 
 
 def test_vsh_capability_normalizes_prefixed_tool_calls_in_model_response(tmp_path: Path) -> None:
-    from typing import cast
-
     from pydantic_ai.tools import RunContext
 
-    from vsh.agent import VshAgentDeps
-
     capability = VshCapability(tmp_path)
-    ctx = cast(
-        RunContext[VshAgentDeps],
-        RunContext(
-            deps=capability.deps,
-            model=TestModel(),
-            usage=None,  # type: ignore[arg-type]
-            prompt=None,
-            run_step=0,
-        ),
+    ctx = RunContext(
+        deps=capability.deps,
+        model=TestModel(),
+        usage=cast(Any, None),
+        prompt=None,
+        run_step=0,
     )
     response = ModelResponse(
         parts=[

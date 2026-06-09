@@ -1,6 +1,7 @@
 from __future__ import annotations as _annotations
 
 import time
+from pathlib import Path
 
 from vsh.effects import ActualEffects
 from vsh.execute.dispatch import ExecutionContext, apply_command, effects_match_prediction
@@ -12,6 +13,7 @@ from vsh.plans.models import ExecutionResult
 from vsh.plans.store import plan_store
 from vsh.runtime import runtime
 from vsh.snapshot.models import WorkspaceSnapshot
+from vsh.snapshot.refresh import refresh_snapshot_paths
 
 __all__ = ("execute_approved",)
 
@@ -78,7 +80,7 @@ def execute_approved(approval_token: str) -> ExecutionResult:
             apply_time_ms=elapsed_ms(apply_start_ns),
         )
 
-    updated_snapshot: WorkspaceSnapshot = _apply_session_updates(snapshot, actual_effects)
+    updated_snapshot = _apply_snapshot_updates(snapshot, actual_effects)
     runtime.record_snapshot(updated_snapshot)
     if persistence_enabled():
         persistence_store.save_snapshot(updated_snapshot)
@@ -116,6 +118,46 @@ def _apply_session_updates(
     return snapshot.model_copy(
         update={"session": snapshot.session.with_cwd(actual_effects.cwd_after)}
     )
+
+
+def _apply_snapshot_updates(
+    snapshot: WorkspaceSnapshot,
+    actual_effects: ActualEffects,
+) -> WorkspaceSnapshot:
+    updated = _apply_session_updates(snapshot, actual_effects)
+    refresh_paths = _snapshot_refresh_paths(
+        actual_effects, workspace_root=snapshot.session.workspace_root
+    )
+    if not refresh_paths:
+        return updated
+    refreshed, _paths = refresh_snapshot_paths(updated, refresh_paths)
+    return refreshed
+
+
+def _snapshot_refresh_paths(actual_effects: ActualEffects, *, workspace_root: str) -> set[str]:
+    paths: set[str] = set()
+    root = Path(workspace_root)
+    for path in (
+        list(actual_effects.creates)
+        + list(actual_effects.updates)
+        + list(actual_effects.deletes)
+        + [src for src, _dst in actual_effects.renames]
+        + [dst for _src, dst in actual_effects.renames]
+    ):
+        target = Path(path)
+        paths.add(str(target))
+        try:
+            target.relative_to(root)
+        except ValueError:
+            paths.add(str(target.parent))
+            continue
+        current = target.parent
+        while True:
+            paths.add(str(current))
+            if current == root:
+                break
+            current = current.parent
+    return paths
 
 
 def _run_extension_hooks(snapshot: WorkspaceSnapshot, actual_effects: ActualEffects) -> None:

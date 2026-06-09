@@ -145,9 +145,12 @@ def test_vsh_capability_before_model_request_sanitizes_history(tmp_path: Path) -
     )
     deps = capability.deps
     model = TestModel()
-    ctx = cast(
-        RunContext[VshAgentDeps],
-        RunContext(deps=deps, model=model, usage=None, prompt=None, run_step=0),  # type: ignore[arg-type]
+    ctx = RunContext(
+        deps=deps,
+        model=model,
+        usage=cast(Any, None),
+        prompt=None,
+        run_step=0,
     )
     large = {"blob": "q" * 256}
     request = ModelRequest(
@@ -183,9 +186,12 @@ def test_vsh_capability_after_tool_execute_spills(tmp_path: Path) -> None:
         artifact_spill_bytes=32,
     )
     deps = capability.deps
-    ctx = cast(
-        RunContext[VshAgentDeps],
-        RunContext(deps=deps, model=None, usage=None, prompt=None, run_step=0),  # type: ignore[arg-type]
+    ctx = RunContext(
+        deps=deps,
+        model=cast(Any, None),
+        usage=cast(Any, None),
+        prompt=None,
+        run_step=0,
     )
     large = {"blob": "z" * 256}
 
