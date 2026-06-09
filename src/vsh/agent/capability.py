@@ -9,6 +9,8 @@ from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.tools import RunContext, ToolDefinition
 
+from vsh.artifacts import ArtifactStore, create_artifact_store
+
 from . import _artifact_spill
 from .deps import VshAgentDeps
 from .toolset import _VSH_TOOLSET_INSTRUCTIONS, register_vsh_tools
@@ -39,11 +41,17 @@ class VshCapability(Capability[VshAgentDeps]):
         self,
         workspace_root: str | Path,
         *,
+        artifact_store: ArtifactStore | None = None,
+        artifact_spill_bytes: int | None = None,
         id: str = "vsh",
         defer_loading: bool = False,
         description: str | None = None,
     ) -> None:
-        self._deps = VshAgentDeps.from_path(workspace_root)
+        self._deps = VshAgentDeps(
+            workspace_root=str(Path(workspace_root).resolve()),
+            artifact_store=artifact_store or create_artifact_store(),
+            artifact_spill_bytes=artifact_spill_bytes,
+        )
         super().__init__(
             id=id,
             description=description or _VSH_CAPABILITY_DESCRIPTION,
@@ -98,11 +106,18 @@ def create_vsh_agent(
     workspace_root: str | Path,
     *,
     vsh: VshCapability | None = None,
+    artifact_store: ArtifactStore | None = None,
+    artifact_spill_bytes: int | None = None,
     defer_loading: bool = False,
     **agent_kwargs: Any,
 ) -> tuple[Agent[VshAgentDeps, str], VshCapability]:
     """Build a pydantic-ai Agent with vsh wired through capabilities."""
-    capability = vsh or VshCapability(workspace_root, defer_loading=defer_loading)
+    capability = vsh or VshCapability(
+        workspace_root,
+        artifact_store=artifact_store,
+        artifact_spill_bytes=artifact_spill_bytes,
+        defer_loading=defer_loading,
+    )
     agent = Agent(
         model,
         deps_type=VshAgentDeps,

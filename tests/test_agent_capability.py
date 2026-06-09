@@ -60,6 +60,15 @@ def test_vsh_capability_registers_tools() -> None:
     }
 
 
+def test_vsh_capability_accepts_artifact_store_and_spill_bytes(tmp_path: Path) -> None:
+    from vsh.artifacts import MemoryArtifactStore
+
+    store = MemoryArtifactStore()
+    capability = VshCapability(tmp_path, artifact_store=store, artifact_spill_bytes=2048)
+    assert capability.deps.artifact_store is store
+    assert capability.deps.artifact_spill_bytes == 2048
+
+
 def test_vsh_capability_exposes_workspace_deps() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         capability = VshCapability(tmp)

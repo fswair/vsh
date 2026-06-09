@@ -138,12 +138,12 @@ def test_vsh_capability_before_model_request_sanitizes_history(tmp_path: Path) -
     from pydantic_ai.models.test import TestModel
 
     store = MemoryArtifactStore()
-    deps = VshAgentDeps(
-        workspace_root=str(tmp_path),
+    capability = VshCapability(
+        tmp_path,
         artifact_store=store,
         artifact_spill_bytes=32,
     )
-    capability = VshCapability(tmp_path)
+    deps = capability.deps
     model = TestModel()
     ctx = cast(
         RunContext[VshAgentDeps],
@@ -177,12 +177,12 @@ def test_vsh_capability_after_tool_execute_spills(tmp_path: Path) -> None:
     from pydantic_ai.tools import ToolDefinition
 
     store = MemoryArtifactStore()
-    deps = VshAgentDeps(
-        workspace_root=str(tmp_path),
+    capability = VshCapability(
+        tmp_path,
         artifact_store=store,
         artifact_spill_bytes=32,
     )
-    capability = VshCapability(tmp_path)
+    deps = capability.deps
     ctx = cast(
         RunContext[VshAgentDeps],
         RunContext(deps=deps, model=None, usage=None, prompt=None, run_step=0),  # type: ignore[arg-type]

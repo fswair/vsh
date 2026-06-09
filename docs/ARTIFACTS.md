@@ -117,14 +117,14 @@ Serialized payload size is compared to the threshold (default **8192** bytes):
 2. `str` → UTF-8 (`text/plain`)
 3. `bytes` → raw (`application/octet-stream`)
 
-Override per run on deps:
+Override per capability (recommended):
 
 ```python
-from vsh.agent import VshAgentDeps
+from vsh.agent import VshCapability
 from vsh.artifacts import MemoryArtifactStore
 
-deps = VshAgentDeps(
-    workspace_root="/path/to/workspace",
+vsh = VshCapability(
+    "/path/to/workspace",
     artifact_store=MemoryArtifactStore(),
     artifact_spill_bytes=512,  # aggressive spill for testing
 )
@@ -274,9 +274,11 @@ from pydantic_ai import Agent
 from vsh.agent import VshAgentDeps, VshCapability, create_vsh_agent
 from vsh.artifacts import MemoryArtifactStore
 
-vsh = VshCapability("/path/to/workspace")
-vsh.deps.artifact_store = MemoryArtifactStore()
-vsh.deps.artifact_spill_bytes = 1024
+vsh = VshCapability(
+    "/path/to/workspace",
+    artifact_store=MemoryArtifactStore(),
+    artifact_spill_bytes=1024,
+)
 
 agent, _ = create_vsh_agent(model, "/path/to/workspace", vsh=vsh)
 result = agent.run_sync("Inspect workspace safely.", deps=vsh.deps)

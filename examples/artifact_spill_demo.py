@@ -166,9 +166,11 @@ def run_live_agent(
     cleanup_workspace: bool,
 ) -> None:
     store = MemoryArtifactStore()
-    capability = VshCapability(workspace)
-    capability.deps.artifact_store = store
-    capability.deps.artifact_spill_bytes = spill_bytes
+    capability = VshCapability(
+        workspace,
+        artifact_store=store,
+        artifact_spill_bytes=spill_bytes,
+    )
 
     agent, vsh = create_vsh_agent(
         model,
