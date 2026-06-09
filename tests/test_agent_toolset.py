@@ -61,6 +61,9 @@ def test_create_vsh_function_toolset_registers_tools() -> None:
         "vsh_approve",
         "vsh_execute_approved",
         "vsh_sandbox",
+        "vsh_get_artifact",
+        "vsh_index_artifact",
+        "vsh_search_artifacts",
     }
 
 
@@ -245,6 +248,104 @@ def test_vsh_sandbox_runs_through_agent(tmp_path: Path) -> None:
     result = agent.run_sync("batch simulate", deps=deps)
 
     assert result.output == "done"
+
+
+def test_vsh_artifact_tools_run_through_agent(tmp_path: Path) -> None:
+    from vsh.artifacts import MemoryArtifactStore
+
+    store = MemoryArtifactStore()
+    record = store.put(
+        tool_name="vsh_simulate",
+        payload=b"hello-world",
+        content_type="text/plain; charset=utf-8",
+    )
+    step = 0
+
+    def next_step(_messages: object, _info: object) -> ModelResponse:
+        nonlocal step
+        step += 1
+        if step == 1:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        tool_name="vsh_get_artifact",
+                        args={"artifact_id": record.ref.artifact_id, "offset": 0, "limit": 5},
+                        tool_call_id="get",
+                    )
+                ]
+            )
+        if step == 2:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        tool_name="vsh_index_artifact",
+                        args={
+                            "artifact_id": record.ref.artifact_id,
+                            "title": "hello",
+                            "tags": ["demo"],
+                        },
+                        tool_call_id="index",
+                    )
+                ]
+            )
+        if step == 3:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        tool_name="vsh_search_artifacts",
+                        args={"query": "demo"},
+                        tool_call_id="search",
+                    )
+                ]
+            )
+        return ModelResponse(parts=[TextPart(content="done")])
+
+    deps = VshAgentDeps(workspace_root=str(tmp_path), artifact_store=store)
+    toolset = create_vsh_function_toolset()
+    agent = Agent(FunctionModel(next_step), deps_type=VshAgentDeps, toolsets=[toolset])
+    result = agent.run_sync("artifact flow", deps=deps)
+    assert result.output == "done"
+
+
+def test_vsh_simulate_execution_reason_kwarg_runs_through_agent(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    step = 0
+
+    def next_step(_messages: object, _info: object) -> ModelResponse:
+        nonlocal step
+        step += 1
+        if step == 1:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        tool_name="vsh_snapshot_workspace",
+                        args={},
+                        tool_call_id="snap",
+                    )
+                ]
+            )
+        if step == 2:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        tool_name="vsh_simulate",
+                        args={
+                            "tool_name": "vsh_touch",
+                            "params": {"path": "new.txt"},
+                            "execution_reason": "create marker",
+                        },
+                        tool_call_id="sim",
+                    )
+                ]
+            )
+        return ModelResponse(parts=[TextPart(content="done")])
+
+    deps = VshAgentDeps.from_path(workspace)
+    toolset = create_vsh_function_toolset()
+    agent = Agent(FunctionModel(next_step), deps_type=VshAgentDeps, toolsets=[toolset])
+    agent.run_sync("simulate touch", deps=deps)
+    assert deps.last_plan_id is not None
 
 
 def test_vsh_execute_requires_approval_token() -> None:

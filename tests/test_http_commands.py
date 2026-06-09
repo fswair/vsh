@@ -5,6 +5,7 @@ from typing import cast
 
 import httpx
 import pytest
+from conftest import with_execution_reason
 
 from vsh.execute.dispatch import ExecutionContext, apply_command
 from vsh.execute.realfs import execute_approved
@@ -255,7 +256,9 @@ def test_simulate_curl_with_output_predicts_file_update(tmp_path: Path) -> None:
     (workspace / "page.html").write_text("old\n", encoding="utf-8")
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
     result = simulate_command(
-        CurlCommand(url="https://example.com", output_path="page.html"),
+        with_execution_reason(
+            CurlCommand(url="https://example.com", output_path="page.html"),
+        ),
         snapshot,
     )
     target = str((workspace / "page.html").resolve())
@@ -267,7 +270,9 @@ def test_simulate_curl_with_output_predicts_file_create(tmp_path: Path) -> None:
     workspace.mkdir()
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
     result = simulate_command(
-        CurlCommand(url="https://example.com", output_path="page.html"),
+        with_execution_reason(
+            CurlCommand(url="https://example.com", output_path="page.html"),
+        ),
         snapshot,
     )
     target = str((workspace / "page.html").resolve())
@@ -327,7 +332,10 @@ def test_simulate_wget_predicts_download_path(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-    result = simulate_command(WgetCommand(url="https://example.com/readme.txt"), snapshot)
+    result = simulate_command(
+        with_execution_reason(WgetCommand(url="https://example.com/readme.txt")),
+        snapshot,
+    )
     target = str((workspace / "readme.txt").resolve())
     assert result.decision == "approve_with_warning"
     assert target in result.predicted_effects.creates

@@ -2,6 +2,8 @@ from __future__ import annotations as _annotations
 
 from pathlib import Path
 
+from conftest import with_execution_reason
+
 from vsh.schemas import CopyCommand, MoveCommand, RemoveCommand
 from vsh.simulate.engine import simulate_command
 from vsh.snapshot.builder import snapshot_workspace
@@ -54,6 +56,9 @@ def test_move_rename_of_workspace_child_is_warned(tmp_path: Path) -> None:
     source.write_text("x\n", encoding="utf-8")
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
 
-    result = simulate_command(MoveCommand(src="a.txt", dst="b.txt"), snapshot)
+    result = simulate_command(
+        with_execution_reason(MoveCommand(src="a.txt", dst="b.txt")),
+        snapshot,
+    )
 
     assert result.decision == "approve_with_warning"

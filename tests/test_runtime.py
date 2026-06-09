@@ -3,6 +3,7 @@ from __future__ import annotations as _annotations
 from pathlib import Path
 
 import pytest
+from conftest import with_execution_reason
 
 from vsh.mcp import resources, tools
 from vsh.plans import approve_plan
@@ -148,10 +149,17 @@ def test_common_agent_write_metadata_and_link_commands_simulate_effects(tmp_path
 
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
     stdout_echo = simulate_command(EchoCommand(text="hello"), snapshot)
-    file_echo = simulate_command(EchoCommand(text="hello", output_path="notes.txt"), snapshot)
-    chmod_result = simulate_command(ChmodCommand(mode="+x", path="script.sh"), snapshot)
+    file_echo = simulate_command(
+        with_execution_reason(EchoCommand(text="hello", output_path="notes.txt")),
+        snapshot,
+    )
+    chmod_result = simulate_command(
+        with_execution_reason(ChmodCommand(mode="+x", path="script.sh")),
+        snapshot,
+    )
     link_result = simulate_command(
-        LnCommand(src="script.sh", dst="run.sh", symbolic=True), snapshot
+        with_execution_reason(LnCommand(src="script.sh", dst="run.sh", symbolic=True)),
+        snapshot,
     )
 
     assert stdout_echo.decision == "approve"
@@ -174,7 +182,9 @@ def test_sed_in_place_multi_file_simulation_reports_all_changed_files(tmp_path: 
 
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
     result = simulate_command(
-        SedCommand(script="s/old/new/g", paths=["first.txt", "second.txt"], in_place=True),
+        with_execution_reason(
+            SedCommand(script="s/old/new/g", paths=["first.txt", "second.txt"], in_place=True),
+        ),
         snapshot,
     )
 

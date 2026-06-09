@@ -3,6 +3,7 @@ from __future__ import annotations as _annotations
 from pathlib import Path
 
 import pytest
+from conftest import MUTATION_REASON, with_execution_reason
 
 from vsh.plans.models import SimulationResult
 from vsh.sandbox import (
@@ -75,7 +76,10 @@ def test_advance_snapshot_updates_existing_node_revision(tmp_path: Path) -> None
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
     resolved = str(target.resolve())
     before = snapshot.nodes[resolved].revision
-    touch = simulate_command(TouchCommand(path="existing.txt", no_create=True), snapshot)
+    touch = simulate_command(
+        with_execution_reason(TouchCommand(path="existing.txt", no_create=True)),
+        snapshot,
+    )
     advanced = advance_snapshot(snapshot, touch)
     assert advanced.nodes[resolved].revision == before + 1
 
@@ -106,7 +110,7 @@ def test_advance_snapshot_applies_create_and_cwd(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-    touch = simulate_command(TouchCommand(path="new.txt"), snapshot)
+    touch = simulate_command(with_execution_reason(TouchCommand(path="new.txt")), snapshot)
     advanced = advance_snapshot(snapshot, touch)
     target = str((workspace / "new.txt").resolve())
     assert target in advanced.nodes
@@ -116,9 +120,9 @@ def test_run_vsh_sandbox_chains_simulations(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-    code = """
-simulate("vsh_touch", {"path": "x.txt"})
-simulate("vsh_mkdir", {"path": "foo", "parents": True})
+    code = f"""
+simulate("vsh_touch", {{"path": "x.txt", "execution_reason": "{MUTATION_REASON}"}})
+simulate("vsh_mkdir", {{"path": "foo", "parents": True, "execution_reason": "{MUTATION_REASON}"}})
 return "done"
 """
     result = run_vsh_sandbox(code, snapshot.snapshot_id, policy="read_write")
@@ -176,7 +180,10 @@ def test_advance_snapshot_handles_rename(tmp_path: Path) -> None:
     source = workspace / "src.txt"
     source.write_text("x\n", encoding="utf-8")
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-    move = simulate_command(MoveCommand(src="src.txt", dst="dst.txt", overwrite=True), snapshot)
+    move = simulate_command(
+        with_execution_reason(MoveCommand(src="src.txt", dst="dst.txt", overwrite=True)),
+        snapshot,
+    )
     advanced = advance_snapshot(snapshot, move)
     dst = str((workspace / "dst.txt").resolve())
     assert dst in advanced.nodes
@@ -218,7 +225,7 @@ def test_advance_snapshot_removes_deleted_nodes(tmp_path: Path) -> None:
     target = workspace / "drop.txt"
     target.write_text("x\n", encoding="utf-8")
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-    remove = simulate_command(RemoveCommand(path="drop.txt"), snapshot)
+    remove = simulate_command(with_execution_reason(RemoveCommand(path="drop.txt")), snapshot)
     advanced = advance_snapshot(snapshot, remove)
     assert str(target.resolve()) not in advanced.nodes
 
@@ -255,7 +262,10 @@ def test_advance_snapshot_updates_cwd_and_missing_update_path(tmp_path: Path) ->
     assert advanced.session.cwd_logical == str(sub.resolve())
 
     ghost = str((workspace / "ghost.txt").resolve())
-    touch = simulate_command(TouchCommand(path="ghost.txt", no_create=True), snapshot)
+    touch = simulate_command(
+        with_execution_reason(TouchCommand(path="ghost.txt", no_create=True)),
+        snapshot,
+    )
     effects = touch.predicted_effects.model_copy(update={"creates": [], "updates": [ghost]})
     fake = touch.model_copy(update={"predicted_effects": effects})
     advanced = advance_snapshot(snapshot, fake)
@@ -266,7 +276,10 @@ def test_advance_snapshot_creates_nested_paths(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-    mkdir = simulate_command(MkdirCommand(path="nested/deep", parents=True), snapshot)
+    mkdir = simulate_command(
+        with_execution_reason(MkdirCommand(path="nested/deep", parents=True)),
+        snapshot,
+    )
     advanced = advance_snapshot(snapshot, mkdir)
     target = str((workspace / "nested" / "deep").resolve())
     assert target in advanced.nodes
@@ -287,7 +300,7 @@ def test_advance_snapshot_remove_node_without_parent(tmp_path: Path) -> None:
             }
         }
     )
-    remove = simulate_command(RemoveCommand(path="solo.txt"), snapshot)
+    remove = simulate_command(with_execution_reason(RemoveCommand(path="solo.txt")), snapshot)
     advanced = advance_snapshot(snapshot, remove)
     assert orphan not in advanced.nodes
 
@@ -310,7 +323,10 @@ def test_advance_snapshot_rename_without_parent_in_nodes(tmp_path: Path) -> None
             }
         }
     )
-    move = simulate_command(MoveCommand(src="solo.txt", dst="moved.txt", overwrite=True), snapshot)
+    move = simulate_command(
+        with_execution_reason(MoveCommand(src="solo.txt", dst="moved.txt", overwrite=True)),
+        snapshot,
+    )
     advanced = advance_snapshot(snapshot, move)
     assert dst in advanced.nodes
 
@@ -319,7 +335,7 @@ def test_advance_snapshot_skips_cwd_update_when_unset(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-    touch = simulate_command(TouchCommand(path="plain.txt"), snapshot)
+    touch = simulate_command(with_execution_reason(TouchCommand(path="plain.txt")), snapshot)
     effects = touch.predicted_effects.model_copy(update={"cwd_after": None})
     fake = touch.model_copy(update={"predicted_effects": effects})
     advanced = advance_snapshot(snapshot, fake)
@@ -330,7 +346,7 @@ def test_advance_snapshot_ensure_node_skips_parent_link_for_root_path(tmp_path: 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-    touch = simulate_command(TouchCommand(path="x.txt"), snapshot)
+    touch = simulate_command(with_execution_reason(TouchCommand(path="x.txt")), snapshot)
     fake = touch.model_copy(
         update={"predicted_effects": touch.predicted_effects.model_copy(update={"creates": ["/"]})}
     )
@@ -350,7 +366,7 @@ def test_advance_snapshot_ensure_node_skips_existing_child_link(tmp_path: Path) 
             "nodes": {**snapshot.nodes, root: root_node.model_copy(update={"children": [child]})}
         }
     )
-    touch = simulate_command(TouchCommand(path="linked.txt"), snapshot)
+    touch = simulate_command(with_execution_reason(TouchCommand(path="linked.txt")), snapshot)
     advanced = advance_snapshot(snapshot, touch)
     assert child in advanced.nodes
 
@@ -359,7 +375,7 @@ def test_advance_snapshot_ensure_node_is_idempotent(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-    touch = simulate_command(TouchCommand(path="dup.txt"), snapshot)
+    touch = simulate_command(with_execution_reason(TouchCommand(path="dup.txt")), snapshot)
     advanced = advance_snapshot(snapshot, touch)
     again = advance_snapshot(advanced, touch)
     assert str((workspace / "dup.txt").resolve()) in again.nodes
@@ -380,7 +396,7 @@ def test_advance_snapshot_remove_handles_missing_parent(tmp_path: Path) -> None:
             }
         }
     )
-    remove = simulate_command(RemoveCommand(path="orphan.txt"), snapshot)
+    remove = simulate_command(with_execution_reason(RemoveCommand(path="orphan.txt")), snapshot)
     advanced = advance_snapshot(snapshot, remove)
     assert orphan not in advanced.nodes
 
@@ -398,6 +414,9 @@ def test_advance_snapshot_rename_updates_parent_children(tmp_path: Path) -> None
     snapshot = snapshot.model_copy(
         update={"nodes": {**snapshot.nodes, root: root_node.model_copy(update={"children": [src]})}}
     )
-    move = simulate_command(MoveCommand(src="src.txt", dst="dst.txt", overwrite=True), snapshot)
+    move = simulate_command(
+        with_execution_reason(MoveCommand(src="src.txt", dst="dst.txt", overwrite=True)),
+        snapshot,
+    )
     advanced = advance_snapshot(snapshot, move)
     assert dst in advanced.nodes[root].children

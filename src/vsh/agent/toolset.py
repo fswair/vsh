@@ -23,6 +23,13 @@ Workflow:
 4. Or call vsh_simulate for a single command when a sandbox batch is unnecessary.
 5. Only call vsh_approve and vsh_execute_approved when simulation.execution_eligible is true.
 
+Large tool outputs are spilled to the artifact store and return an ArtifactRef.
+Use vsh_get_artifact for full content, vsh_index_artifact to tag important outputs,
+and vsh_search_artifacts to find them later.
+
+Mutation and destructive commands require execution_reason in simulate params
+(or the vsh_simulate execution_reason argument).
+
 Prefer structured params from JSON schemas over raw shell strings.
 """
 
@@ -58,13 +65,17 @@ def register_vsh_tools(registrar: Any) -> None:
         tool_name: str,
         params: dict[str, Any],
         snapshot_id: str | None = None,
+        execution_reason: str | None = None,
     ) -> dict[str, Any]:
         """Simulate a structured command against a workspace snapshot."""
         active_snapshot_id = snapshot_id or ctx.deps.snapshot_id
         if active_snapshot_id is None:
             msg = "snapshot_id is missing; call vsh_snapshot_workspace first"
             raise ValueError(msg)
-        result = vsh_tools.simulate(tool_name, active_snapshot_id, params)
+        merged_params = dict(params)
+        if execution_reason is not None and "execution_reason" not in merged_params:
+            merged_params["execution_reason"] = execution_reason
+        result = vsh_tools.simulate(tool_name, active_snapshot_id, merged_params)
         ctx.deps.last_plan_id = result["plan_id"]
         return result
 
@@ -105,6 +116,49 @@ def register_vsh_tools(registrar: Any) -> None:
             msg = "snapshot_id is missing; call vsh_snapshot_workspace first"
             raise ValueError(msg)
         return vsh_tools.vsh_sandbox(code, active_snapshot_id, policy=policy)
+
+    @registrar.tool
+    def vsh_get_artifact(
+        ctx: RunContext[VshAgentDeps],
+        artifact_id: str,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Read spilled artifact bytes with optional offset and limit."""
+        record = ctx.deps.artifact_store.get(artifact_id)
+        payload = ctx.deps.artifact_store.read_bytes(artifact_id, offset=offset, limit=limit)
+        truncated = limit is not None and offset + len(payload) < record.ref.byte_size
+        return {
+            "artifact_id": record.ref.artifact_id,
+            "tool_name": record.ref.tool_name,
+            "content_type": record.ref.content_type,
+            "byte_size": record.ref.byte_size,
+            "offset": offset,
+            "limit": limit,
+            "truncated": truncated,
+            "title": record.title,
+            "tags": list(record.tags),
+            "content": payload.decode("utf-8", errors="replace"),
+        }
+
+    @registrar.tool
+    def vsh_index_artifact(
+        ctx: RunContext[VshAgentDeps],
+        artifact_id: str,
+        title: str,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Add searchable title and tags to a spilled artifact."""
+        record = ctx.deps.artifact_store.index(artifact_id, title=title, tags=tags or [])
+        return record.model_dump(mode="json")
+
+    @registrar.tool
+    def vsh_search_artifacts(
+        ctx: RunContext[VshAgentDeps],
+        query: str,
+    ) -> list[dict[str, Any]]:
+        """Search spilled artifacts by hex id, title, or tags."""
+        return [entry.model_dump(mode="json") for entry in ctx.deps.artifact_store.search(query)]
 
 
 def create_vsh_function_toolset() -> FunctionToolset[VshAgentDeps]:

@@ -3,6 +3,7 @@ from __future__ import annotations as _annotations
 from pathlib import Path
 from typing import ClassVar
 
+from conftest import MUTATION_REASON, with_execution_reason
 from pytest import MonkeyPatch
 
 from vsh.plans.models import SimulationResult
@@ -140,7 +141,7 @@ def test_mutation_commands_predict_overlay_effects(tmp_path: Path) -> None:
         ),
     ]
     for command, decision in cases:
-        result = simulate_command(command, snapshot)
+        result = simulate_command(with_execution_reason(command), snapshot)
         assert result.decision == decision
 
 
@@ -149,7 +150,10 @@ def test_fallback_mutation_command_uses_generic_overlay(tmp_path: Path) -> None:
     workspace.mkdir()
     snapshot = _snapshot(workspace)
 
-    result = simulate_command(_FallbackMutationCommand(), snapshot)
+    result = simulate_command(
+        _FallbackMutationCommand(execution_reason=MUTATION_REASON),
+        snapshot,
+    )
 
     assert result.decision == "approve_with_warning"
 

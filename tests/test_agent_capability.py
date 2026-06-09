@@ -54,6 +54,9 @@ def test_vsh_capability_registers_tools() -> None:
         "vsh_approve",
         "vsh_execute_approved",
         "vsh_sandbox",
+        "vsh_get_artifact",
+        "vsh_index_artifact",
+        "vsh_search_artifacts",
     }
 
 
@@ -81,6 +84,9 @@ def test_create_vsh_agent_wires_capability_tools() -> None:
         "vsh_approve",
         "vsh_execute_approved",
         "vsh_sandbox",
+        "vsh_get_artifact",
+        "vsh_index_artifact",
+        "vsh_search_artifacts",
     }
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations as _annotations
 from pathlib import Path
 
 import pytest
+from conftest import with_execution_reason
 
 from vsh.execute.dispatch import ExecutionContext, apply_command
 from vsh.plans.approval import approve_plan
@@ -76,7 +77,10 @@ def test_execute_approved_applies_mkdir_plan(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-    result = simulate_command(MkdirCommand(path="dist", parents=True), snapshot)
+    result = simulate_command(
+        with_execution_reason(MkdirCommand(path="dist", parents=True)),
+        snapshot,
+    )
     token = approve_plan(result.plan_id)
 
     execution = execute_approved(token.token)
@@ -96,7 +100,10 @@ def test_execute_approved_rejects_stale_plan(
     target = workspace / "tracked.txt"
     target.write_text("v1\n", encoding="utf-8")
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-    result = simulate_command(TouchCommand(path="tracked.txt", no_create=True), snapshot)
+    result = simulate_command(
+        with_execution_reason(TouchCommand(path="tracked.txt", no_create=True)),
+        snapshot,
+    )
     token = approve_plan(result.plan_id)
     target.write_text("v2\n", encoding="utf-8")
 

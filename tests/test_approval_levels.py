@@ -3,6 +3,7 @@ from __future__ import annotations as _annotations
 from pathlib import Path
 
 import pytest
+from conftest import with_execution_reason
 
 from vsh.plans.approval import approve_plan, auto_approve_plan
 from vsh.schemas import LsCommand, RemoveCommand, TouchCommand
@@ -27,7 +28,7 @@ def test_mutation_plan_requires_manual_approval(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-    result = simulate_command(TouchCommand(path="new.txt"), snapshot)
+    result = simulate_command(with_execution_reason(TouchCommand(path="new.txt")), snapshot)
 
     assert result.approval_tier == "mutation"
     assert result.requires_manual_approval is True
@@ -45,7 +46,7 @@ def test_destructive_plan_requires_manual_approval(tmp_path: Path) -> None:
     doomed = workspace / "old.txt"
     doomed.write_text("x\n", encoding="utf-8")
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-    result = simulate_command(RemoveCommand(path="old.txt"), snapshot)
+    result = simulate_command(with_execution_reason(RemoveCommand(path="old.txt")), snapshot)
 
     assert result.approval_tier == "destructive"
     assert result.requires_manual_approval is True

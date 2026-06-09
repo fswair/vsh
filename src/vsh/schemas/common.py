@@ -43,6 +43,11 @@ class StructuredCommand(BaseModel):
             "When present, it must match the canonical shell preview before execution is eligible."
         ),
     )
+    execution_reason: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Why this command is being run. Required for mutation and destructive commands.",
+    )
 
     _command_alias: ClassVar[str]
     _single_arg_type: ClassVar[SingleArgStyle | None] = None

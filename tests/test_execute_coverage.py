@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import ClassVar
 
 import pytest
+from conftest import with_execution_reason
 
 from vsh.effects import ActualEffects
 from vsh.execute.dispatch import (
@@ -172,7 +173,10 @@ def test_revalidate_reports_stale_and_refreshes_snapshot(tmp_path: Path) -> None
     target = workspace / "tracked.txt"
     target.write_text("v1\n", encoding="utf-8")
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-    result = simulate_command(TouchCommand(path="tracked.txt", no_create=True), snapshot)
+    result = simulate_command(
+        with_execution_reason(TouchCommand(path="tracked.txt", no_create=True)),
+        snapshot,
+    )
     record = plan_store.get(result.plan_id)
     target.write_text("v2\n", encoding="utf-8")
 
@@ -189,7 +193,10 @@ def test_revalidate_refreshes_deleted_paths(tmp_path: Path) -> None:
     target = workspace / "tracked.txt"
     target.write_text("v1\n", encoding="utf-8")
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-    result = simulate_command(TouchCommand(path="tracked.txt", no_create=True), snapshot)
+    result = simulate_command(
+        with_execution_reason(TouchCommand(path="tracked.txt", no_create=True)),
+        snapshot,
+    )
     record = plan_store.get(result.plan_id)
     target.unlink()
 
@@ -204,7 +211,10 @@ def test_revalidate_keeps_missing_nodes_when_refresh_disabled(tmp_path: Path) ->
     target = workspace / "tracked.txt"
     target.write_text("v1\n", encoding="utf-8")
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-    result = simulate_command(TouchCommand(path="tracked.txt", no_create=True), snapshot)
+    result = simulate_command(
+        with_execution_reason(TouchCommand(path="tracked.txt", no_create=True)),
+        snapshot,
+    )
     record = plan_store.get(result.plan_id)
     resolved = str(target.resolve())
     target.unlink()
@@ -312,7 +322,7 @@ def test_execute_approved_error_paths(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-    result = simulate_command(MkdirCommand(path="pkg"), snapshot)
+    result = simulate_command(with_execution_reason(MkdirCommand(path="pkg")), snapshot)
     token = approve_plan(result.plan_id)
     execute_approved(token.token)
     with pytest.raises(ValueError, match="plan already executed"):
@@ -377,7 +387,10 @@ def test_execute_approved_stale_with_persistence_enabled(
     target = workspace / "tracked.txt"
     target.write_text("v1\n", encoding="utf-8")
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-    result = simulate_command(TouchCommand(path="tracked.txt", no_create=True), snapshot)
+    result = simulate_command(
+        with_execution_reason(TouchCommand(path="tracked.txt", no_create=True)),
+        snapshot,
+    )
     token = approve_plan(result.plan_id)
     target.write_text("v2\n", encoding="utf-8")
     execution = execute_approved(token.token)
@@ -395,7 +408,7 @@ def test_execute_approved_persists_successful_plan(
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-    result = simulate_command(MkdirCommand(path="pkg"), snapshot)
+    result = simulate_command(with_execution_reason(MkdirCommand(path="pkg")), snapshot)
     token = approve_plan(result.plan_id)
     execution = execute_approved(token.token)
     assert execution.applied is True
@@ -428,7 +441,7 @@ def test_realfs_runs_shadow_workspace_runner(tmp_path: Path) -> None:
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-        result = simulate_command(MkdirCommand(path="pkg"), snapshot)
+        result = simulate_command(with_execution_reason(MkdirCommand(path="pkg")), snapshot)
         token = approve_plan(result.plan_id)
         execution = execute_approved(token.token)
         assert execution.applied is True
@@ -442,7 +455,10 @@ def test_execute_approved_returns_apply_failure(
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-    result = simulate_command(MkdirCommand(path="pkg/nested", parents=False), snapshot)
+    result = simulate_command(
+        with_execution_reason(MkdirCommand(path="pkg/nested", parents=False)),
+        snapshot,
+    )
     token = approve_plan(result.plan_id)
 
     def fail_apply(*_args: object, **_kwargs: object) -> ActualEffects:

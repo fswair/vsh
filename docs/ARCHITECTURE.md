@@ -45,6 +45,7 @@ The canonical path is **simulate → approve → execute_approved**. There is no
 | `vsh.extensions` | Optional hooks for hydration and analyzers |
 | `vsh.mcp` | FastMCP tools/resources |
 | `vsh.agent` | pydantic-ai `VshCapability` + `FunctionToolset` adapter |
+| `vsh.artifacts` | Spilled tool-output store (`ArtifactRef`, memory + filesystem backends) |
 
 ## Simulation
 
@@ -86,6 +87,26 @@ approval logic.
 Mutation commands usually return `approve_with_warning`. Both `approve` and
 `approve_with_warning` are execution-eligible unless `raw_command` fails the shell preview
 match check.
+
+Mutation and destructive tiers also require `StructuredCommand.execution_reason` — a
+caller-supplied rationale distinct from `SimulationResult.reason` (system policy text).
+
+## Agent artifact spill
+
+`VshCapability` implements spill directly via pydantic-ai lifecycle hooks:
+
+- `after_tool_execute` — serializes large `vsh_*` tool results, stores bytes in
+  `ArtifactStore`, returns `ArtifactRef.model_dump()`.
+- `before_model_request` — sanitizes history tool returns that still contain oversized
+  payloads (resume / edge-case safety net).
+
+Spill applies only to `vsh_*` agent tools (not MCP in this phase). Artifact passthrough
+tools (`vsh_get_artifact`, `vsh_index_artifact`, `vsh_search_artifacts`) are excluded to
+avoid spill loops.
+
+Filesystem layout: `$VSH_DATA_DIR/artifacts/tool_outputs/{tool_name}_{artifact_id}.{ext}` plus
+a sidecar `.manifest.json` per artifact. `artifact_id` is a lowercase hex string
+(`^[0-9a-f]{8,16}$`).
 
 `VSH_MAX_TOUCHED_PATHS` caps how many paths a single simulation may touch.
 

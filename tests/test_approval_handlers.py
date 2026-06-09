@@ -3,6 +3,7 @@ from __future__ import annotations as _annotations
 from pathlib import Path
 
 import pytest
+from conftest import with_execution_reason
 
 from vsh.extensions import extensions
 from vsh.plans import ApprovalContext, ApprovalDeniedError, ApproveItem, approve_plan
@@ -34,7 +35,7 @@ def test_approve_plan_invokes_registered_handler(tmp_path: Path) -> None:
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-        result = simulate_command(TouchCommand(path="new.txt"), snapshot)
+        result = simulate_command(with_execution_reason(TouchCommand(path="new.txt")), snapshot)
 
         token = approve_plan(result.plan_id)
 
@@ -60,7 +61,7 @@ def test_approve_plan_propagates_handler_denial(tmp_path: Path) -> None:
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-        result = simulate_command(TouchCommand(path="new.txt"), snapshot)
+        result = simulate_command(with_execution_reason(TouchCommand(path="new.txt")), snapshot)
 
         with pytest.raises(ApprovalDeniedError, match="blocked by policy") as exc_info:
             approve_plan(result.plan_id)

@@ -50,6 +50,17 @@ Fields of interest:
 | `journal` | Access journal used for drift fingerprints |
 | `simulation_time_ms` | Wall-clock time spent in `simulate_command` |
 
+### `execution_reason` (mutation / destructive)
+
+All structured commands accept optional `execution_reason: str | None` on
+`StructuredCommand`. When `approval_tier` is `mutation` or `destructive` and the field is
+empty, simulation returns `decision="reject"` with
+`reason="execution_reason is required for mutation commands"`.
+
+Pass it in simulate params (`{"path": "x.txt", "execution_reason": "…"}`), MCP `simulate`,
+sandbox `simulate(...)`, or the agent `vsh_simulate(..., execution_reason="…")` kwarg. The
+value is persisted on `PlanRecord.result.command` and included in the plan fingerprint.
+
 ## Approval
 
 Approval has two layers:
@@ -212,7 +223,20 @@ calls pydantic-ai's `load_capability` tool — useful when vsh shares an agent w
 workflows.
 
 Registered tools: `vsh_search`, `vsh_get_schema`, `vsh_snapshot_workspace`,
-`vsh_simulate`, `vsh_sandbox`, `vsh_approve`, `vsh_execute_approved`.
+`vsh_simulate`, `vsh_sandbox`, `vsh_approve`, `vsh_execute_approved`,
+`vsh_get_artifact`, `vsh_index_artifact`, `vsh_search_artifacts`.
+
+`VshCapability` spills oversized `vsh_*` tool returns to an artifact store and replaces
+them with a compact `ArtifactRef` in tool results and message history. Use
+`vsh_get_artifact` for full content, `vsh_index_artifact` / `vsh_search_artifacts` to tag
+and find important outputs.
+
+Environment:
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `VSH_ARTIFACT_SPILL_BYTES` | `8192` | Spill threshold for agent tool JSON payloads |
+| `VSH_ARTIFACT_STORE` | `filesystem` | `filesystem` or `memory` (`memory` when `VSH_PERSIST=0`) |
 
 ### Legacy toolset
 

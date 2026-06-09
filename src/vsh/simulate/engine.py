@@ -151,14 +151,21 @@ def simulate_command(command: StructuredCommand, snapshot: WorkspaceSnapshot) ->
             decision = "reject"
             reason = f"command would touch too many paths ({len(touched_paths)} > {limit})"
     raw_matches_shell_preview = command.raw_matches_shell_preview(shell_preview)
-    execution_eligible, execution_eligibility_reason = _evaluate_execution_eligibility(
-        decision=decision,
-        raw_matches_shell_preview=raw_matches_shell_preview,
-    )
     approval_tier, requires_manual_approval = classify_approval_requirement(
         command,
         decision=decision,
         overlay=overlay,
+    )
+    if (
+        decision != "reject"
+        and approval_tier in ("mutation", "destructive")
+        and not _has_execution_reason(command)
+    ):
+        decision = "reject"
+        reason = "execution_reason is required for mutation commands"
+    execution_eligible, execution_eligibility_reason = _evaluate_execution_eligibility(
+        decision=decision,
+        raw_matches_shell_preview=raw_matches_shell_preview,
     )
     result = SimulationResult(
         plan_id=plan_id,
@@ -323,6 +330,10 @@ def _evaluate_read_targets(
         "approve",
         None,
     )
+
+
+def _has_execution_reason(command: StructuredCommand) -> bool:
+    return bool((command.execution_reason or "").strip())
 
 
 def _evaluate_execution_eligibility(

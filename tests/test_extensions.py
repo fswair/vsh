@@ -2,6 +2,8 @@ from __future__ import annotations as _annotations
 
 from pathlib import Path
 
+from conftest import with_execution_reason
+
 from vsh.extensions import extensions
 from vsh.plans.approval import approve_plan
 from vsh.schemas import MkdirCommand
@@ -28,7 +30,7 @@ def test_execute_approved_invokes_registered_semantic_analyzer(tmp_path: Path) -
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         snapshot = snapshot_workspace(str(workspace), cwd=str(workspace))
-        result = simulate_command(MkdirCommand(path="pkg"), snapshot)
+        result = simulate_command(with_execution_reason(MkdirCommand(path="pkg")), snapshot)
         token = approve_plan(result.plan_id)
 
         execution = execute_approved(token.token)
