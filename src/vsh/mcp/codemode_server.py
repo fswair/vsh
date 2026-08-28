@@ -3,7 +3,7 @@ from __future__ import annotations as _annotations
 import os
 from pathlib import Path
 
-from fastmcp import FastMCP
+from mcp.server import FastMCP
 
 from .prompts import register_codemode_prompts
 from .surface import register_vsh_agent_surface, register_vsh_surface
@@ -114,7 +114,9 @@ def create_codemode_server(*, custom_instructions: str | None = None) -> FastMCP
     """Build the CodeMode-oriented FastMCP server."""
     server = FastMCP(
         CODEMODE_SERVER_NAME,
-        instructions=build_codemode_instructions(custom_instructions=custom_instructions),
+        instructions=build_codemode_instructions(
+            custom_instructions=custom_instructions
+        ),
         version="0.2.0",
     )
     register_vsh_surface(server)
@@ -139,7 +141,9 @@ def run_codemode_server(
     instructions_file: str | Path | None = None,
 ) -> None:
     """Run the CodeMode MCP server, optionally with custom instructions."""
-    custom = load_custom_instructions(inline=inline, instructions_file=instructions_file)
+    custom = load_custom_instructions(
+        inline=inline, instructions_file=instructions_file
+    )
     if custom is None:
         codemode_mcp.run()
         return

@@ -2,7 +2,12 @@ from __future__ import annotations as _annotations
 
 from typing import Any
 
-from fastmcp.resources.function_resource import resource
+try:
+    from fastmcp.resources.function_resource import resource
+except (
+    ImportError
+):  # fastmcp >= 2 exposes resource via FastMCP instances, but keep compatibility
+    from fastmcp import resource
 
 from vsh.plans.store import plan_store
 from vsh.registry import get_schema, registry

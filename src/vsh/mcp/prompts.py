@@ -1,6 +1,6 @@
 from __future__ import annotations as _annotations
 
-from fastmcp import FastMCP
+from mcp.server import FastMCP
 
 __all__ = ("register_codemode_prompts",)
 

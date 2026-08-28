@@ -1,6 +1,6 @@
 from __future__ import annotations as _annotations
 
-from fastmcp import FastMCP
+from mcp.server import FastMCP
 
 from . import resources, tools
 

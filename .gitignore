@@ -36,3 +36,4 @@ htmlcov/
 
 # Playground benchmark artifacts
 playground/reports/2026*
+/references
