@@ -2486,6 +2486,9 @@ documented platform/configuration requirements are met, VSH guarantees:
 
 - Crash recovery requires the transaction database, journal, staging area, and target
   workspace to use supported durability/filesystem semantics.
+- Windows exposes only the host read-only attribute through VSH mode semantics:
+  writable/read-only files canonicalize to `0o666`/`0o444`, and directories to
+  `0o777`/`0o555`. Full POSIX permission-bit preservation is a Unix guarantee.
 - Atomicity across multiple files is implemented as recoverable journaled commit; it is
   not claimed to be a universal filesystem-level atomic multi-file transaction.
 - A trusted-process or machine crash after commit reservation may interrupt a multi-file

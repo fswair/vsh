@@ -2350,6 +2350,9 @@ impl Committer {
                         "cannot sync created-directory marker removal",
                     )
                 })?;
+                // Windows capability directories deny deletion while their handle
+                // remains open; the ownership check above is complete.
+                drop(directory);
                 parent.remove_dir(leaf).map_err(|_| {
                     recovery_conflict(
                         transaction,

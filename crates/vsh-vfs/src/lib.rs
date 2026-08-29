@@ -14,6 +14,21 @@ use vsh_types::{
     SnapshotId, VPath, VPathError,
 };
 
+#[cfg(not(windows))]
+const DEFAULT_FILE_MODE: u32 = 0o644;
+#[cfg(windows)]
+const DEFAULT_FILE_MODE: u32 = 0o666;
+
+#[cfg(not(windows))]
+const fn platform_directory_mode(mode: u32) -> u32 {
+    mode
+}
+
+#[cfg(windows)]
+const fn platform_directory_mode(mode: u32) -> u32 {
+    if mode & 0o200 == 0 { 0o555 } else { 0o777 }
+}
+
 /// Bytes captured between two metadata observations of the same host node.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapturedContent {
@@ -1053,7 +1068,7 @@ impl VirtualFs {
         }
 
         let blob = self.base.store().put(bytes)?;
-        let mode = before.map_or(0o644, NodeState::mode);
+        let mode = before.map_or(DEFAULT_FILE_MODE, NodeState::mode);
         let node = Arc::new(SnapshotNode::materialized(
             NodeKind::File,
             blob,
@@ -1105,7 +1120,7 @@ impl VirtualFs {
         if self.resolve(path).is_some() {
             return Err(VfsError::AlreadyExists { path: path.clone() });
         }
-        let node = Arc::new(SnapshotNode::directory(mode));
+        let node = Arc::new(SnapshotNode::directory(platform_directory_mode(mode)));
         let after = node.state();
         self.record_write_precondition(path);
         self.overlay.insert(
