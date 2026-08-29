@@ -95,3 +95,13 @@ jobs:
           tests/test_native_runtime.py
           tests/test_python_surface.py
           -q --no-cov
+
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install exact Rust toolchain
+        shell: bash
+        run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Compile and test the complete Windows workspace
+        run: cargo test --workspace --all-targets --locked

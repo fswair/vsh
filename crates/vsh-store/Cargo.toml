@@ -15,5 +15,8 @@ blake3.workspace = true
 cap-std.workspace = true
 vsh-types.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+cap-fs-ext.workspace = true
+
 [lints]
 workspace = true

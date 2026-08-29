@@ -5,9 +5,11 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[cfg(windows)]
+use cap_fs_ext::MetadataExt as CapMetadataExt;
+use cap_std::fs::{Dir, DirEntry, File, Metadata, MetadataExt, OpenOptions};
 #[cfg(unix)]
-use cap_std::fs::PermissionsExt;
-use cap_std::fs::{Dir, DirEntry, File, Metadata, MetadataExt, OpenOptions, Permissions};
+use cap_std::fs::{Permissions, PermissionsExt};
 use vsh_store::BlobStore;
 use vsh_types::{
     BlobId, ContentVersion, DirectoryDigest, FileStamp, NodeKind, NodeState, PlatformFileId, VPath,
@@ -273,11 +275,8 @@ fn stamp_from_metadata(path: &VPath, metadata: &Metadata) -> Result<FileStamp, H
 #[cfg(windows)]
 fn stamp_from_metadata(path: &VPath, metadata: &Metadata) -> Result<FileStamp, HostError> {
     let kind = node_kind(path, metadata)?;
-    let high = MetadataExt::volume_serial_number(metadata)
-        .map(u64::from)
-        .ok_or_else(|| HostError::MissingFileIdentity { path: path.clone() })?;
-    let low = MetadataExt::file_index(metadata)
-        .ok_or_else(|| HostError::MissingFileIdentity { path: path.clone() })?;
+    let high = <Metadata as CapMetadataExt>::dev(metadata);
+    let low = <Metadata as CapMetadataExt>::ino(metadata);
     let readonly = metadata.permissions().readonly();
     let mode = match (kind, readonly) {
         (NodeKind::Directory, false) => 0o777,
@@ -291,10 +290,10 @@ fn stamp_from_metadata(path: &VPath, metadata: &Metadata) -> Result<FileStamp, H
         size: if kind == NodeKind::Directory {
             0
         } else {
-            MetadataExt::file_size(metadata)
+            <Metadata as MetadataExt>::file_size(metadata)
         },
         mode,
-        mtime_ns: i128::from(MetadataExt::last_write_time(metadata)) * 100,
+        mtime_ns: i128::from(<Metadata as MetadataExt>::last_write_time(metadata)) * 100,
         ctime_ns: None,
         file_id: PlatformFileId { high, low },
     })
@@ -731,8 +730,8 @@ fn metadata_identity_matches(left: &Metadata, right: &Metadata) -> bool {
 
 #[cfg(windows)]
 fn metadata_identity_matches(left: &Metadata, right: &Metadata) -> bool {
-    MetadataExt::volume_serial_number(left) == MetadataExt::volume_serial_number(right)
-        && MetadataExt::file_index(left) == MetadataExt::file_index(right)
+    <Metadata as CapMetadataExt>::dev(left) == <Metadata as CapMetadataExt>::dev(right)
+        && <Metadata as CapMetadataExt>::ino(left) == <Metadata as CapMetadataExt>::ino(right)
 }
 
 pub(crate) fn create_new_file(dir: &Dir, name: &str) -> io::Result<File> {

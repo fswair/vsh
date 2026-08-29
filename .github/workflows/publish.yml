@@ -250,7 +250,12 @@ jobs:
           }
           publish_and_wait() {
             local package="$1"
-            cargo publish --locked --package "$package"
+            if curl --fail --silent --show-error \
+              "https://crates.io/api/v1/crates/${package}/${RELEASE_VERSION}" >/dev/null; then
+              echo "${package} ${RELEASE_VERSION} is already published; continuing"
+            else
+              cargo publish --locked --package "$package"
+            fi
             wait_for_crate "$package"
           }
           publish_and_wait vsh-types
@@ -260,7 +265,7 @@ jobs:
           publish_and_wait vsh-commit
           publish_and_wait vsh-monty
           publish_and_wait vsh-runtime
-          cargo publish --locked --package vsh-monty-worker
+          publish_and_wait vsh-monty-worker
 
   publish-pypi:
     name: Attest and publish PyPI matrix

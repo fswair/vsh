@@ -18,5 +18,8 @@ vsh-store.workspace = true
 vsh-types.workspace = true
 vsh-vfs.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+cap-fs-ext.workspace = true
+
 [lints]
 workspace = true

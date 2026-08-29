@@ -5,8 +5,12 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[cfg(windows)]
+use cap_fs_ext::MetadataExt as CapMetadataExt;
 use cap_std::ambient_authority;
-use cap_std::fs::{Dir, Metadata, MetadataExt, OpenOptions};
+#[cfg(unix)]
+use cap_std::fs::MetadataExt;
+use cap_std::fs::{Dir, Metadata, OpenOptions};
 
 const RUNTIME_DIRECTORY: &str = ".vsh-runtime";
 const DATA_DIRECTORY: &str = "data";
@@ -55,7 +59,9 @@ impl DataDirectory {
         let after = fs::symlink_metadata(&path).map_err(|source| {
             DataDirectoryError::io("reinspect trusted data directory", &path, source)
         })?;
-        if !after.is_dir() || after.file_type().is_symlink() || !opened_matches_std(&opened, &after)
+        if !after.is_dir()
+            || after.file_type().is_symlink()
+            || !ambient_directory_matches(&opened, &path)
         {
             return Err(DataDirectoryError::unstable(&path));
         }
@@ -74,10 +80,10 @@ impl DataDirectory {
         })?;
         if !canonical.is_dir()
             || canonical.file_type().is_symlink()
-            || !opened_matches_std(&opened, &canonical)
+            || !ambient_directory_matches(&opened, &canonical_path)
             || !final_named.is_dir()
             || final_named.file_type().is_symlink()
-            || !opened_matches_std(&opened, &final_named)
+            || !ambient_directory_matches(&opened, &path)
         {
             return Err(DataDirectoryError::unstable(&path));
         }
@@ -217,20 +223,20 @@ pub(crate) fn open_real_file(
     name: &str,
     options: &OpenOptions,
 ) -> io::Result<fs::File> {
-    let file = directory.open_with(name, options)?.into_std();
+    let file = directory.open_with(name, options)?;
     let opened = file.metadata()?;
     let named = directory.symlink_metadata(name)?;
     if !opened.is_file()
         || !named.is_file()
         || named.is_symlink()
-        || !std_matches_cap(&opened, &named)
+        || !metadata_identity_matches(&opened, &named)
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "internal VSH file is not a stable real file",
         ));
     }
-    Ok(file)
+    Ok(file.into_std())
 }
 
 #[cfg(not(windows))]
@@ -267,38 +273,14 @@ fn metadata_identity_matches(left: &Metadata, right: &Metadata) -> bool {
 
 #[cfg(windows)]
 fn metadata_identity_matches(left: &Metadata, right: &Metadata) -> bool {
-    MetadataExt::volume_serial_number(left) == MetadataExt::volume_serial_number(right)
-        && MetadataExt::file_index(left) == MetadataExt::file_index(right)
+    <Metadata as CapMetadataExt>::dev(left) == <Metadata as CapMetadataExt>::dev(right)
+        && <Metadata as CapMetadataExt>::ino(left) == <Metadata as CapMetadataExt>::ino(right)
 }
 
-#[cfg(unix)]
-fn std_matches_cap(opened: &fs::Metadata, named: &Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt as _;
-
-    opened.dev() == MetadataExt::dev(named) && opened.ino() == MetadataExt::ino(named)
-}
-
-#[cfg(windows)]
-fn std_matches_cap(opened: &fs::Metadata, named: &Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt as _;
-
-    opened.volume_serial_number() == MetadataExt::volume_serial_number(named)
-        && opened.file_index() == MetadataExt::file_index(named)
-}
-
-#[cfg(unix)]
-fn opened_matches_std(opened: &Metadata, named: &fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt as _;
-
-    MetadataExt::dev(opened) == named.dev() && MetadataExt::ino(opened) == named.ino()
-}
-
-#[cfg(windows)]
-fn opened_matches_std(opened: &Metadata, named: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt as _;
-
-    MetadataExt::volume_serial_number(opened) == named.volume_serial_number()
-        && MetadataExt::file_index(opened) == named.file_index()
+fn ambient_directory_matches(opened: &Metadata, path: &Path) -> bool {
+    Dir::open_ambient_dir(path, ambient_authority())
+        .and_then(|directory| directory.dir_metadata())
+        .is_ok_and(|named| metadata_identity_matches(opened, &named))
 }
 
 #[cfg(not(any(unix, windows)))]
