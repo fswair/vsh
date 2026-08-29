@@ -22,7 +22,7 @@ use crate::host::{
     HostError, SnapshotLimits, capture_snapshot, content_digest, create_new_file,
     create_staged_symlink, directory_digest, open_coordination_file, open_or_create_real_dir,
     open_real_dir, open_real_file, relative_path, relocated_state_matches, set_dir_mode,
-    set_file_mode, stamp_at, stamp_dir, stamp_file, state_matches, sync_dir,
+    set_file_mode, stamp_at, stamp_dir, stamp_file, state_matches, sync_dir, sync_installed_file,
     validate_symlink_target, witness_matches,
 };
 use crate::journal::{
@@ -848,13 +848,15 @@ impl Committer {
         let result = self.prepare_and_commit(
             store,
             transaction,
-            &transaction_name,
             &transaction_dir,
             plan,
             &prepared,
             &encoded,
             faults,
         );
+        // Windows capability directories intentionally deny rename/delete while
+        // open, so the transaction root must close before cleanup is attempted.
+        drop(transaction_dir);
         self.resolve_commit_result(store, transaction, &transaction_name, &prepared, result)
     }
 
@@ -913,7 +915,10 @@ impl Committer {
         result: Result<CommitReceipt, CommitError>,
     ) -> Result<CommitReceipt, CommitError> {
         match result {
-            Ok(receipt) => Ok(receipt),
+            Ok(mut receipt) => {
+                receipt.cleanup_pending = self.cleanup_transaction(transaction_name).is_err();
+                Ok(receipt)
+            }
             Err(error) => {
                 let current = store.get(transaction).ok().map(|record| record.state());
                 match current {
@@ -943,12 +948,19 @@ impl Committer {
                             cause: error.to_string(),
                         })
                     }
-                    Some(TransactionState::Committed) => Ok(CommitReceipt {
-                        transaction,
-                        operations: prepared.operations.len(),
-                        verified_paths: prepared.final_states.len(),
-                        cleanup_pending: true,
-                    }),
+                    Some(TransactionState::Committed) => {
+                        let cleanup_pending = self.cleanup_transaction(transaction_name).is_err();
+                        Ok(CommitReceipt {
+                            transaction,
+                            operations: prepared.operations.len(),
+                            verified_paths: prepared.final_states.len(),
+                            cleanup_pending,
+                        })
+                    }
+                    Some(TransactionState::Stale) => {
+                        let _ = self.cleanup_transaction(transaction_name);
+                        Err(error)
+                    }
                     _ => Err(error),
                 }
             }
@@ -975,7 +987,6 @@ impl Committer {
         &self,
         store: &S,
         transaction: TransactionId,
-        transaction_name: &str,
         transaction_dir: &Dir,
         plan: &CommitPlan<'_>,
         prepared: &PreparedPlan,
@@ -1030,7 +1041,6 @@ impl Committer {
                 TransactionState::Revalidating,
                 TransactionState::Stale,
             )?;
-            let _ = self.cleanup_transaction(transaction_name);
             return Err(CommitError::Stale { conflicts });
         }
         let mut pinned_parents = match self.pin_parent_directories(plan, prepared) {
@@ -1041,7 +1051,6 @@ impl Committer {
                     TransactionState::Revalidating,
                     TransactionState::Stale,
                 )?;
-                let _ = self.cleanup_transaction(transaction_name);
                 return Err(CommitError::Stale { conflicts });
             }
             Err(error) => return Err(error),
@@ -1125,12 +1134,12 @@ impl Committer {
             TransactionState::Committed,
         )?;
         Self::check_fault(faults, FaultPoint::CommittedStatePersisted)?;
-        let cleanup_pending = self.cleanup_transaction(transaction_name).is_err();
         Ok(CommitReceipt {
             transaction,
             operations: prepared.operations.len(),
             verified_paths: prepared.final_states.len(),
-            cleanup_pending,
+            // The outer commit frame retries after all transaction handles close.
+            cleanup_pending: true,
         })
     }
 
@@ -1452,7 +1461,7 @@ impl Committer {
                 let file = parent
                     .open(leaf)
                     .map_err(|source| HostError::io("open committed file", path, source))?;
-                file.sync_all()
+                sync_installed_file(&file)
                     .map_err(|source| HostError::io("sync committed file", path, source))?;
                 sync_dir(parent).map_err(|source| {
                     HostError::io("sync committed parent directory", path, source)
@@ -1729,6 +1738,7 @@ impl Committer {
                     Err(source) => return Err(source.into()),
                 }
                 report.finalized_commits += 1;
+                drop(transaction_dir);
                 self.cleanup_transaction(&name)?;
                 report.cleaned += 1;
                 continue;
@@ -1810,6 +1820,9 @@ impl Committer {
                 }
             }
             report.rolled_back += 1;
+            drop(quarantine);
+            drop(stage);
+            drop(transaction_dir);
             self.cleanup_transaction(&name)?;
             report.cleaned += 1;
         }

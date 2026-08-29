@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
@@ -14,10 +15,14 @@ use vsh_store::{
     TransactionStore, TransactionStoreError,
 };
 use vsh_types::{
-    BlobId, DiffEntry, DiffKind, FileStamp, NodeKind, NodeState, PlatformFileId, PolicyDigest,
-    ProgramDigest, RuntimeConfigDigest, TransactionBinding, TransactionId, TransactionState, VPath,
+    BlobId, FileStamp, NodeKind, NodeState, PlatformFileId, PolicyDigest, ProgramDigest,
+    RuntimeConfigDigest, TransactionBinding, TransactionId, TransactionState, VPath,
 };
-use vsh_vfs::{CanonicalDiff, ReadObservation, SnapshotError, VirtualFs, WritePrecondition};
+#[cfg(unix)]
+use vsh_types::{DiffEntry, DiffKind};
+use vsh_vfs::{CanonicalDiff, SnapshotError, VirtualFs};
+#[cfg(unix)]
+use vsh_vfs::{ReadObservation, WritePrecondition};
 
 use super::*;
 
@@ -521,6 +526,7 @@ fn relocated_runtime_directory_is_never_exposed_as_workspace_data() {
     assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
 }
 
+#[cfg(unix)]
 #[test]
 fn relocated_workspace_is_rejected_before_further_observation() {
     let directory = TestDirectory::new("relocated-workspace");
@@ -543,6 +549,26 @@ fn relocated_workspace_is_rejected_before_further_observation() {
         b"original"
     );
     assert!(relocated.join(".vsh-runtime/data/blobs").is_dir());
+}
+
+#[cfg(windows)]
+#[test]
+fn open_workspace_handle_prevents_relocation() {
+    let directory = TestDirectory::new("pinned-workspace");
+    let workspace = directory.workspace();
+    fs::create_dir(&workspace).unwrap();
+    fs::write(workspace.join("visible.txt"), b"original").unwrap();
+    let (committer, _data) =
+        Committer::open_with_workspace_data(&workspace, CommitConfig::default()).unwrap();
+    let relocated = directory.0.join("workspace-relocated");
+
+    assert!(fs::rename(&workspace, &relocated).is_err());
+    assert!(!relocated.exists());
+    assert!(committer.snapshot(SnapshotLimits::default()).is_ok());
+    assert_eq!(
+        fs::read(workspace.join("visible.txt")).unwrap(),
+        b"original"
+    );
 }
 
 #[test]
@@ -636,6 +662,7 @@ fn bounded_preflight_failure_finalizes_the_consumed_reservation() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn workspace_identity_failure_finalizes_the_consumed_reservation() {
     let (directory, committer) = fixture("workspace-preflight");
@@ -894,6 +921,7 @@ fn overlapping_committers_serialize_revalidation_and_only_one_writer_wins() {
     assert_eq!(fs::read(workspace.join("shared.txt")).unwrap(), b"first");
 }
 
+#[cfg(unix)]
 #[test]
 fn parent_swap_after_durable_intent_cannot_redirect_a_mutation() {
     let directory = TestDirectory::new("parent-swap");
@@ -949,6 +977,50 @@ fn parent_swap_after_durable_intent_cannot_redirect_a_mutation() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn pinned_parent_handle_prevents_swap_during_commit() {
+    let directory = TestDirectory::new("parent-swap-blocked");
+    let workspace = directory.workspace();
+    fs::create_dir_all(workspace.join("parent")).unwrap();
+    fs::write(workspace.join("parent/value.txt"), b"old").unwrap();
+    let blobs = BlobStore::open(directory.data()).unwrap();
+    let committer = Committer::open(&workspace, blobs, CommitConfig::default()).unwrap();
+    let snapshot = committer.snapshot(SnapshotLimits::default()).unwrap();
+    let mut vfs = VirtualFs::new(snapshot);
+    vfs.write(&path("parent/value.txt"), b"transaction")
+        .unwrap();
+    let diff = vfs.canonical_diff().unwrap();
+    let binding = binding(&vfs, &diff);
+    let plan = CommitPlan::new(&binding, &diff, vfs.read_set(), vfs.write_set()).unwrap();
+    let store = MemoryTransactionStore::default();
+    let reservation = reserve(&store, &binding);
+    let attempted = AtomicBool::new(false);
+    let blocked = AtomicBool::new(false);
+
+    let receipt = committer
+        .commit_with_faults(&store, reservation, &plan, &|point| {
+            if point == FaultPoint::IntentSynced(0) && !attempted.swap(true, Ordering::AcqRel) {
+                blocked.store(
+                    fs::rename(workspace.join("parent"), workspace.join("detached-parent"))
+                        .is_err(),
+                    Ordering::Release,
+                );
+            }
+            false
+        })
+        .unwrap();
+
+    assert!(attempted.load(Ordering::Acquire));
+    assert!(blocked.load(Ordering::Acquire));
+    assert!(!receipt.cleanup_pending);
+    assert_eq!(
+        fs::read(workspace.join("parent/value.txt")).unwrap(),
+        b"transaction"
+    );
+    assert!(!workspace.join("detached-parent").exists());
+}
+
 #[test]
 fn every_durable_boundary_is_recoverable_or_already_committed() {
     let mut points = vec![
@@ -995,7 +1067,7 @@ fn every_durable_boundary_is_recoverable_or_already_committed() {
 
         if point == FaultPoint::CommittedStatePersisted {
             let receipt = result.expect("a durable committed state is success");
-            assert!(receipt.cleanup_pending);
+            assert!(!receipt.cleanup_pending);
             assert_eq!(state, TransactionState::Committed);
         } else {
             assert!(result.is_err(), "fault {point:?} unexpectedly succeeded");

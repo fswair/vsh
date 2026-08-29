@@ -199,6 +199,21 @@ pub(crate) fn sync_dir(_dir: &Dir) -> io::Result<()> {
     Ok(())
 }
 
+pub(crate) fn sync_installed_file(file: &File) -> io::Result<()> {
+    #[cfg(not(windows))]
+    {
+        file.sync_all()
+    }
+    #[cfg(windows)]
+    {
+        // The staged inode was already flushed through its writable handle. A
+        // read-only Windows handle cannot call FlushFileBuffers, and Windows
+        // exposes no directory-entry fsync equivalent for the new hard link.
+        let _ = file;
+        Ok(())
+    }
+}
+
 pub(crate) fn stamp_at(root: &Dir, path: &VPath) -> Result<Option<FileStamp>, HostError> {
     match root.symlink_metadata(relative_path(path)) {
         Ok(metadata) => stamp_from_metadata(path, &metadata).map(Some),
@@ -810,10 +825,9 @@ pub(crate) fn set_dir_mode(dir: &Dir, mode: u32) -> io::Result<()> {
     }
     #[cfg(windows)]
     {
-        let file = dir.try_clone()?.into_std_file();
-        let mut permissions = file.metadata()?.permissions();
+        let mut permissions = dir.dir_metadata()?.permissions();
         permissions.set_readonly(mode & 0o200 == 0);
-        file.set_permissions(permissions)
+        dir.set_permissions(".", permissions)
     }
 }
 

@@ -381,7 +381,6 @@ mod tests {
     #[test]
     fn workspace_data_directory_is_real_and_pinned() {
         let workspace = TestDirectory::new("pinned-workspace");
-        let outside = TestDirectory::new("pinned-outside");
         let data = DataDirectory::open_workspace(workspace.path()).unwrap();
 
         assert_eq!(data.path(), workspace.path().join(".vsh-runtime/data"));
@@ -392,6 +391,7 @@ mod tests {
         {
             use std::os::unix::fs::symlink;
 
+            let outside = TestDirectory::new("pinned-outside");
             let original = workspace.path().join(".vsh-runtime");
             let relocated = workspace.path().join(".vsh-runtime-relocated");
             fs::rename(&original, &relocated).unwrap();
