@@ -40,6 +40,7 @@ htmlcov/
 .env
 .env.*
 !.env.example
+.cratesrc
 .logfire
 
 # Playground benchmark artifacts
