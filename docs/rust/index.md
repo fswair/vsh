@@ -9,7 +9,7 @@ Before the first registry publication, use the workspace package:
 
 ```toml
 [dependencies]
-vsh-runtime = { path = "crates/vsh-sdk", version = "=0.3.0" }
+vsh-runtime = { path = "crates/vbash", version = "=0.3.0" }
 ```
 
 After registry publication, keep the exact version pin required by the project supply

@@ -45,11 +45,11 @@ Current stable-toolchain core result:
 
 | Metric | Measured | Merge floor |
 |---|---:|---:|
-| Lines | 80.50% | 79% |
-| Functions | 71.76% | 70% |
-| Regions | 82.51% | 81% |
+| Lines | 80.52% | 79% |
+| Functions | 71.78% | 70% |
+| Regions | 82.53% | 81% |
 
-The measurement executed 133 Rust tests. The ignore expression affects the threshold
+The measurement executed 134 Rust tests. The ignore expression affects the threshold
 report, not test execution. `vsh-python`
 is loaded and exercised by the 38 Python/PyO3 tests. `vsh-worker` is exercised through
 eight real subprocess protocol/isolation tests. Both report zero when measured only by

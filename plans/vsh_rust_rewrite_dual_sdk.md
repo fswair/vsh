@@ -19,7 +19,7 @@ that document remain authoritative unless this document strengthens them.
 | 8 | Implemented | `vsh-runtime` facade and `vsh._native` PyO3 surface share version `0.3.0`; Python result compatibility is checked before persistence/commit, blocking native work releases the GIL, and panics map into one catchable Python exception hierarchy. |
 | 9 | Implemented | The optional FastMCP adapter exposes only `vsh_run`; preview promotion reuses the exact native transaction. |
 | 10 | In progress | Paired native-Rust and PyO3 fat-LTO evidence closes preview-fsync and full-path snapshot metadata bottlenecks; the final post-hardening 100-sample rerun keeps distinguishable incremental PyO3 p50 at 1.3–16.5 µs, covers search over 10k files, 100-file rename/delete subtrees, a 5,050-node delete, 30 cold starts, and independent-runtime scaling. Equivalent clean frozen-baseline, supported-platform/worker-tree RSS, and adversarial performance runs remain release gates. |
-| 11 | In progress | Isolated CPython 3.14 wheel and sdist install/import/commit, all eight registry crate archives, Rust advisory/license/source gates, the hash-locked Python CVE scan, 100% shipped-Python line/branch coverage, and Rust core coverage of 80.50% lines / 71.76% functions / 82.51% regions pass locally. A SHA-pinned build-only rehearsal plus gated 20-wheel dual-registry/provenance workflow is implemented; executing the hosted platform matrix and publishing still require CI environments, credentials, and an explicit release tag. |
+| 11 | In progress | Isolated CPython 3.14 wheel and sdist install/import/commit, all eight registry crate archives, Rust advisory/license/source gates, the hash-locked Python CVE scan, 100% shipped-Python line/branch coverage, and Rust core coverage of 80.52% lines / 71.78% functions / 82.53% regions pass locally. A SHA-pinned build-only rehearsal plus gated 20-wheel dual-registry/provenance workflow is implemented; executing the hosted platform matrix and publishing still require CI environments, credentials, and an explicit release tag. |
 | 12 | Deferred | No deferred optimization is admitted without new benchmark evidence. |
 
 ## 1. Product north star
@@ -96,8 +96,8 @@ The intended release train contains:
 The crates.io name `vsh` is already occupied by an unrelated `0.0.0` package. The
 public package therefore uses the provisional registry name `vsh-runtime` and exports
 the Rust library target as `vsh`. Registry ownership must be verified again before the
-first publish. The existing Python distribution identity remains `vbash` until a
-separate, explicit rename decision is made.
+first publish. The Python distribution identity remains `vbash`, while Python imports
+remain `vsh`.
 
 Internal workspace crates started with `publish = false`. Packaging evidence selected
 the following release shape before crates.io release:
@@ -136,7 +136,7 @@ vsh/
 │   ├── vsh-monty/       # typed Monty OS-call adapter and worker lifecycle
 │   ├── vsh-policy/      # call policy, transaction policy, judge contract
 │   ├── vsh-commit/      # revalidation, journal, recovery, verification
-│   ├── vsh-sdk/         # orchestration + `vsh-runtime` public native facade
+│   ├── vbash/           # orchestration + `vsh-runtime` public native facade
 │   ├── vsh-python/      # PyO3 extension (`vsh._native`), crates.io publish disabled
 │   └── vsh-worker/      # bounded, crash-isolated Monty worker executable
 ├── src/vsh/             # thin Python package, stubs, CLI, optional MCP adapter
@@ -154,7 +154,7 @@ Dependency direction:
 ```text
 vsh-types → vsh-store → vsh-vfs → vsh-policy
      \           \          \          \
-      └────────── vsh-commit + vsh-monty ─→ vsh-sdk (`vsh-runtime`)
+      └────────── vsh-commit + vsh-monty ─→ vbash (`vsh-runtime`)
                                              └→ vsh-python → Python MCP adapter
 
 Monty crates → vsh-worker (separate supervised process; no core back-edge)
@@ -165,7 +165,8 @@ No core crate depends on PyO3, MCP, Click, Pydantic, or another adapter framewor
 The current requirement-by-requirement verification, resolved hardening findings, and
 remaining external release gates are recorded in
 `docs/rust-rewrite/PLAN_VALIDATION.md`.
-`vsh-python` depends inward on `vsh-sdk`; `vsh-sdk` never depends outward on Python.
+`vsh-python` depends inward on the `vbash` facade directory; the facade never depends
+outward on Python.
 
 ## 5. Native Rust API
 
@@ -528,7 +529,7 @@ measurement is explicitly marked with a reason and owner.
 Implement:
 
 - pinned Rust 1.95 toolchain and workspace policy,
-- `vsh-types`, `vsh-store` skeleton, `vsh-sdk`, and `vsh-python`,
+- `vsh-types`, `vsh-store` skeleton, `vbash`, and `vsh-python`,
 - VPath, BlobId, SnapshotId, TransactionId, TransactionState, and error model,
 - checksummed, bounded two-slot file store using `std`; a database dependency is
   admitted only if cross-process contention/compaction evidence requires it,

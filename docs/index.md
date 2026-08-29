@@ -28,7 +28,7 @@ virtual state and binds the resulting artifact to what was actually observed.
 
 - **1.3–16.5 µs:** estimated incremental PyO3 p50 in post-hardening cases.
 - **4.15× / 4.20×:** four-runtime native / Python throughput speedup.
-- **133 + 38 tests:** Rust and shipped-Python tests in the merge record.
+- **134 + 38 tests:** Rust and shipped-Python tests in the merge record.
 
 ## One semantic core, two SDKs
 

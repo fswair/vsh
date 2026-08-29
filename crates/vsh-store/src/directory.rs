@@ -235,7 +235,9 @@ pub(crate) fn open_real_file(
 
 #[cfg(not(windows))]
 pub(crate) fn sync_directory(directory: &Dir) -> io::Result<()> {
-    directory.try_clone()?.into_std_file().sync_all()
+    let mut options = OpenOptions::new();
+    options.read(true);
+    directory.open_with(".", &options)?.into_std().sync_all()
 }
 
 #[cfg(windows)]
@@ -383,6 +385,15 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn capability_directory_can_be_synchronized() {
+        let workspace = TestDirectory::new("sync-capability");
+        let directory = Dir::open_ambient_dir(workspace.path(), ambient_authority()).unwrap();
+
+        sync_directory(&directory).unwrap();
     }
 
     #[test]

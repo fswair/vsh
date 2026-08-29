@@ -185,8 +185,16 @@ pub(crate) fn relative_path(path: &VPath) -> &Path {
     Path::new(path.as_str())
 }
 
+#[cfg(not(windows))]
 pub(crate) fn sync_dir(dir: &Dir) -> io::Result<()> {
-    dir.try_clone()?.into_std_file().sync_all()
+    let mut options = OpenOptions::new();
+    options.read(true);
+    dir.open_with(".", &options)?.into_std().sync_all()
+}
+
+#[cfg(windows)]
+pub(crate) fn sync_dir(_dir: &Dir) -> io::Result<()> {
+    Ok(())
 }
 
 pub(crate) fn stamp_at(root: &Dir, path: &VPath) -> Result<Option<FileStamp>, HostError> {

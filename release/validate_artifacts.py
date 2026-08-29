@@ -95,6 +95,8 @@ def validate_sdist(path: Path, version: str) -> None:
     required = {
         f"{prefix}Cargo.lock",
         f"{prefix}Cargo.toml",
+        f"{prefix}crates/vbash/Cargo.toml",
+        f"{prefix}crates/vbash/src/lib.rs",
         f"{prefix}crates/vsh-worker/Cargo.toml",
         f"{prefix}crates/vsh-worker/src/child.rs",
         f"{prefix}crates/vsh-worker/src/lib.rs",
@@ -109,8 +111,12 @@ def validate_sdist(path: Path, version: str) -> None:
         if missing:
             raise RuntimeError(f"{path.name} misses build inputs: {missing}")
         manifest = archive.extractfile(f"{prefix}Cargo.toml")
-        if manifest is None or b'"crates/vsh-worker"' not in manifest.read():
-            raise RuntimeError(f"{path.name} does not retain the worker workspace member")
+        if manifest is None:
+            raise RuntimeError(f"{path.name} does not contain the workspace manifest")
+        workspace_manifest = manifest.read()
+        required_members = (b'"crates/vbash"', b'"crates/vsh-worker"')
+        if any(member not in workspace_manifest for member in required_members):
+            raise RuntimeError(f"{path.name} does not retain the required workspace members")
     forbidden = (
         f"{prefix}src/vsh/agent/",
         f"{prefix}src/vsh/execute/",

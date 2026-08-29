@@ -16,7 +16,7 @@ Scope: current working tree against `plans/vsh_rust_rewrite_dual_sdk.md`
 | Deterministic durable state and single-use commit | Satisfied locally | Exact transaction binding, CAS lifecycle edges, reservation consumption, approval expiry, checksummed append log, two-slot compaction, durable intent/completion witnesses, post-commit verification, and recovery are exercised. Preflight failures after reservation end in `Failed`; complete checksum-corrupt frames never roll state backward. |
 | Concurrency and crash recovery | Satisfied locally | Same-workspace commits serialize only revalidation/mutation; independent runtimes scale in parallel. Every injected durable commit boundary recovers to the original or committed state, and ambiguous ownership remains untouched. |
 | Safe and low-overhead PyO3 boundary | Satisfied locally | Native calls release the GIL, including runtime open/recovery; panics are caught before crossing FFI; errors share `VshRuntimeError`; results use Monty's typed converter rather than JSON. The final 100-sample validation estimates 1.3–16.5 microseconds distinguishable incremental PyO3 p50. |
-| Coverage is an enforced merge signal | Satisfied locally | 133 Rust tests measure 80.50% lines, 71.76% functions, and 82.51% regions; CI floors are raised to 79/70/81. The 38 shipped-Python tests retain 100% line and branch coverage. See `COVERAGE.md` for boundary rationale. |
+| Coverage is an enforced merge signal | Satisfied locally | 134 Rust tests measure 80.52% lines, 71.78% functions, and 82.53% regions; CI floors are raised to 79/70/81. The 38 shipped-Python tests retain 100% line and branch coverage. See `COVERAGE.md` for boundary rationale. |
 | Reproducible release workflow | Implemented; hosted execution outstanding | Versions agree at 0.3.0, actions/tools are immutable or exact-pinned, local archives validate, and ordinary/manual workflows cannot publish. The 20-wheel hosted matrix, provenance, protected environments, registry visibility waits, and actual publication require GitHub/registry authority. |
 | Dual-SDK documentation and agent integration | Satisfied locally | Zensical 0.0.57 builds 35 source pages in strict mode. Rust and Python APIs are separated; architecture, examples, use cases, benchmarks, security, MCP, and agent workflows are covered. Every page exposes its exact source through Copy as Markdown and supports automatic light/dark themes. `/llms.txt` indexes and `/llms-full.txt` concatenates all 35 Markdown sources. |
 
@@ -41,7 +41,7 @@ No new runtime dependency was introduced for these fixes, and workspace Rust cra
 
 - `cargo fmt --all -- --check`: pass.
 - `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`: pass.
-- `cargo llvm-cov --workspace --all-features --all-targets --locked ...`: 133/133 tests pass; 80.50/71.76/82.51 coverage.
+- `cargo llvm-cov --workspace --all-features --all-targets --locked ...`: 134/134 tests pass; 80.52/71.78/82.53 coverage.
 - `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked`: pass.
 - PyO3/Python release-surface tests: 38/38 pass; 100% line and branch coverage.
 - Ruff format/lint, ty, and basedpyright: pass.

@@ -38,7 +38,7 @@ it executes the whole program and returns evidence, but it never changes host fi
 
     ```toml
     [dependencies]
-    vsh-runtime = { path = "crates/vsh-sdk", version = "=0.3.0" }
+    vsh-runtime = { path = "crates/vbash", version = "=0.3.0" }
     ```
 
     The Cargo package is `vsh-runtime`; its library target is imported as `vsh`.

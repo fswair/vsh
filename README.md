@@ -56,7 +56,7 @@ Until the first registry release, use the workspace package directly:
 
 ```toml
 [dependencies]
-vsh-runtime = { path = "crates/vsh-sdk", version = "=0.3.0" }
+vsh-runtime = { path = "crates/vbash", version = "=0.3.0" }
 ```
 
 ```rust,no_run

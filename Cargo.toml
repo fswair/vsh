@@ -7,7 +7,7 @@ members = [
     "crates/vsh-policy",
     "crates/vsh-monty",
     "crates/vsh-commit",
-    "crates/vsh-sdk",
+    "crates/vbash",
     "crates/vsh-python",
     "crates/vsh-worker",
 ]
@@ -18,7 +18,7 @@ default-members = [
     "crates/vsh-policy",
     "crates/vsh-monty",
     "crates/vsh-commit",
-    "crates/vsh-sdk",
+    "crates/vbash",
 ]
 
 [workspace.package]
@@ -45,7 +45,7 @@ vsh-policy = { path = "crates/vsh-policy", version = "=0.3.0" }
 vsh-types = { path = "crates/vsh-types", version = "=0.3.0" }
 vsh-store = { path = "crates/vsh-store", version = "=0.3.0" }
 vsh-vfs = { path = "crates/vsh-vfs", version = "=0.3.0" }
-vsh-runtime = { path = "crates/vsh-sdk", version = "=0.3.0" }
+vsh-runtime = { path = "crates/vbash", version = "=0.3.0" }
 
 [workspace.lints.rust]
 elided_lifetimes_in_paths = "deny"
