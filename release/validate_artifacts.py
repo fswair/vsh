@@ -95,6 +95,7 @@ def validate_sdist(path: Path, version: str) -> None:
     required = {
         f"{prefix}Cargo.lock",
         f"{prefix}Cargo.toml",
+        f"{prefix}LICENSE",
         f"{prefix}crates/vbash/Cargo.toml",
         f"{prefix}crates/vbash/src/lib.rs",
         f"{prefix}crates/vsh-worker/Cargo.toml",

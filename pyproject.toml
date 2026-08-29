@@ -92,6 +92,7 @@ exclude = [
     "src/vsh/mcp/tools.py",
 ]
 include = [
+    { path = "LICENSE", format = "sdist" },
     { path = "scripts/vsh_build_backend.py", format = "sdist" },
     { path = "rust-toolchain.toml", format = "sdist" },
     { path = "THIRD_PARTY_NOTICES.md", format = "sdist" },

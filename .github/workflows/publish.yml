@@ -312,4 +312,5 @@ jobs:
       - name: Publish with PyPI trusted publishing
         run: >-
           uv publish --trusted-publishing always
+          --check-url https://pypi.org/simple/
           release-dist/vbash-*.whl release-dist/vbash-*.tar.gz
