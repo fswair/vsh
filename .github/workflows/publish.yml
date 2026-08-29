@@ -240,6 +240,7 @@ jobs:
             local package="$1"
             for _ in $(seq 1 30); do
               if curl --fail --silent --show-error \
+                --user-agent "vsh-release-workflow (https://github.com/fswair/vsh)" \
                 "https://crates.io/api/v1/crates/${package}/${RELEASE_VERSION}" >/dev/null; then
                 return 0
               fi
@@ -251,6 +252,7 @@ jobs:
           publish_and_wait() {
             local package="$1"
             if curl --fail --silent --show-error \
+              --user-agent "vsh-release-workflow (https://github.com/fswair/vsh)" \
               "https://crates.io/api/v1/crates/${package}/${RELEASE_VERSION}" >/dev/null; then
               echo "${package} ${RELEASE_VERSION} is already published; continuing"
             else
