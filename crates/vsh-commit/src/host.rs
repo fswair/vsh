@@ -805,14 +805,13 @@ pub(crate) fn set_file_mode(file: &File, mode: u32) -> io::Result<()> {
 }
 
 pub(crate) fn set_dir_mode(dir: &Dir, mode: u32) -> io::Result<()> {
-    let file = dir.try_clone()?.into_std_file();
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
-        file.set_permissions(std::fs::Permissions::from_mode(mode))
+        dir.set_permissions(".", Permissions::from_mode(mode))
     }
     #[cfg(windows)]
     {
+        let file = dir.try_clone()?.into_std_file();
         let mut permissions = file.metadata()?.permissions();
         permissions.set_readonly(mode & 0o200 == 0);
         file.set_permissions(permissions)
