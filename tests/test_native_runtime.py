@@ -110,6 +110,37 @@ def test_pyo3_strict_preview_approval_and_commit_are_one_bound_artifact(
     assert (tmp_path / "approved.txt").read_text() == "yes"
 
 
+def test_pyo3_preview_accepts_source_code_with_keyword_configuration(tmp_path: Path) -> None:
+    runtime = Runtime.open(tmp_path)
+    preview = runtime.preview(
+        "from pathlib import Path\nPath('/workspace/direct.txt').write_text('yes')",
+        intent="Exercise the direct preview overload",
+        detail=ReceiptDetail.FULL,
+        budget=ExecutionBudget(max_program_bytes=1024),
+    )
+
+    assert preview.state == "auto_approved"
+    assert preview.changes == [("direct.txt", "create")]
+    assert not (tmp_path / "direct.txt").exists()
+
+
+def test_pyo3_preview_preserves_the_request_overload(tmp_path: Path) -> None:
+    runtime = Runtime.open(tmp_path)
+
+    preview = runtime.preview(request=RunRequest("{'answer': 42}"))
+
+    assert preview.result == {"answer": 42}
+
+
+def test_pyo3_preview_rejects_ambiguous_or_invalid_inputs(tmp_path: Path) -> None:
+    runtime = Runtime.open(tmp_path)
+
+    with pytest.raises(TypeError, match="only valid when preview.*receives source code"):
+        runtime.preview(cast(str, RunRequest("42")), detail=ReceiptDetail.FULL)
+    with pytest.raises(TypeError, match="requires a RunRequest or source-code str"):
+        runtime.preview(cast(str, 42))
+
+
 def test_pyo3_stale_error_never_applies_virtual_output(tmp_path: Path) -> None:
     source = tmp_path / "input.txt"
     source.write_text("before")

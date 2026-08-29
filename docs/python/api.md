@@ -111,9 +111,37 @@ directory.
 Executes according to `request.mode`. In auto mode, only an `auto_approved` decision
 may proceed to commit.
 
-### `preview(request: RunRequest) -> Receipt`
+### `preview(...) -> Receipt`
 
-Forces preview semantics even if the supplied request was constructed with auto mode.
+```text
+preview(request: RunRequest) -> Receipt
+
+preview(
+    code: str,
+    *,
+    intent: str | None = ...,
+    detail: ReceiptDetail | None = ...,
+    budget: ExecutionBudget | None = ...,
+) -> Receipt
+```
+
+The request overload preserves an immutable request that was prepared elsewhere. The
+source-code overload constructs the same native request directly and is the compact
+form for one-off previews:
+
+```python
+receipt = runtime.preview(
+    "from pathlib import Path\nPath('/workspace/result.txt').write_text('ready')",
+    intent="Create the reviewed result",
+    detail=ReceiptDetail.FULL,
+)
+```
+
+Both forms cross PyO3 exactly once and force preview semantics. `mode` is intentionally
+absent from the source-code overload because this method can never mutate the host.
+When the first argument is a `RunRequest`, configuration must remain on that request;
+passing `intent`, `detail`, or `budget` again raises `TypeError` instead of merging two
+sources of truth.
 
 ### `discard_preview(transaction: str) -> bool`
 

@@ -84,20 +84,18 @@ snapshot, diff, decision, state transition, and commit proof.
 === "Python"
 
     ```python
-    from vsh import ReceiptDetail, RunMode, RunRequest, Runtime
+    from vsh import ReceiptDetail, Runtime
 
     runtime = Runtime.open("/workspace/project")
-    receipt = runtime.run(
-        RunRequest(
-            """
+    receipt = runtime.preview(
+        """
     from pathlib import Path
     source = Path('/workspace/input.txt').read_text()
     Path('/workspace/output.txt').write_text(source.upper())
     {'bytes': len(source)}
     """,
-            mode=RunMode.PREVIEW,
-            detail=ReceiptDetail.FULL,
-        )
+        intent="Generate an uppercase preview",
+        detail=ReceiptDetail.FULL,
     )
     print(receipt.decision, receipt.changes)
     ```
@@ -209,21 +207,19 @@ Create a workspace with `input.txt`, then run:
     ```python
     from pathlib import Path
 
-    from vsh import ReceiptDetail, RunRequest, Runtime
+    from vsh import ReceiptDetail, Runtime
 
     workspace = Path("demo-workspace").resolve()
     runtime = Runtime.open(workspace)
     receipt = runtime.preview(
-        RunRequest(
-            """
+        """
     from pathlib import Path
     value = Path('/workspace/input.txt').read_text()
     Path('/workspace/output.txt').write_text(value.upper())
     len(value)
     """,
-            intent="Create an uppercase derivative",
-            detail=ReceiptDetail.FULL,
-        )
+        intent="Create an uppercase derivative",
+        detail=ReceiptDetail.FULL,
     )
 
     print(receipt.state)       # auto_approved or pending_approval
@@ -507,19 +503,17 @@ the source code is not equivalent to promoting a preview.
 from pathlib import Path
 import time
 
-from vsh import ReceiptDetail, RunRequest, Runtime, VshStaleError
+from vsh import ReceiptDetail, Runtime, VshStaleError
 
 workspace = Path("project").resolve()
 runtime = Runtime.open(workspace)
 preview = runtime.preview(
-    RunRequest(
-        "from pathlib import Path\n"
-        "text = Path('/workspace/a.txt').read_text()\n"
-        "Path('/workspace/b.txt').write_text(text)\n"
-        "len(text)",
-        intent="Copy the reviewed input",
-        detail=ReceiptDetail.FULL,
-    )
+    "from pathlib import Path\n"
+    "text = Path('/workspace/a.txt').read_text()\n"
+    "Path('/workspace/b.txt').write_text(text)\n"
+    "len(text)",
+    intent="Copy the reviewed input",
+    detail=ReceiptDetail.FULL,
 )
 
 if preview.decision == "auto_approved":
@@ -795,7 +789,8 @@ lexical, canonical, prospective, or symlink alias.
 | Method | Use it when |
 |---|---|
 | `run(request)` | Request mode should control preview vs deterministic auto-commit |
-| `preview(request)` | Host mutation must be impossible in this call, regardless of request mode |
+| `preview(request)` | A prepared immutable request must run without host mutation |
+| `preview(code, **options)` | A one-off source preview should avoid request-construction ceremony |
 | `commit(transaction, now_ms)` | Promote one exact auto-approved or independently approved preview |
 | `approve(...)` | A trusted principal accepts a pending transaction for a bounded window |
 | `discard_preview(transaction)` | An unused process-local auto-approved preview should release capacity |
@@ -921,9 +916,37 @@ directory.
 Executes according to `request.mode`. In auto mode, only an `auto_approved` decision
 may proceed to commit.
 
-### `preview(request: RunRequest) -> Receipt`
+### `preview(...) -> Receipt`
 
-Forces preview semantics even if the supplied request was constructed with auto mode.
+```text
+preview(request: RunRequest) -> Receipt
+
+preview(
+    code: str,
+    *,
+    intent: str | None = ...,
+    detail: ReceiptDetail | None = ...,
+    budget: ExecutionBudget | None = ...,
+) -> Receipt
+```
+
+The request overload preserves an immutable request that was prepared elsewhere. The
+source-code overload constructs the same native request directly and is the compact
+form for one-off previews:
+
+```python
+receipt = runtime.preview(
+    "from pathlib import Path\nPath('/workspace/result.txt').write_text('ready')",
+    intent="Create the reviewed result",
+    detail=ReceiptDetail.FULL,
+)
+```
+
+Both forms cross PyO3 exactly once and force preview semantics. `mode` is intentionally
+absent from the source-code overload because this method can never mutate the host.
+When the first argument is a `RunRequest`, configuration must remain on that request;
+passing `intent`, `detail`, or `budget` again raises `TypeError` instead of merging two
+sources of truth.
 
 ### `discard_preview(transaction: str) -> bool`
 
@@ -1051,13 +1074,12 @@ rooted at `/workspace`; host paths never enter the Monty program.
 ```python
 from pathlib import Path
 
-from vsh import ReceiptDetail, RunRequest, Runtime
+from vsh import ReceiptDetail, Runtime
 
 root = Path("project").resolve(strict=True)
 runtime = Runtime.open(root)
 receipt = runtime.preview(
-    RunRequest(
-        """
+    """
 from pathlib import Path
 
 source = Path('/workspace/src/name.txt').read_text().strip()
@@ -1066,9 +1088,8 @@ Path('/workspace/generated/name.txt').write_text(source.upper() + '\n')
 Path('/workspace/generated/meta.txt').write_text('generated-by=vsh\n')
 {'source': source, 'files': 2}
 """,
-        intent="Regenerate checked-in name assets",
-        detail=ReceiptDetail.FULL,
-    )
+    intent="Regenerate checked-in name assets",
+    detail=ReceiptDetail.FULL,
 )
 
 assert not (root / "generated" / "name.txt").exists()
@@ -1101,15 +1122,13 @@ artifact that was inspected.
 ```python
 import time
 
-from vsh import RunRequest, Runtime
+from vsh import Runtime
 
 runtime = Runtime.open("project", policy="strict")
 preview = runtime.preview(
-    RunRequest(
-        "from pathlib import Path\n"
-        "Path('/workspace/reviewed.txt').write_text('yes')",
-        intent="Apply approved change CHG-1842",
-    )
+    "from pathlib import Path\n"
+    "Path('/workspace/reviewed.txt').write_text('yes')",
+    intent="Apply approved change CHG-1842",
 )
 assert preview.decision == "pending_approval"
 

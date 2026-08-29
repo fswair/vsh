@@ -40,20 +40,18 @@ snapshot, diff, decision, state transition, and commit proof.
 === "Python"
 
     ```python
-    from vsh import ReceiptDetail, RunMode, RunRequest, Runtime
+    from vsh import ReceiptDetail, Runtime
 
     runtime = Runtime.open("/workspace/project")
-    receipt = runtime.run(
-        RunRequest(
-            """
+    receipt = runtime.preview(
+        """
     from pathlib import Path
     source = Path('/workspace/input.txt').read_text()
     Path('/workspace/output.txt').write_text(source.upper())
     {'bytes': len(source)}
     """,
-            mode=RunMode.PREVIEW,
-            detail=ReceiptDetail.FULL,
-        )
+        intent="Generate an uppercase preview",
+        detail=ReceiptDetail.FULL,
     )
     print(receipt.decision, receipt.changes)
     ```

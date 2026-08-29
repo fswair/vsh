@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from enum import Enum
 from os import PathLike
+from typing import overload
 
 __version__: str
 
@@ -171,7 +172,17 @@ class Runtime:
         worker_path: str | PathLike[str] | None = ...,
     ) -> Runtime: ...
     def run(self, request: RunRequest) -> Receipt: ...
+    @overload
     def preview(self, request: RunRequest) -> Receipt: ...
+    @overload
+    def preview(
+        self,
+        request: str,
+        *,
+        intent: str | None = ...,
+        detail: ReceiptDetail | None = ...,
+        budget: ExecutionBudget | None = ...,
+    ) -> Receipt: ...
     def discard_preview(self, transaction: str) -> bool: ...
     def approve(
         self,

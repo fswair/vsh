@@ -85,7 +85,8 @@ lexical, canonical, prospective, or symlink alias.
 | Method | Use it when |
 |---|---|
 | `run(request)` | Request mode should control preview vs deterministic auto-commit |
-| `preview(request)` | Host mutation must be impossible in this call, regardless of request mode |
+| `preview(request)` | A prepared immutable request must run without host mutation |
+| `preview(code, **options)` | A one-off source preview should avoid request-construction ceremony |
 | `commit(transaction, now_ms)` | Promote one exact auto-approved or independently approved preview |
 | `approve(...)` | A trusted principal accepts a pending transaction for a bounded window |
 | `discard_preview(transaction)` | An unused process-local auto-approved preview should release capacity |

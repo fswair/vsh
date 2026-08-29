@@ -22,19 +22,17 @@ the source code is not equivalent to promoting a preview.
 from pathlib import Path
 import time
 
-from vsh import ReceiptDetail, RunRequest, Runtime, VshStaleError
+from vsh import ReceiptDetail, Runtime, VshStaleError
 
 workspace = Path("project").resolve()
 runtime = Runtime.open(workspace)
 preview = runtime.preview(
-    RunRequest(
-        "from pathlib import Path\n"
-        "text = Path('/workspace/a.txt').read_text()\n"
-        "Path('/workspace/b.txt').write_text(text)\n"
-        "len(text)",
-        intent="Copy the reviewed input",
-        detail=ReceiptDetail.FULL,
-    )
+    "from pathlib import Path\n"
+    "text = Path('/workspace/a.txt').read_text()\n"
+    "Path('/workspace/b.txt').write_text(text)\n"
+    "len(text)",
+    intent="Copy the reviewed input",
+    detail=ReceiptDetail.FULL,
 )
 
 if preview.decision == "auto_approved":

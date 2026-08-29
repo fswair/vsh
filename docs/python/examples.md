@@ -8,13 +8,12 @@ rooted at `/workspace`; host paths never enter the Monty program.
 ```python
 from pathlib import Path
 
-from vsh import ReceiptDetail, RunRequest, Runtime
+from vsh import ReceiptDetail, Runtime
 
 root = Path("project").resolve(strict=True)
 runtime = Runtime.open(root)
 receipt = runtime.preview(
-    RunRequest(
-        """
+    """
 from pathlib import Path
 
 source = Path('/workspace/src/name.txt').read_text().strip()
@@ -23,9 +22,8 @@ Path('/workspace/generated/name.txt').write_text(source.upper() + '\n')
 Path('/workspace/generated/meta.txt').write_text('generated-by=vsh\n')
 {'source': source, 'files': 2}
 """,
-        intent="Regenerate checked-in name assets",
-        detail=ReceiptDetail.FULL,
-    )
+    intent="Regenerate checked-in name assets",
+    detail=ReceiptDetail.FULL,
 )
 
 assert not (root / "generated" / "name.txt").exists()
@@ -58,15 +56,13 @@ artifact that was inspected.
 ```python
 import time
 
-from vsh import RunRequest, Runtime
+from vsh import Runtime
 
 runtime = Runtime.open("project", policy="strict")
 preview = runtime.preview(
-    RunRequest(
-        "from pathlib import Path\n"
-        "Path('/workspace/reviewed.txt').write_text('yes')",
-        intent="Apply approved change CHG-1842",
-    )
+    "from pathlib import Path\n"
+    "Path('/workspace/reviewed.txt').write_text('yes')",
+    intent="Apply approved change CHG-1842",
 )
 assert preview.decision == "pending_approval"
 

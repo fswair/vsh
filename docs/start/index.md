@@ -52,21 +52,19 @@ Create a workspace with `input.txt`, then run:
     ```python
     from pathlib import Path
 
-    from vsh import ReceiptDetail, RunRequest, Runtime
+    from vsh import ReceiptDetail, Runtime
 
     workspace = Path("demo-workspace").resolve()
     runtime = Runtime.open(workspace)
     receipt = runtime.preview(
-        RunRequest(
-            """
+        """
     from pathlib import Path
     value = Path('/workspace/input.txt').read_text()
     Path('/workspace/output.txt').write_text(value.upper())
     len(value)
     """,
-            intent="Create an uppercase derivative",
-            detail=ReceiptDetail.FULL,
-        )
+        intent="Create an uppercase derivative",
+        detail=ReceiptDetail.FULL,
     )
 
     print(receipt.state)       # auto_approved or pending_approval

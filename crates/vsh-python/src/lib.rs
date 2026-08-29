@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use monty_proto::python::{DcRegistry, monty_to_py};
 use pyo3::create_exception;
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 
 create_exception!(
@@ -285,6 +285,34 @@ impl OwnedRunRequest {
             budget: self.budget,
         }
     }
+
+    fn preview_input(
+        request: &Bound<'_, PyAny>,
+        intent: Option<String>,
+        detail: Option<PyReceiptDetail>,
+        budget: Option<PyExecutionBudget>,
+    ) -> PyResult<Self> {
+        if request.is_instance_of::<PyRunRequest>() {
+            let request = request.extract::<PyRef<'_, PyRunRequest>>()?;
+            if intent.is_some() || detail.is_some() || budget.is_some() {
+                return Err(PyTypeError::new_err(
+                    "intent, detail, and budget are only valid when preview() receives source code",
+                ));
+            }
+            return Ok(Self::from(&*request));
+        }
+
+        let code = request.extract::<String>().map_err(|_| {
+            PyTypeError::new_err("preview() requires a RunRequest or source-code str")
+        })?;
+        Ok(Self {
+            code,
+            intent,
+            mode: vsh::RunMode::Preview,
+            detail: detail.unwrap_or(PyReceiptDetail::Compact).into(),
+            budget: budget.unwrap_or_default().into(),
+        })
+    }
 }
 
 /// Python projection of one native VSH receipt.
@@ -491,9 +519,17 @@ impl PyRuntime {
         PyReceipt::from_native(py, receipt)
     }
 
-    /// Execute policy-bound virtual state without changing the host workspace.
-    fn preview(&self, py: Python<'_>, request: &PyRunRequest) -> PyResult<PyReceipt> {
-        let request = OwnedRunRequest::from(request);
+    /// Execute policy-bound virtual state from a request or source code.
+    #[pyo3(signature = (request, *, intent=None, detail=None, budget=None))]
+    fn preview(
+        &self,
+        py: Python<'_>,
+        request: &Bound<'_, PyAny>,
+        intent: Option<String>,
+        detail: Option<PyReceiptDetail>,
+        budget: Option<PyExecutionBudget>,
+    ) -> PyResult<PyReceipt> {
+        let request = OwnedRunRequest::preview_input(request, intent, detail, budget)?;
         let runtime = Arc::clone(&self.inner);
         let receipt = detach_call(py, runtime, move |runtime| {
             runtime.preview(request.borrowed()).map_err(Box::new)
