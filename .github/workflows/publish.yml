@@ -1,38 +1,308 @@
-name: Publish to PyPI
+name: Build and publish release
 
 on:
   push:
     tags:
-      - v*
+      - "v*"
   workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  CARGO_BUILD_JOBS: "2"
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
 jobs:
-  publish:
-    name: Build and publish
-    runs-on: ubuntu-latest
+  metadata:
+    name: Verify release identity
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install exact Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Verify lockstep versions and tag
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            python3 release/check_versions.py --tag "$GITHUB_REF_NAME" --github-output "$GITHUB_OUTPUT"
+          else
+            python3 release/check_versions.py --github-output "$GITHUB_OUTPUT"
+          fi
+
+  linux-wheels:
+    name: ${{ matrix.platform.id }} / CPython ${{ matrix.python }}
+    needs: metadata
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
+        platform:
+          - id: manylinux-x86_64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - id: manylinux-aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.1"
+          enable-cache: true
+      - name: Install smoke-test Python
+        run: uv python install "${{ matrix.python }}"
+      - name: Build manylinux wheel with its exact worker
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: build
+          maturin-version: v1.15.0
+          rust-toolchain: 1.95.0
+          target: ${{ matrix.platform.target }}
+          manylinux: "2_28"
+          args: >-
+            --release --locked --compatibility pypi
+            --interpreter python${{ matrix.python }} --out dist
+          before-script-linux: |
+            mkdir -p python-data/scripts
+            cargo build --package vsh-monty-worker --release --locked --target ${{ matrix.platform.target }}
+            cp target/${{ matrix.platform.target }}/release/vsh-monty-worker python-data/scripts/vsh-monty-worker
+      - name: Install and exercise built wheel
+        shell: bash
+        env:
+          VSH_EXPECT_VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          wheels=(dist/*.whl)
+          [[ "${#wheels[@]}" -eq 1 ]]
+          uv venv .release-smoke --python "${{ matrix.python }}"
+          smoke_python=.release-smoke/bin/python
+          uv pip install --python "$smoke_python" "${wheels[0]}"
+          "$smoke_python" "$GITHUB_WORKSPACE/release/smoke_wheel.py"
+      - name: Upload wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-wheel-${{ matrix.platform.id }}-cp${{ matrix.python }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  native-wheels:
+    name: ${{ matrix.platform.id }} / CPython ${{ matrix.python }}
+    needs: metadata
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
+        platform:
+          - id: macos-x86_64
+            runner: macos-15-intel
+          - id: macos-arm64
+            runner: macos-15
+          - id: windows-x86_64
+            runner: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.1"
+          enable-cache: true
+      - name: Install exact toolchains
+        shell: bash
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          uv python install "${{ matrix.python }}"
+      - name: Build native wheel and bundled worker
+        shell: bash
+        run: uv build --wheel --clear --python "${{ matrix.python }}" --out-dir dist
+      - name: Install and exercise built wheel
+        shell: bash
+        env:
+          VSH_EXPECT_VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          wheels=(dist/*.whl)
+          [[ "${#wheels[@]}" -eq 1 ]]
+          uv venv .release-smoke --python "${{ matrix.python }}"
+          smoke_python=.release-smoke/bin/python
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            smoke_python=.release-smoke/Scripts/python.exe
+          fi
+          uv pip install --python "$smoke_python" "${wheels[0]}"
+          "$smoke_python" "$GITHUB_WORKSPACE/release/smoke_wheel.py"
+      - name: Upload wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-wheel-${{ matrix.platform.id }}-cp${{ matrix.python }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  source-distribution:
+    name: Source distribution
+    needs: metadata
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.1"
+          enable-cache: true
+      - name: Install exact toolchains
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          uv python install 3.14
+      - name: Build source distribution
+        run: uv build --sdist --clear --python 3.14 --out-dir dist
+      - name: Build, install, and exercise source distribution
+        shell: bash
+        env:
+          VSH_EXPECT_VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          archives=(dist/*.tar.gz)
+          [[ "${#archives[@]}" -eq 1 ]]
+          uv venv .release-smoke --python 3.14
+          smoke_python=.release-smoke/bin/python
+          uv pip install --python "$smoke_python" "${archives[0]}"
+          "$smoke_python" "$GITHUB_WORKSPACE/release/smoke_wheel.py"
+      - name: Upload source distribution
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  crate-archives:
+    name: crates.io source archives
+    needs: metadata
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install exact Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Cache exact locked graph, then package offline
+        run: |
+          cargo fetch --locked
+          cargo package --workspace --exclude vsh-python --offline --no-verify --locked
+      - name: Upload crate archives
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-crates
+          path: target/package/*.crate
+          if-no-files-found: error
+
+  verify-artifacts:
+    name: Verify complete release set
+    needs: [metadata, linux-wheels, native-wheels, source-distribution, crate-archives]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download all release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: release-dist
+          merge-multiple: true
+      - name: Validate payloads, matrix cardinality, and hashes
+        run: >-
+          python3 release/validate_artifacts.py release-dist
+          --version "${{ needs.metadata.outputs.version }}"
+          --wheel-count 20 --crate-count 8
+      - name: Upload verified manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-sha256sums
+          path: release-dist/SHA256SUMS
+          if-no-files-found: error
+
+  publish-crates:
+    name: Publish crates.io graph in dependency order
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [metadata, verify-artifacts]
+    runs-on: ubuntu-24.04
+    environment: crates-io
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install exact Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Publish and wait for sparse-index visibility
+        shell: bash
+        run: |
+          wait_for_crate() {
+            local package="$1"
+            for _ in $(seq 1 30); do
+              if curl --fail --silent --show-error \
+                "https://crates.io/api/v1/crates/${package}/${RELEASE_VERSION}" >/dev/null; then
+                return 0
+              fi
+              sleep 5
+            done
+            echo "timed out waiting for ${package} ${RELEASE_VERSION}" >&2
+            return 1
+          }
+          publish_and_wait() {
+            local package="$1"
+            cargo publish --locked --package "$package"
+            wait_for_crate "$package"
+          }
+          publish_and_wait vsh-types
+          publish_and_wait vsh-store
+          publish_and_wait vsh-vfs
+          publish_and_wait vsh-policy
+          publish_and_wait vsh-commit
+          publish_and_wait vsh-monty
+          publish_and_wait vsh-runtime
+          cargo publish --locked --package vsh-monty-worker
+
+  publish-pypi:
+    name: Attest and publish PyPI matrix
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [metadata, verify-artifacts, publish-crates]
+    runs-on: ubuntu-24.04
     environment:
       name: pypi
       url: https://pypi.org/project/vbash/
     permissions:
-      id-token: write
+      attestations: write
       contents: read
+      id-token: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
-          enable-cache: true
-
-      - name: Install Python
-        run: uv python install 3.12
-
-      - name: Build distributions
-        run: uv build
-
-      - name: Publish to PyPI
-        run: uv publish
+          version: "0.12.1"
+      - name: Download Python distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-wheel-*
+          path: release-dist
+          merge-multiple: true
+      - name: Download source distribution
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-sdist
+          path: release-dist
+      - name: Revalidate publish payload
+        run: >-
+          python3 release/validate_artifacts.py release-dist
+          --version "${{ needs.metadata.outputs.version }}"
+          --wheel-count 20 --crate-count 0
+      - name: Attest Python distributions
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            release-dist/*.whl
+            release-dist/*.tar.gz
+      - name: Publish with PyPI trusted publishing
+        run: >-
+          uv publish --trusted-publishing always
+          release-dist/vbash-*.whl release-dist/vbash-*.tar.gz

@@ -1,0 +1,31 @@
+[package]
+name = "vsh-monty-worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Crash-isolated Monty 0.0.21 protocol worker for VSH"
+publish = ["crates-io"]
+
+[[bin]]
+name = "vsh-monty-worker"
+path = "src/main.rs"
+
+[dependencies]
+monty.workspace = true
+monty-alloc.workspace = true
+monty-proto.workspace = true
+monty-types.workspace = true
+
+[dev-dependencies]
+vsh-monty.workspace = true
+vsh-runtime.workspace = true
+vsh-store.workspace = true
+vsh-types.workspace = true
+vsh-vfs.workspace = true
+
+[lints]
+workspace = true

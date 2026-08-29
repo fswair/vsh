@@ -1,0 +1,27 @@
+[package]
+name = "vsh-python"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "PyO3 bindings for the VSH native Rust SDK"
+publish = false
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+monty-proto = { workspace = true, features = ["python"] }
+pyo3 = { workspace = true, features = ["extension-module", "macros"] }
+vsh-runtime.workspace = true
+
+[build-dependencies]
+# Keep the separately installed worker package in Maturin's sdist workspace graph.
+vsh-monty-worker = { path = "../vsh-worker", version = "=0.3.0" }
+
+[lints]
+workspace = true

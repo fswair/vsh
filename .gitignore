@@ -7,6 +7,13 @@ dist/
 build/
 .eggs/
 *.egg
+*.so
+
+# Rust
+/target/
+*.profraw
+/python-data/scripts/vsh-monty-worker
+/python-data/scripts/vsh-monty-worker.exe
 
 # Virtual environments
 .venv/
@@ -20,6 +27,7 @@ venv/
 .coverage
 htmlcov/
 .hypothesis/
+/site/
 
 # Editors / OS
 .DS_Store

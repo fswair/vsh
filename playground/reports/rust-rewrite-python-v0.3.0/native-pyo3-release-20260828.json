@@ -1,0 +1,97 @@
+{
+  "captured_at_unix_ms": 1787956416672,
+  "cases": {
+    "edit_20": {
+      "boundary_ns": {
+        "p50": 14333,
+        "p95": 23334,
+        "p99": 32292
+      },
+      "boundary_overhead_p50_percent": 0.7617688045230986,
+      "native_ns": {
+        "p50": 1866833,
+        "p95": 2090042,
+        "p99": 2395667
+      },
+      "samples": 100,
+      "wall_ns": {
+        "max": 2499958,
+        "min": 1759833,
+        "p50": 1881542,
+        "p95": 2108208,
+        "p99": 2443792
+      }
+    },
+    "noop": {
+      "boundary_ns": {
+        "p50": 9499,
+        "p95": 21292,
+        "p99": 43374
+      },
+      "boundary_overhead_p50_percent": 4.994006561238224,
+      "native_ns": {
+        "p50": 180417,
+        "p95": 362292,
+        "p99": 516375
+      },
+      "samples": 100,
+      "wall_ns": {
+        "max": 849750,
+        "min": 165041,
+        "p50": 190208,
+        "p95": 378375,
+        "p99": 533375
+      }
+    },
+    "read_10": {
+      "boundary_ns": {
+        "p50": 11208,
+        "p95": 18750,
+        "p99": 21125
+      },
+      "boundary_overhead_p50_percent": 1.1338873275344021,
+      "native_ns": {
+        "p50": 977042,
+        "p95": 1190000,
+        "p99": 1440958
+      },
+      "samples": 100,
+      "wall_ns": {
+        "max": 1473500,
+        "min": 935167,
+        "p50": 988458,
+        "p95": 1208750,
+        "p99": 1462917
+      }
+    }
+  },
+  "cold": {
+    "first_call_boundary_ns": 1493500,
+    "first_call_native_ns": 24237042,
+    "first_call_wall_ns": 25730542,
+    "runtime_open_ns": 49507583
+  },
+  "environment": {
+    "cpu_count": 8,
+    "engine": "rust",
+    "machine": "arm64",
+    "platform": "macOS-26.1-arm64-arm-64bit-Mach-O",
+    "python": "3.14.6 (main, Jun 11 2026, 03:55:33) [Clang 22.1.3 ]",
+    "vsh_version": "0.3.0",
+    "worker": "wheel/default PATH resolution"
+  },
+  "iterations": 100,
+  "parallel_independent_runtimes": {
+    "parallel_wall_ns": 1732083,
+    "sample_native_ns": [
+      723959,
+      741500,
+      656666,
+      620916
+    ],
+    "sequential_wall_ns": 4717541,
+    "speedup": 2.7236229441660704,
+    "workers": 4
+  },
+  "schema": "vsh-native-pyo3-benchmark-v1"
+}

@@ -1,0 +1,50 @@
+[graph]
+all-features = true
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+
+[advisories]
+unmaintained = "all"
+unsound = "all"
+yanked = "deny"
+ignore = []
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+highlight = "all"
+skip = [
+    { crate = "getrandom@0.2.17", reason = "Monty/Ruff's Unicode name generator still uses rand 0.8; runtime ahash uses getrandom 0.3" },
+    { crate = "hashbrown@0.16.1", reason = "Monty 0.0.21 directly uses 0.16 while its Ruff/get-size graph uses 0.17" },
+    { crate = "itertools@0.14.0", reason = "Monty 0.0.21 directly pins 0.14 while its Ruff 0.0.3 parser uses 0.15" },
+    { crate = "syn@2.0.119", reason = "Monty/PyO3 proc macros use syn 2 while current serde/ICU derives use syn 3" },
+    { crate = "io-lifetimes@2.0.4", reason = "cap-std 4.0.3 pulls io-lifetimes 2 through fs-set-times and 3 through cap-primitives/io-extras" },
+    { crate = "windows-sys@0.59.0", reason = "cap-std 4.0.3's fs-set-times target graph retains Windows API generation 0.59 alongside 0.60/0.61" },
+    { crate = "windows-sys@0.60.2", reason = "cap-std 4.0.3's cap-primitives target graph retains Windows API generation 0.60 alongside 0.61" },
+    { crate = "windows-targets@0.52.6", reason = "cap-std 4.0.3's fs-set-times target graph retains Windows bindings generation 0.52 alongside 0.53" },
+    { crate = "windows_x86_64_gnu@0.52.6", reason = "transitive windows-targets 0.52 artifact selected by cap-std 4.0.3 on the GNU Windows target" },
+    { crate = "windows_x86_64_msvc@0.52.6", reason = "transitive windows-targets 0.52 artifact selected by cap-std 4.0.3 on the MSVC Windows target" },
+]
+
+[bans.std-replacements]
+scope = "workspace"
+
+[licenses]
+confidence-threshold = 0.93
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

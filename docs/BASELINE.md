@@ -1,48 +1,16 @@
-# vsh Performance Baseline
+# Performance baseline
 
-Frozen reference measurements before roadmap changes. Use
-[`playground/compare_baseline.py`](../playground/compare_baseline.py) to diff post-change
-runs against this baseline.
+The active VSH 0.3 baseline is the paired native Rust and PyO3 release matrix captured
+on 2026-08-29. It replaces legacy Python command-engine comparisons as the merge
+baseline for the rewrite.
 
-## Canonical baseline directory
+Read:
 
-`playground/reports/baseline-pre-roadmap-20260609-193413/`
+- [Performance overview and results](performance.md)
+- [Full reproducibility record](rust-rewrite/PERFORMANCE.md)
+- [Coverage and merge floors](rust-rewrite/COVERAGE.md)
+- [Plan validation and remaining hosted gates](rust-rewrite/PLAN_VALIDATION.md)
 
-| Field | Value |
-|-------|-------|
-| Git commit | `c60cfe5` |
-| Generated | 2026-06-09T19:46 UTC |
-| Model (agent) | `openrouter:google/gemini-3-flash-preview` |
-
-## Harnesses
-
-### Playground command benchmark
-
-```bash
-uv run python playground/benchmark_vsh_vs_native.py \
-  --iterations 50 --file-count 20 --file-size 256 \
-  --output-dir playground/reports/baseline-pre-roadmap-20260609-193413/playground \
-  --no-plots
-```
-
-- 25 commands × 3 modes (`native`, `vsh_apply`, `vsh_full`)
-- `vsh_apply` median: ~0.02–0.18× native
-- `vsh_full` median: ~0.10–0.42× native
-
-### Agent context comparison
-
-```bash
-uv run python examples/agent_context_comparison.py \
-  --output-dir playground/reports/baseline-pre-roadmap-20260609-193413/agent-context
-```
-
-Single-run snapshot (stochastic): vsh 12.3s / 7,359 input tokens / 5 tool calls vs
-native 9.3s / 4,135 tokens / 5 tool calls. Use `--runs 3` for median summaries.
-
-## Compare after changes
-
-```bash
-uv run python playground/compare_baseline.py \
-  --baseline playground/reports/baseline-pre-roadmap-20260609-193413 \
-  --current playground/reports/post-faz0-<stamp>
-```
+Historical reports under `playground/reports/` remain engineering evidence but must not
+be mixed with the current native/PyO3 matrix. In particular, compare only equivalent
+workloads, release profiles, machines, worker identities, and sample protocols.

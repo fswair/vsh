@@ -3,7 +3,9 @@ from __future__ import annotations as _annotations
 import os
 from pathlib import Path
 
-from mcp.server import FastMCP
+from fastmcp import FastMCP
+
+from vsh import __version__
 
 from .prompts import register_codemode_prompts
 from .surface import register_vsh_agent_surface, register_vsh_surface
@@ -13,48 +15,16 @@ CODEMODE_SERVER_NAME = "vsh-codemode"
 CODEMODE_INSTRUCTIONS = """\
 vsh CodeMode MCP server.
 
-Inspired by CodeMode-style agent tooling: expose a compact tool surface and let the
-model discover command schemas on demand instead of loading every tool definition up
-front. vsh extends that pattern with simulation, approval, and drift-aware execution.
+The server exposes exactly one normal tool: `vsh_run`. Its `code` argument is one Monty
+Python program executed against an immutable workspace snapshot and copy-on-write Rust
+VirtualFs. Use pathlib-style filesystem operations under `/workspace`.
 
-Default workflow:
-  apply_batch for known multi-step filesystem work
-  apply for one command
-  search/get_schema only when command parameters are unfamiliar
-
-Rules:
-- Prefer `apply_batch` for ordinary agent tasks. It snapshots when needed, simulates,
-  approves eligible plans, executes, and returns compact receipts.
-- Prefer `apply` for one command.
-- Every mutation step must include `execution_reason`.
-- Reuse returned `snapshot_id`; do not call `snapshot_workspace` again after execution
-  unless a receipt reports drift/stale state.
-- Use `simulate -> approve -> execute_approved` only for debugging or when the user
-  explicitly asks to inspect plans before execution.
-- Use `verbosity="full"` only for debugging; compact receipts are the normal agent path.
-
-Batch simulation (`vsh_sandbox`):
-- The `code` argument is a Monty Python program. Built-in helpers look like normal
-  function calls: `search(query)`, `get_schema(name)`, `simulate(tool_name, params)`.
-- Most programs are just those calls — one per line or in sequence, e.g.
-  `simulate("vsh_list", {"path": "."})`. No extra Python required.
-- When useful, you may also assign results to variables, pass them into later calls,
-  slice/filter, etc.
-- `simulate(...)` yields a SimulationResult dict (`plan_id`, `decision`,
-  `predicted_effects`, `journal`, ...) unless compact verbosity is requested.
-- Add a return expression at the end of the program; Monty treats it as the program
-  result → `vsh_sandbox` field `output`. Example: `paths[:5]`. Use `print(...)` for
-  debug text; that goes to `stdout`, not `output`.
-- Each `simulate(...)` is recorded in `calls[]` (plan_id per step) for later
-  `approve` / `execute_approved`. Prefer `apply_batch` when you want execution too.
-- Read-command file/listing content is not in simulate output; it appears after
-  `execute_approved`. Summarize from `predicted_effects` / `journal` when needed.
-
-Example (optional chaining + program result):
-  pwd = simulate("vsh_pwd", {})
-  ls = simulate("vsh_list", {"path": pwd["predicted_effects"]["cwd_after"] or "."})
-  paths = ls["predicted_effects"]["reads"]
-  paths[:5]
+`mode="preview"` guarantees no host mutation. `mode="auto"` asks the native policy to
+commit the exact canonical diff; denied and escalated transactions remain virtual. Put
+the complete multi-file operation in one program so it stays one transaction, one policy
+decision, and one Python-to-Rust boundary call. To promote an auto-approved preview, pass
+its returned `transaction` with no code and `mode="auto"`; VSH revalidates dependencies
+before commit. Never emulate a shell or use a second simulation path.
 """
 
 _CUSTOM_SECTION_HEADER = "Project-specific instructions:"
@@ -114,10 +84,8 @@ def create_codemode_server(*, custom_instructions: str | None = None) -> FastMCP
     """Build the CodeMode-oriented FastMCP server."""
     server = FastMCP(
         CODEMODE_SERVER_NAME,
-        instructions=build_codemode_instructions(
-            custom_instructions=custom_instructions
-        ),
-        version="0.2.0",
+        instructions=build_codemode_instructions(custom_instructions=custom_instructions),
+        version=__version__,
     )
     register_vsh_surface(server)
     register_codemode_prompts(server)
@@ -129,7 +97,7 @@ def create_agent_codemode_server() -> FastMCP:
     server = FastMCP(
         CODEMODE_SERVER_NAME,
         instructions=None,
-        version="0.2.0",
+        version=__version__,
     )
     register_vsh_agent_surface(server)
     return server
@@ -141,9 +109,7 @@ def run_codemode_server(
     instructions_file: str | Path | None = None,
 ) -> None:
     """Run the CodeMode MCP server, optionally with custom instructions."""
-    custom = load_custom_instructions(
-        inline=inline, instructions_file=instructions_file
-    )
+    custom = load_custom_instructions(inline=inline, instructions_file=instructions_file)
     if custom is None:
         codemode_mcp.run()
         return

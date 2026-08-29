@@ -1,0 +1,28 @@
+[package]
+name = "vsh-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Native Rust SDK for the VSH validation-first execution engine"
+keywords = ["agents", "sandbox", "simulation", "workspace"]
+categories = ["development-tools"]
+publish = ["crates-io"]
+
+[lib]
+name = "vsh"
+
+[dependencies]
+postcard.workspace = true
+vsh-commit.workspace = true
+vsh-monty.workspace = true
+vsh-policy.workspace = true
+vsh-store.workspace = true
+vsh-types.workspace = true
+vsh-vfs.workspace = true
+
+[lints]
+workspace = true

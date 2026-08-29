@@ -1,202 +1,146 @@
-# vsh architecture
+# Architecture
 
-`vsh` is a validation-first command engine for agent workspaces. Commands are typed
-`StructuredCommand` models, simulated on a workspace snapshot graph, approved as immutable
-plans, revalidated against filesystem drift, and only then executed on the real filesystem.
+VSH is a transactional filesystem simulator with one Rust semantic core. Native Rust,
+Python/PyO3, CLI, and MCP all enter the same `vsh-runtime` facade.
 
-## Lifecycle
+## System shape
 
 ```text
-search(query)
-  -> CommandSpec[]
-
-get_schema(name)
-  -> JSON schema (Gemini-safe, $defs inlined)
-
-snapshot_workspace(root, cwd?)
-  -> snapshot_id + session metadata
-
-simulate(tool_name, snapshot_id, params)
-  -> SimulationResult(plan_id, shell_preview, journal, predicted_effects, decision)
-
-approve(plan_id)
-  -> simulate policy checks
-  -> optional approval handlers (visitor)
-  -> ApprovalToken
-
-execute_approved(approval_token)
-  -> ExecutionResult(applied, actual_effects, revalidation, matches_prediction)
+Rust application ───────────────────────────────┐
+                                                │
+Python application ── PyO3 typed adapter ───────┤
+CLI / MCP ── bounded Python envelope ── PyO3 ───┤
+                                                ▼
+                                         vsh-runtime
+                       ┌────────────────────────┼───────────────────────┐
+                       ▼                        ▼                       ▼
+                snapshot + VFS          Monty supervisor       policy + state
+                       │                        │                       │
+                       └──────────── canonical transaction ────────────┘
+                                                │
+                                                ▼
+                              dependency revalidation + committer
+                                                │
+                                                ▼
+                                      verified host receipt
 ```
 
-The canonical path is **simulate → approve → execute_approved**. There is no direct
-`execute(name, params)` shortcut.
+## Core invariants
 
-## Core modules
+### One source of semantics
 
-| Module | Responsibility |
-|--------|----------------|
-| `vsh.registry` | Command discovery, JSON schema export |
-| `vsh.schemas` | Typed command models + shell previews |
-| `vsh.snapshot` | Workspace graph builder, fingerprints, refresh |
-| `vsh.simulate` | Overlay simulation, policy, predicted effects |
-| `vsh.plans` | Plan store, approval tokens, fingerprints |
-| `vsh.execute` | Drift revalidation + real filesystem dispatch |
-| `vsh.persistence` | Optional JSON persistence under `VSH_DATA_DIR` |
-| `vsh.extensions` | Optional hooks for hydration and analyzers |
-| `vsh.mcp` | FastMCP tools/resources |
-| `vsh.agent` | pydantic-ai `VshCapability` + `FunctionToolset` adapter |
-| `vsh.artifacts` | Spilled tool-output store (`ArtifactRef`, memory + filesystem backends) |
+The Rust facade owns simulation, decision, state transition, durable artifacts,
+revalidation, commit, and recovery. Python owns argument/result conversion and maps
+typed errors to an exception hierarchy. MCP adds a bounded JSON-safe representation.
 
-## Simulation
+### No host mount in the guest
 
-`simulate_command()` renders `shell_preview` via `command.to_shell()` (paths quoted with
-`shlex.quote`), applies read or mutation logic against the snapshot graph, records an
-`AccessJournal`, derives `PredictedEffects`, and runs policy checks.
+Monty receives a synthetic absolute `/workspace` namespace. Filesystem operations are
+typed calls handled by the Rust adapter against `VirtualFs`. There is no guest-visible
+host path, subprocess, network, or ambient environment capability.
 
-Protected workspace paths (`.env`, `secrets/**`, `*.pem`, …) are rejected during
-simulation via `vsh.simulate.protected_paths`. Override globs with `VSH_PROTECTED_PATTERNS`
-or `VSH_PROTECTED_PATTERNS_FILE`.
+### Preview is non-mutating
 
-Each result includes an `approval_tier` (`read_only`, `mutation`, `destructive`) and
-`requires_manual_approval`. Use `auto_approve_plan()` only for read-only plans.
+Snapshot and copy-on-write effects remain virtual until a transaction owns a valid
+reservation and passes dependency/capability revalidation. Policy decisions and guest
+return values cannot write the host.
 
-## Approval
+### Commit has one owner
 
-Simulate policy is the **primary** approval gate. It is computed during simulation and
-re-checked at approval time:
+Only `vsh-commit` applies host mutations. It receives a canonical plan and exact
+preconditions, journals progress, verifies results, and makes interrupted work
+recoverable. Adapters cannot implement alternate writers.
 
-| Check | Where enforced | Typical failure |
-|-------|----------------|-----------------|
-| `execution_eligible` | `approve_plan()` | `ValueError` — rejected simulation, shell preview mismatch, protected paths |
-| `requires_manual_approval` | `approve_plan(auto=True)` | `ValueError` — mutation/destructive tier with auto-approve |
-| `approval_tier` | simulate + approve | Drives manual vs auto approval rules |
+## Execution path
 
-**Approval handlers** are an optional second layer. They behave like visitors:
+### Runtime open
 
-- Registered on `extensions.approval_handlers`.
-- Invoked only when the list is non-empty.
-- Called after simulate policy passes, before an `ApprovalToken` is minted.
-- May veto by raising `ApprovalDeniedError`.
-- Do not replace simulate policy; they cannot approve ineligible plans.
+1. Resolve and pin the workspace capability.
+2. Establish a protected internal or trusted external data-directory capability.
+3. Reject workspace/data overlap and symlink redirection.
+4. Open bounded blob and transaction stores.
+5. Recover incomplete trusted commit state.
+6. Validate and initialize supervised worker configuration.
 
-When no handlers are registered, `approve_plan()` mints a token using simulate policy only.
-This keeps default vsh behavior unchanged while allowing org-specific gates (ticketing,
-audit, human-in-the-loop UI, external policy engines) to plug in without forking core
-approval logic.
+### Run
 
-Mutation commands usually return `approve_with_warning`. Both `approve` and
-`approve_with_warning` are execution-eligible unless `raw_command` fails the shell preview
-match check.
+1. Validate source and request limits.
+2. Capture a bounded immutable base snapshot.
+3. Execute exact source in a supervised Monty worker.
+4. Serve typed calls through policy into copy-on-write `VirtualFs`.
+5. Freeze an ordered canonical diff and dependency set.
+6. Evaluate deterministic transaction policy.
+7. Bind identity and retain/persist the exact pending artifact.
+8. Return a receipt, or continue into auto commit when authorized.
 
-Mutation and destructive tiers also require `StructuredCommand.execution_reason` — a
-caller-supplied rationale distinct from `SimulationResult.reason` (system policy text).
+### Commit
 
-## Agent artifact spill
+1. Persist an auto-approved process-local artifact if necessary.
+2. Consume the single-use reservation.
+3. Revalidate workspace/runtime identity and every bound dependency.
+4. Write durable intent and canonical plan.
+5. Apply capability-rooted operations with journal checkpoints.
+6. Verify affected host nodes.
+7. Mark committed and clean recoverable temporary state.
 
-`VshCapability` implements spill directly via pydantic-ai lifecycle hooks:
+## Crate boundaries
 
-- `after_tool_execute` — serializes large `vsh_*` tool results, stores bytes in
-  `ArtifactStore`, returns `ArtifactRef.model_dump()`.
-- `before_model_request` — sanitizes history tool returns that still contain oversized
-  payloads (resume / edge-case safety net).
+| Crate | Boundary |
+|---|---|
+| `vsh-types` | Canonical values, digests, paths, and lifecycle legality |
+| `vsh-vfs` | Snapshot representation and virtual effect semantics |
+| `vsh-policy` | Call authorization and deterministic transaction decision |
+| `vsh-monty` | Guest protocol, worker supervision, values, and budgets |
+| `vsh-store` | Immutable blobs, approval grants, and atomic records |
+| `vsh-commit` | Revalidation, host mutation, verification, recovery |
+| `vsh-runtime` | Public orchestration facade and receipts |
+| `vsh-python` | Thin PyO3 conversion/error boundary |
+| `vsh-monty-worker` | Exact-version crash-isolated execution binary |
 
-Spill applies only to `vsh_*` agent tools (not MCP in this phase). Artifact passthrough
-tools (`vsh_get_artifact`, `vsh_index_artifact`, `vsh_search_artifacts`) are excluded to
-avoid spill loops.
+See the [crate map](rust/crates.md) for package names and dependency guidance.
 
-Filesystem layout: `$VSH_DATA_DIR/artifacts/tool_outputs/{tool_name}_{artifact_id}.{ext}` plus
-a sidecar `.manifest.json` per artifact. `artifact_id` is a lowercase hex string
-(`^[0-9a-f]{8,16}$`).
+## Concurrency model
 
-Full guide: [Artifacts & execution_reason](ARTIFACTS.md). Runnable demo:
-`examples/artifact_spill_demo.py`.
+- No global runtime execution lock exists.
+- Each runtime owns a bounded pool of clean supervised workers.
+- Snapshot/simulation/policy work does not hold the commit coordination lock.
+- Same-workspace commits serialize the minimal identity recheck and mutation window.
+- Independent workspace runtimes scale in parallel.
+- Python releases the GIL during native open, run, preview, commit, and recovery.
 
-`VSH_MAX_TOUCHED_PATHS` caps how many paths a single simulation may touch.
+## Durability model
 
-Each plan stores:
+Transaction state transitions are compare-and-swap operations. Approval grants bind a
+principal and time interval. A reservation is consumed once. Blob IDs and checksummed
+frames detect corruption and binding mismatch.
 
-- `plan_fingerprint` — hash of command + snapshot basis
-- `path_fingerprints` — touched-path fingerprints at simulation time
+Commit recovery distinguishes:
 
-## Execution
+- safe finalization of an already-applied verified operation;
+- safe rollback to original state;
+- cleanup of owned temporary state;
+- orphan/conflict where ownership cannot be proven.
 
-`execute_approved()`:
+The last category is reported, not guessed away.
 
-1. Loads the approved `PlanRecord` and basis snapshot
-2. Runs `revalidate_plan()` — compares live path fingerprints to the plan basis
-3. On drift: refreshes snapshot nodes for diagnostics and returns `applied=False`
-4. On success: dispatches the structured command through `apply_command()`
-5. Read commands populate `ActualEffects.stdout` via `vsh.execute.read_output`
-6. Every dispatch records `ActualEffects.execution_time_ms`
-7. Updates session `cwd` when needed, records `ActualEffects`, compares to prediction
+## Performance model
 
-Supported real filesystem operations include navigation reads, file reads, `mkdir`, `touch`,
-`mv`, `cp`, `rm`, `echo` redirection, `chmod`, `ln`, and simple in-place `sed`.
+The hot preview path avoids durable fsync only for deterministic auto-approved
+artifacts, and only inside a hard-capped process-local cache. Approval-required work is
+durable immediately. Promotion moves exact bytes into durable storage before consuming
+the reservation.
 
-## Persistence
+Python performs one PyO3 call for a whole transaction and uses a typed result converter.
+The remaining warm cost is dominated by real snapshot traversal and Monty/VirtualFs
+work. See [Performance](performance.md).
 
-When `VSH_PERSIST=1` (default), snapshots and plans are written as JSON under
-`$VSH_DATA_DIR` (default `~/.vsh`). Tests set `VSH_PERSIST=0` automatically.
+## Public contract
 
-Plan JSON stores `command_model_name` so concrete command types round-trip correctly.
+High-level callers should use `Runtime`, `RunRequest`, `Receipt`, and typed errors. The
+facade re-exports lower-level configuration and evidence types, but applications should
+not assemble an alternative commit pipeline.
 
-## Extension hooks
-
-Register optional collaborators on `vsh.extensions.extensions`:
-
-- `ApprovalHandler` — optional approval visitors (`handler(ctx, item)`); see [API.md](API.md#approval-handlers)
-- `ContentHydrator` — lazy file hydration for future content-aware commands
-- `SemanticAnalyzer` — Python/TS checks after execution
-- `ShadowWorkspaceRunner` — external verification tools
-
-## MCP surface
-
-Two FastMCP entrypoints share the same compact tool/resource surface via
-`vsh.mcp.surface.register_vsh_surface()`:
-
-| Command | Server | Extra |
-|---------|--------|-------|
-| `vsh serve` | `vsh` | tools + resources |
-| `vsh serve-codemode` | `vsh-codemode` | tools + resources + CodeMode instructions + MCP prompts |
-
-The CodeMode server is inspired by CodeMode-style discovery: agents `search` first,
-then `get_schema` for a single command, instead of loading every schema into context.
-See [CODEMODE.md](CODEMODE.md).
-
-`vsh serve` / `vsh serve-codemode` expose tools:
-
-- `search`, `get_schema`, `snapshot_workspace`, `simulate`, `approve`, `execute_approved`
-
-Resources:
-
-- `workspace://snapshot/current`
-- `workspace://projection/current`
-- `commands://spec/{name}`
-- `simulations://{plan_id}`
-
-## Agent integration
-
-Primary API: a pydantic-ai [capability](https://ai.pydantic.dev/capabilities/) bundles
-instructions and tools; workspace runtime state lives on `vsh.deps`.
-
-```python
-from vsh.agent import create_vsh_agent
-
-agent, vsh = create_vsh_agent(os.environ["MODEL_NAME"], "/path/to/workspace")
-result = agent.run_sync("List files safely.", deps=vsh.deps)
-```
-
-For progressive disclosure (CodeMode-style), defer the whole workflow:
-
-```python
-from pydantic_ai import Agent
-from vsh.agent import VshAgentDeps, VshCapability
-
-vsh = VshCapability("/path/to/workspace", defer_loading=True)
-agent = Agent(model, deps_type=VshAgentDeps, capabilities=[vsh])
-result = agent.run_sync("List files safely.", deps=vsh.deps)
-```
-
-Legacy `toolsets=[create_vsh_function_toolset()]` remains available.
-
-See `examples/pydantic_ai_agent_demo.py` for `.env` loading and live mode.
+- [Python SDK](python/)
+- [Rust SDK](rust/)
+- [MCP server](integrations/mcp.md)
+- [Guarantees](rust-rewrite/GUARANTEES.md)

@@ -1,0 +1,3944 @@
+# VSH — Full documentation
+
+> Low-latency transactional filesystem simulation for Rust, Python, MCP, and coding agents.
+
+This file contains every documentation source: Zensical navigation pages first, then the remaining references.
+
+## Contents
+- [Low-latency simulation for Rust and Python.](https://fswair.github.io/vsh/)
+- [Start with VSH](https://fswair.github.io/vsh/start/)
+- [How VSH works](https://fswair.github.io/vsh/start/how-it-works/)
+- [Use cases](https://fswair.github.io/vsh/start/use-cases/)
+- [Transactions](https://fswair.github.io/vsh/guides/transactions/)
+- [Policies and budgets](https://fswair.github.io/vsh/guides/policies-and-budgets/)
+- [Python SDK](https://fswair.github.io/vsh/python/)
+- [Python API reference](https://fswair.github.io/vsh/python/api/)
+- [Python examples](https://fswair.github.io/vsh/python/examples/)
+- [Rust SDK](https://fswair.github.io/vsh/rust/)
+- [Rust API reference](https://fswair.github.io/vsh/rust/api/)
+- [Crate map](https://fswair.github.io/vsh/rust/crates/)
+- [Rust examples](https://fswair.github.io/vsh/rust/examples/)
+- [MCP server](https://fswair.github.io/vsh/integrations/mcp/)
+- [Agent environments](https://fswair.github.io/vsh/integrations/agents/)
+- [Architecture](https://fswair.github.io/vsh/ARCHITECTURE/)
+- [Security model](https://fswair.github.io/vsh/security/)
+- [Performance](https://fswair.github.io/vsh/performance/)
+- [Development](https://fswair.github.io/vsh/development/)
+- [VSH Rust rewrite guarantees and non-guarantees](https://fswair.github.io/vsh/rust-rewrite/GUARANTEES/)
+- [Native Rust and Python parity contract](https://fswair.github.io/vsh/rust-rewrite/PARITY_CONTRACT/)
+- [Rust dependency policy and initial admission record](https://fswair.github.io/vsh/rust-rewrite/DEPENDENCY_POLICY/)
+- [VSH Rust rewrite threat model](https://fswair.github.io/vsh/rust-rewrite/THREAT_MODEL/)
+- [VSH merge coverage contract](https://fswair.github.io/vsh/rust-rewrite/COVERAGE/)
+- [Migration from the Python command engine to VSH 0.3 native runtime](https://fswair.github.io/vsh/rust-rewrite/MIGRATION/)
+- [VSH dual-registry release](https://fswair.github.io/vsh/rust-rewrite/RELEASE/)
+- [Rust rewrite plan validation](https://fswair.github.io/vsh/rust-rewrite/PLAN_VALIDATION/)
+- [API reference](https://fswair.github.io/vsh/API/)
+- [Transaction artifacts](https://fswair.github.io/vsh/ARTIFACTS/)
+- [Performance baseline](https://fswair.github.io/vsh/BASELINE/)
+- [CodeMode server](https://fswair.github.io/vsh/CODEMODE/)
+- [Native core and PyO3 performance record](https://fswair.github.io/vsh/rust-rewrite/PERFORMANCE/)
+- [Rust rewrite Phase 0 baseline](https://fswair.github.io/vsh/rust-rewrite/PHASE_0_BASELINE/)
+- [Rust rewrite Phase 2 — immutable snapshot and VirtualFs](https://fswair.github.io/vsh/rust-rewrite/PHASE_2_VFS/)
+- [Phase 3 Monty typed-call integration](https://fswair.github.io/vsh/rust-rewrite/PHASE_3_MONTY/)
+
+---
+
+# Low-latency simulation for Rust and Python.
+
+Canonical URL: https://fswair.github.io/vsh/
+
+<section class="vsh-hero">
+  <span class="vsh-kicker">Transactional filesystem simulation</span>
+  <h1>Low-latency simulation for Rust and Python.</h1>
+  <p class="vsh-lead">
+    VSH runs untrusted workspace automation against an immutable snapshot, produces a
+    canonical diff, applies deterministic policy, and commits only after revalidation.
+    One Rust core powers native Rust, Python, MCP, and coding-agent workflows.
+  </p>
+  <div class="vsh-actions">
+    <a class="vsh-button vsh-button--primary" href="start/">Get started</a>
+    <a class="vsh-button" href="start/how-it-works/">How it works</a>
+  </div>
+</section>
+
+## What VSH solves
+
+Agent-written filesystem code is useful precisely because it can change many files.
+That same power makes a wrong path, stale read, replayed approval, or partial crash
+expensive. A conventional dry run predicts; VSH executes the real program against
+virtual state and binds the resulting artifact to what was actually observed.
+
+## Validated locally
+
+- **1.3–16.5 µs:** estimated incremental PyO3 p50 in post-hardening cases.
+- **4.15× / 4.20×:** four-runtime native / Python throughput speedup.
+- **133 + 38 tests:** Rust and shipped-Python tests in the merge record.
+
+## One semantic core, two SDKs
+
+Python does not reimplement simulation or commit semantics. The `vbash` wheel exposes
+the native runtime through PyO3 and bundles the matching supervised Monty worker. Rust
+embedders use the `vsh-runtime` crate directly. Both produce the same transaction,
+snapshot, diff, decision, state transition, and commit proof.
+
+=== "Python"
+
+    ```python
+    from vsh import ReceiptDetail, RunMode, RunRequest, Runtime
+
+    runtime = Runtime.open("/workspace/project")
+    receipt = runtime.run(
+        RunRequest(
+            """
+    from pathlib import Path
+    source = Path('/workspace/input.txt').read_text()
+    Path('/workspace/output.txt').write_text(source.upper())
+    {'bytes': len(source)}
+    """,
+            mode=RunMode.PREVIEW,
+            detail=ReceiptDetail.FULL,
+        )
+    )
+    print(receipt.decision, receipt.changes)
+    ```
+
+=== "Rust"
+
+    ```rust
+    use vsh::{ReceiptDetail, RunRequest, Runtime, RuntimeConfig};
+
+    # fn main() -> Result<(), vsh::VshError> {
+    let runtime = Runtime::open(RuntimeConfig::new("/workspace/project"))?;
+    let receipt = runtime.preview(
+        RunRequest::new(
+            "from pathlib import Path\n\
+             Path('/workspace/output.txt').write_text('ready')",
+        )
+        .with_detail(ReceiptDetail::Full),
+    )?;
+    println!("{} {:?}", receipt.transaction, receipt.decision);
+    # Ok(())
+    # }
+    ```
+
+## Why it is different
+
+- **Simulation is executable state.** Reads and writes occur through a typed `VirtualFs`,
+  not a shell-string heuristic.
+- **Approval is exact.** Program, intent, snapshot, dependencies, policy, configuration,
+  and canonical diff contribute to transaction identity.
+- **Commit distrusts elapsed time.** Dependencies and capability roots are revalidated
+  immediately before mutation.
+- **Failure is recoverable.** Durable intent, journals, markers, and verification make
+  interrupted commits resolvable without guessing ownership.
+- **The boundary stays thin.** Python crosses PyO3 once per transaction and receives
+  native typed values rather than a JSON round trip.
+
+## Choose an entry point
+
+| You are building | Start with | Why |
+|---|---|---|
+| A Python automation service | [Python SDK](python/) | Native safety with Python ergonomics and typed exceptions |
+| A Rust host or agent runtime | [Rust SDK](rust/) | Direct access to configuration, policy, storage, and receipts |
+| A local coding-agent integration | [MCP server](integrations/mcp/) | One compact `vsh_run` tool over stdio |
+| A governed agent workflow | [Agent environments](integrations/agents/) | Preview-first protocol, bounded output, exact promotion |
+| A performance-sensitive deployment | [Benchmarks](performance/) | Reproducible native/PyO3 latency, scaling, and RSS records |
+
+!!! note "What VSH is not"
+
+    VSH is not a POSIX shell, container, general Python sandbox, or network sandbox.
+    Monty receives no host mount, subprocess capability, network capability, or ambient
+    environment. Use VSH for bounded workspace transformations whose filesystem effects
+    must be inspected, approved, and committed safely.
+
+---
+
+# Start with VSH
+
+Canonical URL: https://fswair.github.io/vsh/start/
+
+VSH has one execution model and three convenient entry points. Begin with `preview`:
+it executes the whole program and returns evidence, but it never changes host files.
+
+## Prerequisites
+
+- Python SDK and MCP: CPython 3.11–3.14.
+- Rust SDK: Rust 1.95.0, as pinned by `rust-toolchain.toml`.
+- A real workspace directory that the VSH process may read and, for commit, write.
+- Production Rust embedding: the exact `vsh-monty-worker` executable. Python wheels
+  bundle and resolve the worker automatically.
+
+## Install
+
+=== "Python"
+
+    The distribution is named `vbash`; the import package and CLI are named `vsh`.
+
+    ```bash
+    uv add vbash==0.3.0
+    ```
+
+    ```bash
+    python -m pip install vbash==0.3.0
+    ```
+
+=== "MCP"
+
+    ```bash
+    uv add 'vbash[mcp]==0.3.0'
+    uv run vsh serve
+    ```
+
+=== "Rust workspace"
+
+    Until the first crates.io publication, consume the checked-out crate directly:
+
+    ```toml
+    [dependencies]
+    vsh-runtime = { path = "crates/vsh-sdk", version = "=0.3.0" }
+    ```
+
+    The Cargo package is `vsh-runtime`; its library target is imported as `vsh`.
+
+## First preview
+
+Create a workspace with `input.txt`, then run:
+
+=== "Python"
+
+    ```python
+    from pathlib import Path
+
+    from vsh import ReceiptDetail, RunRequest, Runtime
+
+    workspace = Path("demo-workspace").resolve()
+    runtime = Runtime.open(workspace)
+    receipt = runtime.preview(
+        RunRequest(
+            """
+    from pathlib import Path
+    value = Path('/workspace/input.txt').read_text()
+    Path('/workspace/output.txt').write_text(value.upper())
+    len(value)
+    """,
+            intent="Create an uppercase derivative",
+            detail=ReceiptDetail.FULL,
+        )
+    )
+
+    print(receipt.state)       # auto_approved or pending_approval
+    print(receipt.result)      # typed Python value
+    print(receipt.changes)     # [('output.txt', 'create')]
+    assert not (workspace / "output.txt").exists()
+    ```
+
+=== "CLI"
+
+    ```bash
+    vsh run \
+      --workspace demo-workspace \
+      --mode preview \
+      --detail full \
+      --intent 'Create an uppercase derivative' \
+      --code "from pathlib import Path; value = Path('/workspace/input.txt').read_text(); Path('/workspace/output.txt').write_text(value.upper()); len(value)"
+    ```
+
+=== "Rust"
+
+    ```rust
+    use vsh::{ReceiptDetail, RunRequest, Runtime, RuntimeConfig};
+
+    fn main() -> Result<(), vsh::VshError> {
+        let runtime = Runtime::open(RuntimeConfig::new("demo-workspace"))?;
+        let receipt = runtime.preview(
+            RunRequest::new(
+                "from pathlib import Path\n\
+                 value = Path('/workspace/input.txt').read_text()\n\
+                 Path('/workspace/output.txt').write_text(value.upper())\n\
+                 len(value)",
+            )
+            .with_intent("Create an uppercase derivative")
+            .with_detail(ReceiptDetail::Full),
+        )?;
+
+        println!("transaction: {}", receipt.transaction);
+        println!("decision: {:?}", receipt.decision);
+        println!("changes: {:?}", receipt.changes);
+        Ok(())
+    }
+    ```
+
+## Read a receipt before commit
+
+Check these fields in order:
+
+1. `decision`: denied, auto-approved, or pending independent approval.
+2. `changed_paths` and `changes`: the bounded canonical change set.
+3. `risk_flags` in Python or the `RuntimeDecision` manifest in Rust.
+4. `result` / `value` and captured `stdout`.
+5. execution counters and per-stage timings.
+6. `transaction`: the exact handle to discard, approve, or promote.
+
+If an auto-approved preview is acceptable, promote the exact transaction rather than
+rerunning its source:
+
+```python
+import time
+
+committed = runtime.commit(receipt.transaction, time.time_ns() // 1_000_000)
+assert committed.committed
+```
+
+Promotion revalidates the dependencies captured by the preview. If an input changed,
+commit fails stale before applying the virtual output.
+
+## Next
+
+- Learn the [pipeline and trust boundaries](how-it-works.md).
+- Choose a [transaction workflow](../guides/transactions.md).
+- Configure the [Python SDK](../python/) or [Rust SDK](../rust/).
+- Connect a coding agent through [MCP](../integrations/mcp.md).
+
+---
+
+# How VSH works
+
+Canonical URL: https://fswair.github.io/vsh/start/how-it-works/
+
+VSH turns a filesystem program into an inspectable, identity-bound transaction. The
+runtime performs the same stages for Rust and Python callers.
+
+```mermaid
+flowchart LR
+  A[Monty source + intent] --> B[Capability-rooted snapshot]
+  B --> C[Supervised Monty worker]
+  C --> D[Copy-on-write VirtualFs]
+  D --> E[Canonical diff]
+  E --> F{Deterministic policy}
+  F -->|deny| G[Non-mutating receipt]
+  F -->|auto approve| H[Exact transaction]
+  F -->|approval required| I[Durable pending artifact]
+  H --> J[Dependency revalidation]
+  I --> J
+  J --> K[Journaled commit]
+  K --> L[Verified receipt]
+```
+
+## 1. Establish authority
+
+`Runtime.open` resolves a real workspace capability and a separate protected data
+directory. It rejects overlap through lexical paths, canonical aliases, prospective
+paths, and symlink redirection. Runtime data lives under `.vsh-runtime/data` by default,
+is excluded from snapshots, and is denied to Monty.
+
+The runtime also performs startup recovery before it accepts new work. Ambiguous
+ownership is reported and left untouched rather than guessed.
+
+## 2. Capture an immutable base
+
+The snapshot records workspace-relative paths, node kinds, metadata identity, and
+content versions under explicit limits. It does not grant the worker a host directory.
+The snapshot ID becomes part of the transaction binding.
+
+## 3. Execute through typed calls
+
+Monty executes a constrained Python subset in a supervised worker. Filesystem-facing
+operations become typed protocol calls into `VirtualFs`. The virtual filesystem reads
+from the snapshot and records copy-on-write effects; it does not mutate the host.
+
+The worker has no ambient subprocess, network, environment, or host-mount capability.
+Protected absolute paths are rejected before their names or bytes enter the worker.
+
+## 4. Freeze the result
+
+After execution, VSH canonicalizes the effect stream into one diff and records:
+
+- the program and optional out-of-band intent;
+- snapshot and runtime-configuration identities;
+- read and write dependency digests;
+- canonical diff and policy digest;
+- bounded result, stdout, statistics, and timings.
+
+These values determine the transaction identity. Approval applies to this artifact,
+not to a mutable command string or a future rerun.
+
+## 5. Decide deterministically
+
+Policy first denies protected access and catastrophic bounds. Remaining work is either
+auto-approved or marked pending approval according to profile and risk flags. Policy
+does not perform a model call, so the same inputs always yield the same decision.
+
+## 6. Revalidate and commit
+
+The committer is the only component allowed to change the workspace. It serializes the
+short revalidation/mutation window for a single workspace, then verifies capability
+identity, read dependencies, write preconditions, and the host result. Independent
+runtimes do not share a process-global lock.
+
+Commit uses durable intent, a checksummed journal, markers, and verification. Recovery
+can finish, roll back, clean, or report a conflict without following replaced internal
+symlinks.
+
+## Rust owns semantics
+
+| Concern | Owner |
+|---|---|
+| Snapshot, VirtualFs, canonical diff | Rust crates |
+| Monty supervision and typed OS-call protocol | Rust crates + pinned worker |
+| Policy, transaction identity, state machine | Rust crates |
+| Durable artifact storage, commit, recovery | Rust crates |
+| Python object conversion and exception mapping | Thin PyO3 module |
+| MCP JSON-safe envelope | Small Python adapter over PyO3 |
+
+There is no Python simulator or Python committer fallback. This is what keeps behavior
+and performance aligned across both SDKs.
+
+## Guarantees and boundaries
+
+Read the exact [guarantee contract](../rust-rewrite/GUARANTEES.md) and
+[threat model](../rust-rewrite/THREAT_MODEL.md) before treating VSH as a security
+boundary. In particular, VSH governs filesystem effects exposed through its typed
+surface; it is not a general-purpose operating-system sandbox.
+
+---
+
+# Use cases
+
+Canonical URL: https://fswair.github.io/vsh/start/use-cases/
+
+VSH is most valuable when a program needs broad workspace visibility but its final
+filesystem effects must remain bounded, explainable, and atomic enough to recover.
+
+## Coding-agent edits
+
+Let an agent produce one Monty program for a multi-file refactor. VSH returns a compact
+receipt or a full canonical change list before any host mutation.
+
+**Useful when:** the agent may touch an uncertain set of files, approvals must bind to
+exact output, or the workspace can change between planning and application.
+
+**Recommended flow:** MCP `preview` → inspect `decision`, `changes`, and `risk_flags` →
+promote the returned `transaction` with `mode="auto"` only when it is auto-approved.
+
+## Repository migrations
+
+Encode deterministic moves, rewrites, generated files, and cleanup as one program.
+Reads influence transaction identity, so a concurrent edit invalidates stale output
+instead of being silently overwritten.
+
+Use `ReceiptDetail.FULL` during development and review. Switch to `COMPACT` in high-rate
+automation when a diff digest and counts are enough.
+
+## Build and code generation
+
+Generate manifests, configuration, or source files without exposing a real output tree
+to the generator. Preview makes output reviewable; auto mode avoids a separate round
+trip for small changes that balanced policy deterministically approves.
+
+## Governed local automation
+
+Strict and paranoid profiles turn every mutation into an approval boundary and reduce
+hard-denial ceilings. The trusted host can implement its own identity check before
+calling the explicit SDK `approve` method.
+
+## IDE and MCP integrations
+
+The stdio server exposes one normal tool, `vsh_run`. A small tool schema reduces agent
+context cost while still supporting multi-file programs, policy selection, budgets,
+preview promotion, and structured receipts.
+
+## Batch analysis with typed results
+
+Monty code may read many files and return lists, dictionaries, strings, numbers, bytes,
+or nested values. Python receives native Python objects through Monty's typed PyO3
+converter; Rust receives `MontyObject`. No JSON serialization is required at the SDK
+boundary.
+
+## When not to use VSH
+
+Choose another tool when the job requires:
+
+- arbitrary subprocess execution or a POSIX shell;
+- network access inside the guest program;
+- unrestricted CPython packages or native extensions;
+- full container, VM, kernel, or tenant isolation;
+- mutation outside one explicitly rooted workspace;
+- long-running compute rather than bounded filesystem automation.
+
+VSH also does not decide human intent. Its built-in policy is deterministic; an
+organization that needs human or model judgement should place that decision outside
+the runtime, then approve the exact pending transaction through a trusted SDK surface.
+
+## Selection checklist
+
+| Question | If yes |
+|---|---|
+| Do you need to inspect effects before mutation? | Use preview-first transactions |
+| Can inputs drift before apply? | Promote the exact transaction; rely on revalidation |
+| Do Python and Rust hosts need identical behavior? | Use the shared native runtime |
+| Is agent tool-schema size important? | Use the single-tool MCP server |
+| Does code need shell/network/ambient environment? | VSH is intentionally not the right boundary |
+
+---
+
+# Transactions
+
+Canonical URL: https://fswair.github.io/vsh/guides/transactions/
+
+A VSH transaction is an immutable claim: this program, intent, snapshot, dependency
+set, runtime configuration, policy, and canonical diff belong together. Reusing only
+the source code is not equivalent to promoting a preview.
+
+## Lifecycle
+
+| State | Meaning | Host changed? | Next action |
+|---|---|---:|---|
+| `denied` | Policy or protected access rejected the artifact | No | Fix source, scope, or policy input |
+| `auto_approved` | Deterministic policy allows the exact artifact | No in preview | Commit or discard through the same live runtime |
+| `pending_approval` | Independent approval is required | No | Trusted host approves, then commits |
+| `approved` | An unexpired principal grant is bound | No | Commit before grant expiry |
+| `reserved` | Commit ownership is consumed | Not necessarily | Runtime completes or recovery resolves |
+| `committed` | Effects were applied and verified | Yes | Retain receipt as evidence |
+| `failed` | A terminal failure consumed the attempt | No or recovered | Inspect error/recovery report; do not replay blindly |
+
+## Preview and exact promotion
+
+```python
+from pathlib import Path
+import time
+
+from vsh import ReceiptDetail, RunRequest, Runtime, VshStaleError
+
+workspace = Path("project").resolve()
+runtime = Runtime.open(workspace)
+preview = runtime.preview(
+    RunRequest(
+        "from pathlib import Path\n"
+        "text = Path('/workspace/a.txt').read_text()\n"
+        "Path('/workspace/b.txt').write_text(text)\n"
+        "len(text)",
+        intent="Copy the reviewed input",
+        detail=ReceiptDetail.FULL,
+    )
+)
+
+if preview.decision == "auto_approved":
+    try:
+        committed = runtime.commit(
+            preview.transaction,
+            time.time_ns() // 1_000_000,
+        )
+    except VshStaleError:
+        # a.txt or another bound dependency changed after preview
+        raise
+```
+
+Auto-approved previews use a bounded process-local cache for their exact artifact. They
+must be promoted or discarded by the same live `Runtime` (or MCP server process).
+Before commit, VSH persists the exact artifact and lifecycle record durably.
+
+Transactions requiring independent approval are durable at preview completion and can
+survive runtime restart.
+
+## Independent approval
+
+Strict and paranoid mutation previews usually return `pending_approval`. The trusted
+host supplies a stable principal and a validity window:
+
+```python
+now_ms = time.time_ns() // 1_000_000
+state = runtime.approve(
+    preview.transaction,
+    principal="review-service:change-1842",
+    issued_at_unix_ms=now_ms,
+    expires_at_unix_ms=now_ms + 60_000,
+)
+assert state == "approved"
+committed = runtime.commit(preview.transaction, now_ms + 1)
+```
+
+Approval does not replace policy. A denied transaction cannot be promoted, and an
+approval for one transaction cannot authorize another diff or changed dependency set.
+
+## Auto mode
+
+`RunMode.AUTO` is a convenience for transactions that deterministic policy
+auto-approves. VSH executes, decides, reserves, revalidates, commits, and verifies in
+one call. If policy denies or escalates, the call remains non-mutating.
+
+Use auto mode for small, well-bounded, idempotent automation. Use explicit preview when
+a person or agent must inspect exact changes.
+
+## Discard
+
+Discard an auto-approved process-local preview when it will not be committed:
+
+```python
+discarded = runtime.discard_preview(preview.transaction)
+```
+
+Retention is capped by both transaction count and encoded bytes. Failing to discard
+unused handles may reach the configured capacity and fail closed; it cannot grow into
+an unbounded parent-process cache.
+
+## Recovery
+
+`Runtime.open` runs startup recovery. Call `recover()` explicitly after an operational
+incident or when surfacing a report to the host:
+
+```python
+report = runtime.recover()
+print(report.finalized_commits, report.rolled_back, report.cleaned)
+for transaction, path, reason in report.conflicts:
+    print(transaction, path, reason)
+```
+
+An orphan or conflict means VSH could not prove safe ownership. It leaves ambiguous
+data untouched for an operator rather than deleting or overwriting it.
+
+## Concurrency
+
+- Snapshot, simulation, diff, and policy may proceed independently.
+- Only the short same-workspace revalidation/mutation window is serialized.
+- Independent runtime roots can scale in parallel.
+- A transaction is single-use; concurrent double commit cannot apply it twice.
+
+---
+
+# Policies and budgets
+
+Canonical URL: https://fswair.github.io/vsh/guides/policies-and-budgets/
+
+Policy controls whether a valid virtual result may progress. Budgets control how much
+work can be performed to produce that result. They are independent, fail-closed layers.
+
+## Built-in policy profiles
+
+| Profile | Mutation posture | Escalation thresholds | Typical use |
+|---|---|---|---|
+| `balanced` | Small non-destructive changes may auto-approve | 500 paths or 64 MiB changed | Interactive local agents and routine automation |
+| `strict` | Every mutation escalates | 100 paths or 8 MiB changed | Reviewed CI and organizational workflows |
+| `paranoid` | Every mutation escalates; lower denial ceilings | 25 paths or 1 MiB changed | High-sensitivity workspaces |
+
+All profiles deny protected access attempts and protected mutations. Deletes, renames,
+executable changes, symlink changes, large touched sets, and large byte changes produce
+risk flags. Catastrophic path, byte, delete-count, and delete-ratio ceilings are hard
+denials, not approval prompts.
+
+!!! warning "Profiles are not permission grants"
+
+    Selecting `balanced` does not grant Monty ambient filesystem access. Call policy,
+    capability roots, transaction identity, revalidation, and commit recovery remain in
+    force for every profile.
+
+## Default execution budget
+
+| Limit | Default | Protects |
+|---|---:|---|
+| Program source | 1 MiB | parser/compiler allocation |
+| Duration | 1 second | runaway bytecode |
+| Recursion | 512 frames | stack growth |
+| Worker heap | 256 MiB | guest allocation |
+| Typed OS calls | 10,000 | call amplification |
+| Read bytes | 64 MiB | cumulative materialization |
+| Write bytes | 64 MiB | cumulative virtual output |
+| One I/O call | 4 MiB | single-frame allocation |
+| One path | 16 KiB | path/protocol abuse |
+| Directory entries | 100,000 | traversal fan-out |
+| Captured stdout | 1 MiB | output flooding |
+| Returned value | 1 MiB | host conversion |
+| Exception payload | 256 KiB | traceback/error flooding |
+
+The supervised worker additionally enforces protocol frame and process boundaries.
+Snapshot, artifact, state-log, journal, plan, and commit paths have their own trusted
+host limits.
+
+## Python configuration
+
+Unspecified values keep native defaults:
+
+```python
+from vsh import ExecutionBudget, RunRequest
+
+budget = ExecutionBudget(
+    max_duration_ms=250,
+    max_memory_bytes=64 * 1024 * 1024,
+    max_os_calls=2_000,
+    max_read_bytes=8 * 1024 * 1024,
+    max_write_bytes=4 * 1024 * 1024,
+    max_output_bytes=64 * 1024,
+    max_result_bytes=128 * 1024,
+)
+request = RunRequest(code, budget=budget)
+```
+
+## Rust configuration
+
+`ExecutionBudget` is an alias of `ExecutionLimits`. Start from `default()` and replace
+only the fields the workload owns:
+
+```rust
+use std::time::Duration;
+use vsh::{ExecutionBudget, RunRequest};
+
+let budget = ExecutionBudget {
+    max_duration: Duration::from_millis(250),
+    max_memory_bytes: 64 * 1024 * 1024,
+    max_os_calls: 2_000,
+    max_read_bytes: 8 * 1024 * 1024,
+    max_write_bytes: 4 * 1024 * 1024,
+    ..ExecutionBudget::default()
+};
+let request = RunRequest::new(code).with_budget(budget);
+```
+
+## Budget design guidance
+
+1. Measure a representative successful workload.
+2. Set each independent limit above the measured p99 plus operational headroom.
+3. Keep result and stdout ceilings much smaller than filesystem read ceilings.
+4. Treat a budget failure as a rejected transaction, never as permission to rerun with
+   unlimited values.
+5. Separate interactive, CI, and bulk-migration profiles in the trusted host.
+
+Budget tuning changes runtime configuration identity. A transaction created under one
+configuration cannot be silently promoted under another.
+
+---
+
+# Python SDK
+
+Canonical URL: https://fswair.github.io/vsh/python/
+
+The `vbash` distribution is a native Python package: its public `vsh` module is backed
+by a PyO3 extension linked to the same Rust runtime used by native callers. There is no
+Python simulator fallback.
+
+## Install
+
+```bash
+uv add vbash==0.3.0
+```
+
+For the optional MCP adapter:
+
+```bash
+uv add 'vbash[mcp]==0.3.0'
+```
+
+Supported interpreters are CPython 3.11, 3.12, 3.13, and 3.14. Release wheels bundle
+the exact `vsh-monty-worker` that matches the extension.
+
+## Minimal transaction
+
+```python
+from pathlib import Path
+
+from vsh import ReceiptDetail, RunMode, RunRequest, Runtime
+
+workspace = Path("project").resolve(strict=True)
+runtime = Runtime.open(workspace, policy="balanced")
+receipt = runtime.run(
+    RunRequest(
+        """
+from pathlib import Path
+source = Path('/workspace/src/config.txt').read_text()
+Path('/workspace/build/config.txt').write_text(source.strip() + '\n')
+{'input_bytes': len(source)}
+""",
+        intent="Normalize generated configuration",
+        mode=RunMode.PREVIEW,
+        detail=ReceiptDetail.FULL,
+    )
+)
+
+print(receipt.transaction)
+print(receipt.decision)
+print(receipt.result)       # native Python dict
+print(receipt.changes)      # list[tuple[path, kind]]
+```
+
+## Boundary behavior
+
+- `Runtime.open`, `run`, `preview`, `commit`, and `recover` release the GIL while native
+  work is in progress.
+- Monty values cross through the pinned typed converter, not JSON.
+- Rust panics are contained before crossing FFI and become `VshInternalError`.
+- All native failures derive from `VshRuntimeError`, so callers may catch broadly or by
+  category.
+- Each `run` call crosses Python/Rust once for the complete transaction; filesystem
+  calls remain inside the native worker/runtime protocol.
+
+## Runtime layout
+
+```python
+runtime = Runtime.open(
+    workspace,
+    data_directory="/trusted/vsh-data/project-17",
+    policy="strict",
+    worker_path="/opt/vsh/bin/vsh-monty-worker",
+)
+```
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `workspace` | required | Existing host directory exposed virtually as `/workspace` |
+| `data_directory` | `.vsh-runtime/data` below workspace | Protected durable blobs, transaction state, and recovery artifacts |
+| `policy` | `balanced` | `balanced`, `strict`, or `paranoid` deterministic policy |
+| `worker_path` | bundled/resolved worker | Explicit trusted worker executable override |
+
+An explicit data directory must not overlap the untrusted workspace through any
+lexical, canonical, prospective, or symlink alias.
+
+## Which method should I call?
+
+| Method | Use it when |
+|---|---|
+| `run(request)` | Request mode should control preview vs deterministic auto-commit |
+| `preview(request)` | Host mutation must be impossible in this call, regardless of request mode |
+| `commit(transaction, now_ms)` | Promote one exact auto-approved or independently approved preview |
+| `approve(...)` | A trusted principal accepts a pending transaction for a bounded window |
+| `discard_preview(transaction)` | An unused process-local auto-approved preview should release capacity |
+| `recover()` | The host needs an explicit recovery report after startup or an incident |
+
+Continue with the complete [Python API reference](api.md) or tested
+[workflow examples](examples.md).
+
+---
+
+# Python API reference
+
+Canonical URL: https://fswair.github.io/vsh/python/api/
+
+All public names below are exported from `vsh`. Static signatures are shipped in
+`vsh._native.pyi`; runtime behavior is implemented by the PyO3 extension.
+
+## Module functions
+
+### `engine_kind() -> str`
+
+Returns `"rust"`. This is a diagnostic assertion that the native engine owns the
+surface.
+
+### `normalize_path(path: str) -> str`
+
+Parses and canonicalizes a workspace-relative virtual path. It removes `.` segments,
+resolves internal `..`, and rejects empty, escaping, absolute POSIX, and Windows-drive
+paths.
+
+```python
+from vsh import normalize_path
+
+assert normalize_path("src/vsh/./core/../lib.rs") == "src/vsh/lib.rs"
+```
+
+### `__version__: str`
+
+The Python distribution, extension, Rust workspace, and worker share version `0.3.0`.
+
+## `RunMode`
+
+| Member | Behavior |
+|---|---|
+| `RunMode.PREVIEW` | Execute, diff, and decide without changing host files |
+| `RunMode.AUTO` | Commit only if deterministic policy auto-approves; otherwise remain non-mutating |
+
+## `ReceiptDetail`
+
+| Member | Behavior |
+|---|---|
+| `ReceiptDetail.COMPACT` | Counts and digests; `changes` stays empty |
+| `ReceiptDetail.FULL` | Includes the complete bounded canonical `(path, kind)` list |
+
+## `ExecutionBudget`
+
+```text
+ExecutionBudget(
+    *,
+    max_program_bytes: int | None = ...,
+    max_duration_ms: int | None = ...,
+    max_recursion_depth: int | None = ...,
+    max_memory_bytes: int | None = ...,
+    max_os_calls: int | None = ...,
+    max_read_bytes: int | None = ...,
+    max_write_bytes: int | None = ...,
+    max_io_call_bytes: int | None = ...,
+    max_path_bytes: int | None = ...,
+    max_directory_entries: int | None = ...,
+    max_output_bytes: int | None = ...,
+    max_result_bytes: int | None = ...,
+    max_exception_bytes: int | None = ...,
+)
+```
+
+Every argument is keyword-only. `None` selects the native default. Each value is
+available as a read-only property with the same name. See
+[Policies and budgets](../guides/policies-and-budgets.md) for defaults and tuning.
+
+## `RunRequest`
+
+```text
+RunRequest(
+    code: str,
+    *,
+    intent: str | None = ...,
+    mode: RunMode | None = ...,
+    detail: ReceiptDetail | None = ...,
+    budget: ExecutionBudget | None = ...,
+)
+```
+
+| Property | Meaning |
+|---|---|
+| `code` | Exact Monty source bound into transaction identity |
+| `intent` | Optional trusted-host context bound independently from source |
+| `mode` | Defaults to `PREVIEW` |
+| `detail` | Defaults to `COMPACT` |
+| `budget` | Independent resource ceilings for this execution |
+
+The request object is immutable from Python after construction.
+
+## `Runtime`
+
+### `Runtime.open(...) -> Runtime`
+
+```text
+Runtime.open(
+    workspace: str | os.PathLike[str],
+    *,
+    data_directory: str | os.PathLike[str] | None = ...,
+    policy: str = "balanced",
+    worker_path: str | os.PathLike[str] | None = ...,
+) -> Runtime
+```
+
+Opens capability roots, validates separation, creates bounded stores, starts worker
+supervision, and performs startup recovery. The workspace must already exist and be a
+directory.
+
+### `run(request: RunRequest) -> Receipt`
+
+Executes according to `request.mode`. In auto mode, only an `auto_approved` decision
+may proceed to commit.
+
+### `preview(request: RunRequest) -> Receipt`
+
+Forces preview semantics even if the supplied request was constructed with auto mode.
+
+### `discard_preview(transaction: str) -> bool`
+
+Removes one process-local auto-approved preview. Returns `False` when no matching
+preview exists.
+
+### `approve(...) -> str`
+
+```text
+runtime.approve(
+    transaction: str,
+    principal: str,
+    issued_at_unix_ms: int,
+    expires_at_unix_ms: int,
+) -> str
+```
+
+Creates an exact approval grant for a pending transaction. Returns the new lifecycle
+state (`"approved"`). The validity interval must be coherent and commit time must fall
+inside it.
+
+### `commit(transaction: str, now_unix_ms: int) -> Receipt`
+
+Consumes a single-use reservation, revalidates bound dependencies and capability
+identity, applies the canonical plan through the trusted committer, verifies the host,
+and returns a committed receipt. Stale input raises `VshStaleError` before mutation.
+
+### `recover() -> RecoveryReport`
+
+Reruns bounded recovery and returns what was finalized, rolled back, cleaned, left
+orphaned, or reported as conflict.
+
+## `Receipt`
+
+### Identity and decision
+
+| Property | Type | Meaning |
+|---|---|---|
+| `transaction` | `str` | Exact transaction identifier |
+| `base_snapshot` | `str` | Immutable input snapshot identifier |
+| `state` | `str` | Current lifecycle state |
+| `decision` | `str` | `denied`, `auto_approved`, or `pending_approval` |
+| `diff` | `str` | Canonical diff digest |
+| `risk_flags` | `list[str]` | Deterministic escalation reasons |
+| `deny_reason` | `str | None` | Stable denial description |
+
+### Output and effects
+
+| Property | Type | Meaning |
+|---|---|---|
+| `changed_paths` | `int` | Canonical change count |
+| `changes` | `list[tuple[str, str]]` | Full path/kind list when requested |
+| `result` | `object` | Native Python projection of Monty's returned value |
+| `result_repr` | `str` | Bounded diagnostic representation |
+| `stdout` | `str` | Bounded captured `print()` output |
+
+Change kinds are `create`, `delete`, `modify`, and `metadata_change`. Rename effects are
+represented by the canonical before/after entries produced by the native diff.
+
+### Resource counters
+
+`os_calls`, `read_bytes`, `write_bytes`, `directory_entries`, `output_bytes`,
+`denied_accesses`, and `result_bytes` describe work performed by the worker adapter.
+
+### Commit evidence
+
+| Property | Type | Meaning |
+|---|---|---|
+| `committed` | `bool` | Whether host effects were applied and verified |
+| `commit_operations` | `int | None` | Number of trusted commit operations |
+| `verified_paths` | `int | None` | Paths verified after application |
+| `cleanup_pending` | `bool` | Durable cleanup remains for recovery |
+
+### Timings
+
+`timings_ns() -> Mapping[str, int]` returns `snapshot`, `execute`, `diff`, `policy`,
+`bind_and_store`, `commit`, and `total`. They are monotonic stage measurements intended
+for profiling and receipts, not an authorization signal.
+
+## `RecoveryReport`
+
+| Property | Meaning |
+|---|---|
+| `finalized_commits` | Commit was already applied and recovery finalized its state |
+| `rolled_back` | Partial work was safely returned to the original state |
+| `cleaned` | Obsolete trusted artifacts were removed |
+| `orphaned` | Ownership could not be proven; item was left untouched |
+| `conflicts` | `(transaction, path | None, reason)` operator records |
+
+## Exceptions
+
+```text
+RuntimeError
+└── VshRuntimeError
+    ├── VshExecutionError
+    ├── VshStateError
+    ├── VshStaleError
+    ├── VshRecoveryError
+    └── VshInternalError
+```
+
+| Exception | Catch for |
+|---|---|
+| `VshExecutionError` | Monty compilation, execution, protocol, or hard-budget failure |
+| `VshStateError` | Invalid lifecycle transition, approval, reservation, or replay |
+| `VshStaleError` | Host dependencies changed after virtual execution |
+| `VshRecoveryError` | Recovery conflict or inability to prove safe ownership |
+| `VshInternalError` | Contained Rust panic or invariant failure at the native boundary |
+
+Catch `VshRuntimeError` at application boundaries, then log the concrete subclass and
+receipt/transaction context. Do not convert stale or recovery failures into blind
+retries.
+
+---
+
+# Python examples
+
+Canonical URL: https://fswair.github.io/vsh/python/examples/
+
+These examples use the public PyO3 surface and one existing workspace. Guest paths are
+rooted at `/workspace`; host paths never enter the Monty program.
+
+## Preview a multi-file edit
+
+```python
+from pathlib import Path
+
+from vsh import ReceiptDetail, RunRequest, Runtime
+
+root = Path("project").resolve(strict=True)
+runtime = Runtime.open(root)
+receipt = runtime.preview(
+    RunRequest(
+        """
+from pathlib import Path
+
+source = Path('/workspace/src/name.txt').read_text().strip()
+Path('/workspace/generated').mkdir(parents=True, exist_ok=True)
+Path('/workspace/generated/name.txt').write_text(source.upper() + '\n')
+Path('/workspace/generated/meta.txt').write_text('generated-by=vsh\n')
+{'source': source, 'files': 2}
+""",
+        intent="Regenerate checked-in name assets",
+        detail=ReceiptDetail.FULL,
+    )
+)
+
+assert not (root / "generated" / "name.txt").exists()
+for path, kind in receipt.changes:
+    print(kind, path)
+print(receipt.result)
+```
+
+## Promote an auto-approved preview
+
+```python
+import time
+
+if receipt.decision == "auto_approved":
+    committed = runtime.commit(
+        receipt.transaction,
+        time.time_ns() // 1_000_000,
+    )
+    assert committed.state == "committed"
+    assert committed.committed
+else:
+    print("Review required:", receipt.risk_flags)
+```
+
+Do not execute the source again after review. The returned transaction is the exact
+artifact that was inspected.
+
+## Strict review gate
+
+```python
+import time
+
+from vsh import RunRequest, Runtime
+
+runtime = Runtime.open("project", policy="strict")
+preview = runtime.preview(
+    RunRequest(
+        "from pathlib import Path\n"
+        "Path('/workspace/reviewed.txt').write_text('yes')",
+        intent="Apply approved change CHG-1842",
+    )
+)
+assert preview.decision == "pending_approval"
+
+now = time.time_ns() // 1_000_000
+runtime.approve(
+    preview.transaction,
+    principal="reviewer:alice/change:1842",
+    issued_at_unix_ms=now,
+    expires_at_unix_ms=now + 30_000,
+)
+committed = runtime.commit(preview.transaction, now + 1)
+```
+
+The trusted application—not Monty—chooses the principal and time window.
+
+## Bound an agent-generated program
+
+```python
+from vsh import ExecutionBudget, RunRequest
+
+request = RunRequest(
+    agent_generated_source,
+    intent="Update project metadata only",
+    budget=ExecutionBudget(
+        max_program_bytes=64 * 1024,
+        max_duration_ms=300,
+        max_memory_bytes=64 * 1024 * 1024,
+        max_os_calls=1_500,
+        max_read_bytes=8 * 1024 * 1024,
+        max_write_bytes=2 * 1024 * 1024,
+        max_output_bytes=32 * 1024,
+        max_result_bytes=64 * 1024,
+    ),
+)
+preview = runtime.preview(request)
+```
+
+## Handle stale input
+
+```python
+import time
+
+from vsh import VshStaleError
+
+try:
+    runtime.commit(preview.transaction, time.time_ns() // 1_000_000)
+except VshStaleError as error:
+    # Re-preview against current state and ask for review again.
+    print(f"preview is stale: {error}")
+```
+
+Never catch stale state and apply the old output yourself. That bypasses the property
+the transaction boundary exists to enforce.
+
+## Use auto mode for bounded jobs
+
+```python
+from vsh import RunMode, RunRequest
+
+receipt = runtime.run(
+    RunRequest(
+        "from pathlib import Path\n"
+        "Path('/workspace/status.txt').write_text('ready\n')",
+        intent="Refresh local status marker",
+        mode=RunMode.AUTO,
+    )
+)
+
+if not receipt.committed:
+    print(receipt.decision, receipt.risk_flags, receipt.deny_reason)
+```
+
+Auto mode does not override policy. Escalated or denied work remains non-mutating.
+
+## Recover at service startup
+
+```python
+from vsh import Runtime, VshRecoveryError
+
+try:
+    runtime = Runtime.open("project")  # startup recovery runs here
+    report = runtime.recover()
+except VshRecoveryError as error:
+    raise SystemExit(f"operator review required: {error}") from error
+
+if report.conflicts or report.orphaned:
+    raise SystemExit(f"unresolved recovery state: {report.conflicts}")
+```
+
+## Threaded hosts
+
+Native calls release the GIL, so separate runtime roots may execute from Python worker
+threads. Do not share a preview transaction across processes: process-local
+auto-approved artifacts belong to the runtime that created them.
+
+---
+
+# Rust SDK
+
+Canonical URL: https://fswair.github.io/vsh/rust/
+
+`vsh-runtime` is the native facade crate. Its library target is named `vsh`, so Rust
+code imports `use vsh::...`. It owns the same runtime called by Python through PyO3.
+
+## Add the crate
+
+Before the first registry publication, use the workspace package:
+
+```toml
+[dependencies]
+vsh-runtime = { path = "crates/vsh-sdk", version = "=0.3.0" }
+```
+
+After registry publication, keep the exact version pin required by the project supply
+chain policy:
+
+```toml
+[dependencies]
+vsh-runtime = "=0.3.0"
+```
+
+The default production configuration expects a matching trusted
+`vsh-monty-worker` executable. Put it on `PATH` or set an explicit path.
+
+## Open and preview
+
+```rust
+use vsh::{ReceiptDetail, RunRequest, Runtime, RuntimeConfig};
+
+fn main() -> Result<(), vsh::VshError> {
+    let config = RuntimeConfig::new("project")
+        .with_worker_path("/opt/vsh/bin/vsh-monty-worker");
+    let runtime = Runtime::open(config)?;
+
+    let receipt = runtime.preview(
+        RunRequest::new(
+            "from pathlib import Path\n\
+             text = Path('/workspace/input.txt').read_text()\n\
+             Path('/workspace/output.txt').write_text(text.upper())\n\
+             len(text)",
+        )
+        .with_intent("Create reviewed uppercase output")
+        .with_detail(ReceiptDetail::Full),
+    )?;
+
+    println!("transaction: {}", receipt.transaction);
+    println!("decision: {:?}", receipt.decision);
+    println!("changes: {:?}", receipt.changes);
+    Ok(())
+}
+```
+
+## Facade design
+
+The facade exports the high-level runtime plus stable types from the internal crates.
+Most applications should begin with:
+
+- `Runtime` and `RuntimeConfig`;
+- `RunRequest`, `RunMode`, and `ReceiptDetail`;
+- `Receipt`, `RuntimeDecision`, and `StageTimings`;
+- `ExecutionBudget`;
+- `VshError`;
+- identity and state values such as `TransactionId`, `TransactionState`, and `VPath`.
+
+Lower-level commit, policy, store, VFS, and Monty types are re-exported for hosts that
+need custom deterministic policy or operational reporting without learning internal
+module paths.
+
+## Execution choices
+
+| Configuration | Isolation | Intended use |
+|---|---|---|
+| Default supervised worker | Process crash boundary and worker heap limit | Production and untrusted programs |
+| `with_worker_path(path)` | Same, explicit binary identity | Packaged services and hermetic deployments |
+| `with_in_process_execution()` | No crash isolation; process-local harness | Trusted tests and benchmarks only |
+
+!!! danger "In-process execution is not a production optimization"
+
+    It disables the worker crash boundary and per-worker heap enforcement. Never use it
+    for hostile, model-authored, or otherwise unreviewed source.
+
+## Concurrency
+
+One `Runtime` has no process-global execution lock. Worker pooling is configured per
+runtime, and separate workspace runtimes can execute concurrently. Same-workspace
+commit serialization covers only the trusted revalidation/mutation window.
+
+Continue with the [Rust API reference](api.md), [crate map](crates.md), or
+[complete examples](examples.md).
+
+---
+
+# Rust API reference
+
+Canonical URL: https://fswair.github.io/vsh/rust/api/
+
+This page documents the application-facing `vsh-runtime` facade. Rustdoc remains the
+exhaustive source for every re-exported lower-level field and error variant.
+
+## Constants and diagnostics
+
+```rust
+pub const VERSION: &str;
+pub const fn engine_kind() -> &'static str;
+```
+
+`VERSION` is shared with the Python wheel and worker. `engine_kind()` returns `"rust"`.
+
+## `RuntimeConfig`
+
+```rust
+let config = RuntimeConfig::new(workspace_root)
+    .with_data_directory(trusted_data_root)
+    .with_worker_path(worker)
+    .with_max_idle_workers(4)
+    .with_policy_profile(PolicyProfile::Strict)
+    .with_result_compatibility(ResultCompatibility::Native);
+```
+
+| Builder/accessor | Purpose |
+|---|---|
+| `new(workspace_root)` | Balanced configuration with protected `.vsh-runtime/data` |
+| `with_data_directory(path)` | Select a trusted external durable-data capability |
+| `with_worker_path(path)` | Select the exact supervised worker executable |
+| `with_max_idle_workers(count)` | Bound reusable clean workers; zero disables pooling |
+| `with_result_compatibility(kind)` | Require native or Python-projectable result values |
+| `with_in_process_execution()` | Trusted-only correctness/benchmark harness |
+| `with_virtual_root(root)` | Change the synthetic absolute namespace shown to Monty |
+| `with_policy(policy)` | Supply a custom validated deterministic policy |
+| `with_policy_profile(profile)` | Select balanced, strict, or paranoid presets |
+| `with_snapshot_limits(limits)` | Replace eager traversal and snapshot ceilings |
+| `with_commit_config(config)` | Replace trusted commit/recovery ceilings |
+| `with_store_config(config)` | Replace durable transaction-log ceilings |
+| `with_artifact_limits(limits)` | Replace pending-artifact and cache ceilings |
+| `workspace_root()` | Return the host workspace root |
+| `data_directory()` | Return the trusted artifact root |
+| `worker_path()` | Return the worker path or `None` in trusted in-process mode |
+| `policy()` | Borrow the deterministic transaction policy |
+
+Builder values contribute to runtime configuration identity where security relevant.
+
+## `RunRequest<'a>`
+
+```rust
+pub struct RunRequest<'a> {
+    pub code: &'a str,
+    pub intent: Option<&'a str>,
+    pub mode: RunMode,
+    pub detail: ReceiptDetail,
+    pub budget: ExecutionBudget,
+}
+```
+
+`RunRequest::new(code)` creates a compact preview with default limits. Chain
+`with_intent`, `with_mode`, `with_detail`, and `with_budget` to replace one choice.
+
+## Modes and detail
+
+```rust
+pub enum RunMode { Preview, Auto }
+pub enum ReceiptDetail { Compact, Full }
+```
+
+Preview never changes the host. Auto commits only deterministic `AutoApproved` work.
+Compact omits per-path entries while retaining identity and counts; Full retains the
+complete bounded canonical diff.
+
+## `Runtime`
+
+| Method | Result | Contract |
+|---|---|---|
+| `Runtime::open(config)` | `Runtime` | Establish capabilities, stores, worker supervision, and startup recovery |
+| `startup_recovery()` | `&RecoveryReport` | Inspect recovery performed during open |
+| `run(request)` | `Receipt` | Execute according to request mode |
+| `preview(request)` | `Receipt` | Force a non-mutating call |
+| `discard_preview(id)` | `bool` | Release a process-local auto-approved artifact |
+| `approve(id, principal, issued, expires)` | `TransactionRecord` | Bind an independent time-limited approval |
+| `commit(id, now)` | `Receipt` | Single-use reserve, revalidate, apply, verify |
+| `recover()` | `RecoveryReport` | Resolve bounded durable commit state |
+| `transaction(id)` | `TransactionRecord` | Read current durable lifecycle state |
+
+All fallible methods return `Result<_, VshError>`.
+
+## `Receipt`
+
+```rust
+pub struct Receipt {
+    pub transaction: TransactionId,
+    pub base_snapshot: SnapshotId,
+    pub state: TransactionState,
+    pub decision: RuntimeDecision,
+    pub diff: DiffDigest,
+    pub changed_paths: usize,
+    pub changes: Vec<DiffEntry>,
+    pub value: MontyObject,
+    pub stdout: String,
+    pub execution: ExecutionStats,
+    pub timings: StageTimings,
+    pub commit: Option<CommitReceipt>,
+}
+```
+
+`RuntimeDecision` is one of:
+
+- `Denied(DenyManifest)`;
+- `AutoApproved`;
+- `PendingApproval(RiskManifest)`.
+
+Pattern-match the decision rather than parsing its display text.
+
+## `StageTimings`
+
+All fields are nanoseconds measured with a monotonic clock:
+
+| Field | Includes |
+|---|---|
+| `snapshot_ns` | Capability-rooted metadata/content snapshot |
+| `execute_ns` | Monty bytecode and typed VirtualFs calls |
+| `diff_ns` | Canonical diff freeze |
+| `policy_ns` | Deterministic policy evaluation |
+| `bind_and_store_ns` | Artifact binding and lifecycle writes |
+| `commit_ns` | Reservation, revalidation, application, verification |
+| `total_ns` | Complete native runtime call |
+
+## `ExecutionBudget`
+
+`ExecutionBudget` aliases `vsh_monty::ExecutionLimits` and has public fields for source
+bytes, duration, recursion, memory, OS calls, read/write bytes, per-call I/O, path bytes,
+directory entries, stdout, returned value, and exception payload. Prefer struct update
+syntax from `Default` so later compatible fields receive safe defaults.
+
+## `ArtifactLimits`
+
+Trusted-host bounds for durable pending artifacts:
+
+- total encoded artifact bytes;
+- encoded result and retained stdout;
+- canonical entries and dependencies;
+- one-path bytes;
+- process-local preview count and aggregate encoded bytes.
+
+These do not replace execution budgets; they constrain the artifact VSH retains after
+execution.
+
+## `VshError`
+
+`VshError` is `#[non_exhaustive]`. Important categories include data-directory,
+blob-store, commit, execution, VFS, state-store, approval, artifact, result-compatibility,
+unsafe-overlap, binding mismatch, recovery conflict, missing/duplicate pending artifact,
+ephemeral capacity, and poisoned pending state.
+
+Match categories you can handle and keep a fallback arm:
+
+```rust
+match runtime.commit(transaction, now_ms) {
+    Ok(receipt) => consume(receipt),
+    Err(vsh::VshError::Commit(error)) => report_commit_error(error),
+    Err(other) => report_runtime_error(other),
+}
+```
+
+Do not use formatted error strings as state-machine input. Stable typed variants and
+sources are the API contract.
+
+## Re-exported lower-level surfaces
+
+The facade re-exports canonical types from `vsh-types`, `vsh-vfs`, `vsh-policy`,
+`vsh-monty`, `vsh-store`, and `vsh-commit`. Use them to configure the facade or process
+receipts. Constructing a parallel commit path from lower-level parts defeats the
+single-writer architecture and is not recommended.
+
+---
+
+# Crate map
+
+Canonical URL: https://fswair.github.io/vsh/rust/crates/
+
+The workspace is split by authority and change rate. Applications normally depend only
+on `vsh-runtime`; the other crates make boundaries auditable and publishable.
+
+| Cargo package | Library/binary | Responsibility |
+|---|---|---|
+| `vsh-runtime` | `vsh` | Public native SDK and orchestration facade |
+| `vsh-types` | `vsh_types` | Paths, digests, node state, transaction IDs and lifecycle |
+| `vsh-vfs` | `vsh_vfs` | Immutable snapshots and copy-on-write virtual effects |
+| `vsh-policy` | `vsh_policy` | Protected capabilities, deterministic decision and risk manifests |
+| `vsh-monty` | `vsh_monty` | Typed Monty calls, limits, supervision, and result contract |
+| `vsh-store` | `vsh_store` | Immutable blobs, approvals, and atomic transaction state |
+| `vsh-commit` | `vsh_commit` | Revalidation, journaled mutation, verification, and recovery |
+| `vsh-monty-worker` | binary | Exact-version crash-isolated guest execution process |
+| `vsh-python` | `vsh._native` | Non-published PyO3 adapter used by the `vbash` wheel |
+
+## Dependency direction
+
+```text
+vsh-types
+  ├── vsh-vfs
+  ├── vsh-policy
+  └── vsh-store
+       \
+vsh-monty ── vsh-commit
+       \       /
+        vsh-runtime
+             |
+          vsh-python
+```
+
+The diagram is conceptual: consult the workspace manifests for the exact graph. The
+important rule is authority flow—PyO3 adapts the runtime, and only the commit crate owns
+host mutation.
+
+## Which crate should I depend on?
+
+- **Application or agent host:** `vsh-runtime`.
+- **Custom receipt/state tooling:** prefer types re-exported by `vsh-runtime` before
+  adding a direct lower-level dependency.
+- **Alternative deterministic policy:** `vsh-policy` types are already re-exported.
+- **Worker packaging:** ship the exact matching `vsh-monty-worker` binary; do not mix
+  worker/runtime versions.
+- **Python extension:** consume `vbash`; do not depend on `vsh-python` from crates.io
+  because it is intentionally not published as a standalone crate.
+
+## Version and supply-chain contract
+
+All workspace packages share version `0.3.0`, Rust 1.95.0, edition 2024, and Apache-2.0.
+Direct external crates are exact-pinned, the lockfile is committed, workspace crates
+forbid unsafe code, and CI runs RustSec plus license/source/duplicate policy checks.
+
+See the [dependency admission policy](../rust-rewrite/DEPENDENCY_POLICY.md) and
+[release artifact order](../rust-rewrite/RELEASE.md).
+
+---
+
+# Rust examples
+
+Canonical URL: https://fswair.github.io/vsh/rust/examples/
+
+The examples below use the `vsh` library target from the `vsh-runtime` package.
+
+## Preview and inspect
+
+```rust
+use vsh::{MontyObject, ReceiptDetail, RunRequest, Runtime, RuntimeConfig};
+
+fn main() -> Result<(), vsh::VshError> {
+    let runtime = Runtime::open(RuntimeConfig::new("project"))?;
+    let receipt = runtime.preview(
+        RunRequest::new(
+            "from pathlib import Path\n\
+             value = Path('/workspace/input.txt').read_text()\n\
+             Path('/workspace/output.txt').write_text(value.upper())\n\
+             len(value)",
+        )
+        .with_intent("Generate uppercase output")
+        .with_detail(ReceiptDetail::Full),
+    )?;
+
+    if let MontyObject::Int(length) = receipt.value {
+        println!("input length: {length}");
+    }
+    for change in &receipt.changes {
+        println!("{:?} {}", change.kind, change.path);
+    }
+    Ok(())
+}
+```
+
+## Promote only auto-approved work
+
+```rust
+use vsh::RuntimeDecision;
+
+match receipt.decision {
+    RuntimeDecision::AutoApproved => {
+        let committed = runtime.commit(receipt.transaction, now_unix_ms())?;
+        assert!(committed.commit.is_some());
+    }
+    RuntimeDecision::PendingApproval(manifest) => {
+        eprintln!("review required: {:?}", manifest.flags);
+    }
+    RuntimeDecision::Denied(manifest) => {
+        eprintln!("denied: {:?}", manifest.reason);
+    }
+}
+```
+
+`now_unix_ms()` is a trusted-host clock helper. A preview transaction is single-use;
+do not rerun source as a substitute for promotion.
+
+## Strict approval
+
+```rust
+use vsh::{PolicyProfile, PrincipalId, RunRequest, Runtime, RuntimeConfig};
+
+fn reviewed_change(now_ms: u64) -> Result<(), vsh::VshError> {
+    let runtime = Runtime::open(
+        RuntimeConfig::new("project").with_policy_profile(PolicyProfile::Strict),
+    )?;
+    let preview = runtime.preview(RunRequest::new(
+        "from pathlib import Path\n\
+         Path('/workspace/reviewed.txt').write_text('yes')",
+    ))?;
+
+    let principal = PrincipalId::digest_label("reviewer:alice/change:1842");
+    runtime.approve(preview.transaction, principal, now_ms, now_ms + 30_000)?;
+    runtime.commit(preview.transaction, now_ms + 1)?;
+    Ok(())
+}
+```
+
+## Custom limits
+
+```rust
+use std::time::Duration;
+use vsh::{ExecutionBudget, RunRequest};
+
+let budget = ExecutionBudget {
+    max_program_bytes: 64 * 1024,
+    max_duration: Duration::from_millis(300),
+    max_memory_bytes: 64 * 1024 * 1024,
+    max_os_calls: 1_500,
+    max_read_bytes: 8 * 1024 * 1024,
+    max_write_bytes: 2 * 1024 * 1024,
+    max_output_bytes: 32 * 1024,
+    max_result_bytes: 64 * 1024,
+    ..ExecutionBudget::default()
+};
+
+let request = RunRequest::new(source).with_budget(budget);
+let preview = runtime.preview(request)?;
+```
+
+## External data directory and worker
+
+```rust
+use vsh::{Runtime, RuntimeConfig};
+
+let config = RuntimeConfig::new("/srv/workspaces/job-17")
+    .with_data_directory("/srv/vsh-state/job-17")
+    .with_worker_path("/opt/vsh/0.3.0/vsh-monty-worker")
+    .with_max_idle_workers(8);
+let runtime = Runtime::open(config)?;
+```
+
+The data directory must remain separate from the workspace. Treat the worker path and
+state root as trusted deployment configuration, not agent input.
+
+## Recovery reporting
+
+```rust
+let startup = runtime.startup_recovery();
+if !startup.conflicts.is_empty() || startup.orphaned > 0 {
+    return Err("operator review required".into());
+}
+
+let report = runtime.recover()?;
+for conflict in report.conflicts {
+    eprintln!("recovery conflict: {conflict:?}");
+}
+```
+
+Recovery conflicts are an operational signal. VSH leaves ambiguous ownership untouched
+instead of turning recovery into an unsafe cleanup routine.
+
+---
+
+# MCP server
+
+Canonical URL: https://fswair.github.io/vsh/integrations/mcp/
+
+VSH's MCP adapter exposes exactly one normal tool: `vsh_run`. One multi-file Monty
+program becomes one Rust transaction, one policy decision, and one Python/Rust boundary
+crossing.
+
+## Install and start
+
+```bash
+uv add 'vbash[mcp]==0.3.0'
+uv run vsh serve
+```
+
+The transport is stdio. The server process working directory is the default workspace
+for calls that omit `workspace_root`.
+
+For coding agents, `vsh-codemode` exposes the same one-tool surface and additionally
+publishes workflow instructions plus the `vsh_run_transaction` MCP prompt:
+
+```bash
+uv run vsh-codemode
+```
+
+From a source checkout:
+
+```bash
+uv sync --frozen --all-groups --extra mcp
+uv run vsh serve
+```
+
+## Generic MCP client configuration
+
+Clients that accept the common `mcpServers` launch shape can run the project-local
+binary:
+
+```json
+{
+  "mcpServers": {
+    "vsh": {
+      "command": "uv",
+      "args": ["run", "vsh", "serve"],
+      "cwd": "/absolute/path/to/project"
+    }
+  }
+}
+```
+
+Replace the final two arguments with `vsh-codemode` when the client consumes MCP server
+instructions/prompts:
+
+```json
+{
+  "mcpServers": {
+    "vsh": {
+      "command": "uv",
+      "args": ["run", "vsh-codemode"],
+      "cwd": "/absolute/path/to/project",
+      "env": {
+        "VSH_CODEMODE_INSTRUCTIONS_FILE": ".vsh/agent-rules.md"
+      }
+    }
+  }
+}
+```
+
+For an installed wheel, point `command` at the environment's `vsh` executable and keep
+the workspace as `cwd`. Never let an untrusted agent choose the worker executable or
+durable state directory.
+
+## `vsh_run`
+
+```text
+vsh_run(
+    code: str | None = None,
+    *,
+    transaction: str | None = None,
+    workspace_root: str | None = None,
+    intent: str | None = None,
+    mode: Literal["preview", "auto"] = "preview",
+    policy: Literal["balanced", "strict", "paranoid"] = "balanced",
+    detail: Literal["compact", "full"] = "compact",
+    budget: BudgetOverrides | None = None,
+) -> dict[str, object]
+```
+
+### Inputs
+
+| Field | Rule |
+|---|---|
+| `code` | Required for a new transaction; exact Monty source |
+| `transaction` | Used instead of code to promote one preview |
+| `workspace_root` | Existing directory; defaults to server `cwd` |
+| `intent` | Trusted context bound into transaction identity |
+| `mode` | Preview or deterministic auto mode |
+| `policy` | Built-in deterministic profile |
+| `detail` | Compact receipt or full canonical path list |
+| `budget` | Optional overrides for the 13 native execution ceilings |
+
+Passing both `code` and `transaction` is rejected. A transaction handle may only be
+resumed with `mode="auto"`.
+
+### Output envelope
+
+| Group | Fields |
+|---|---|
+| Identity | `transaction`, `base_snapshot`, `diff` |
+| Decision | `state`, `decision`, `risk_flags`, `deny_reason` |
+| Effects | `changed_paths`, `changes` |
+| Guest output | `result_repr`, `result_truncated`, `stdout`, `stdout_truncated` |
+| Counters | `os_calls`, `read_bytes`, `write_bytes`, `directory_entries`, `output_bytes`, `denied_accesses`, `result_bytes` |
+| Commit | `committed`, `operations`, `verified_paths`, `cleanup_pending` |
+| Profiling | `timings_ns` |
+
+The MCP adapter deliberately projects the native typed result as bounded `result_repr`
+rather than an arbitrary JSON value. `result_repr` and `stdout` are capped to a 64 KiB
+inline representation even when the native request budget is larger. The response marks
+truncation rather than silently growing agent context. Python SDK callers still receive
+the native typed value through `Receipt.result`.
+
+## Preview, inspect, promote
+
+First tool call:
+
+```json
+{
+  "code": "from pathlib import Path\nPath('/workspace/generated.txt').write_text('ready\\n')\n{'files': 1}",
+  "intent": "Generate reviewed status file",
+  "mode": "preview",
+  "policy": "balanced",
+  "detail": "full",
+  "budget": {
+    "max_duration_ms": 300,
+    "max_os_calls": 1000,
+    "max_write_bytes": 1048576
+  }
+}
+```
+
+If the result is `auto_approved` and the exact change list is acceptable, make a second
+call through the same live server process:
+
+```json
+{
+  "transaction": "<transaction from preview>",
+  "mode": "auto"
+}
+```
+
+VSH persists the exact process-local artifact, consumes its reservation, revalidates
+dependencies, commits, and verifies. It does not rerun the Monty program.
+
+## Pending approval over MCP
+
+The compact MCP surface intentionally does not expose an approval-minting tool. A
+`pending_approval` receipt remains non-mutating. If an organization needs independent
+approval, a trusted host should call the Python or Rust SDK `approve` method after its
+own reviewer/identity check, or expose a separately governed service boundary.
+
+This prevents a tool-using model from both requesting and granting its own approval.
+
+## Agent-specific instructions
+
+The CodeMode entry point accepts trusted project guidance through:
+
+| Variable | Purpose |
+|---|---|
+| `VSH_CODEMODE_INSTRUCTIONS_FILE` | UTF-8 project rules file |
+| `VSH_CODEMODE_INSTRUCTIONS` | Short inline rules appended after file content |
+
+The built-in instructions always remain first and describe preview, exact promotion,
+non-mutating denial/escalation, and the one-program/one-transaction rule. Custom text
+does not alter Rust policy or grant filesystem authority.
+
+## Runtime reuse and process lifetime
+
+The adapter caches runtimes by resolved workspace, policy, and worker identity. This
+reuses supervised clean workers and preserves bounded auto-approved preview handles.
+
+- Restarting the MCP process loses process-local auto-approved previews.
+- Pending-approval artifacts are durable and survive restart.
+- Changing workspace, policy, or `VSH_MONTY_WORKER` selects another runtime identity.
+- The cache is bounded; it is not an unbounded workspace registry.
+
+## Operational errors
+
+MCP clients should treat tool errors as terminal for that transaction. In particular:
+
+- budget/execution errors require a new reviewed request;
+- stale commit requires a new preview against current workspace state;
+- state/replay errors must not be retried with the same transaction;
+- recovery/internal errors require host/operator attention.
+
+Do not fall back to direct filesystem tools after a VSH denial. That would bypass the
+policy and evidence boundary the agent was configured to use.
+
+---
+
+# Agent environments
+
+Canonical URL: https://fswair.github.io/vsh/integrations/agents/
+
+VSH gives a coding agent a wide but structured workspace capability: the agent may
+author one program, while the trusted host retains control over policy, budgets,
+approval, revalidation, and commit.
+
+Use `vsh-codemode` when the MCP client consumes server instructions or prompts. Use
+`vsh serve` when the host supplies its own agent protocol. Both expose exactly one
+normal tool.
+
+## Recommended protocol
+
+Give the agent this behavioral contract alongside the MCP tool:
+
+```text
+Use vsh_run for every filesystem transformation.
+Start with mode="preview" and detail="full".
+Never treat a returned result as proof that host files changed.
+Inspect decision, changed_paths, changes, risk_flags, and deny_reason.
+Promote only the exact returned transaction, through the same server process,
+and only when decision is auto_approved and the changes match the stated intent.
+Never bypass denied, stale, pending-approval, or recovery failures with another
+filesystem tool. Ask the trusted host for review instead.
+```
+
+This is workflow guidance, not the security boundary. The Rust core still denies
+protected access, enforces budgets, binds identity, and revalidates before commit.
+
+## Agent loop
+
+```text
+task
+  → write one bounded Monty program
+  → vsh_run(preview, full detail)
+  → inspect receipt
+      denied            → revise scope or stop
+      pending_approval  → request trusted review
+      auto_approved     → present exact changes
+  → vsh_run(transaction, auto)
+  → require committed=true and retain receipt
+```
+
+## One program beats many tool calls
+
+For related reads and writes, prefer one program:
+
+```python
+from pathlib import Path
+
+names = []
+for path in Path('/workspace/config').glob('*.txt'):
+    value = path.read_text().strip()
+    names.append(value)
+
+Path('/workspace/generated/names.txt').parent.mkdir(parents=True, exist_ok=True)
+Path('/workspace/generated/names.txt').write_text('\n'.join(sorted(names)) + '\n')
+{'inputs': len(names), 'output': 'generated/names.txt'}
+```
+
+This keeps intermediate data in the worker, produces one canonical diff, and crosses
+the MCP/PyO3 boundary once. Replacing it with dozens of read/write tool calls increases
+latency, context volume, and race opportunities.
+
+## Context-efficient receipts
+
+Use `detail="full"` when a human or model will review individual paths. Use
+`detail="compact"` for high-rate read-only work or after a workflow has another trusted
+diff renderer. Compact receipts still include transaction, snapshot, diff identity,
+counts, policy decision, counters, and timings.
+
+Returned result and stdout are independently bounded. Ask the program to return only
+the information needed for the next decision—counts, selected paths, or a small summary
+rather than entire file contents.
+
+## Trusted host responsibilities
+
+The host, not the agent, should own:
+
+- real workspace selection;
+- worker executable and durable-data directory;
+- policy profile and maximum allowed budget overrides;
+- approval principal and expiry;
+- MCP server process lifetime;
+- audit receipt retention;
+- operator handling for recovery conflicts.
+
+Do not interpolate agent-controlled paths into `workspace_root`, `worker_path`, or
+external state roots without an authorization layer.
+
+## Human approval design
+
+When policy returns pending approval, show the reviewer:
+
+- transaction and base snapshot identities;
+- stated intent;
+- full canonical changes or a trusted diff renderer keyed by the diff digest;
+- risk flags and changed/deleted byte/path metrics;
+- program source and bounded output;
+- approval expiry and principal.
+
+The reviewer service then calls the Python or Rust SDK. Keep approval outside the same
+MCP tool surface used by the model.
+
+## Parallel agent workers
+
+Give each independent workspace its own runtime. Native calls release the Python GIL,
+and the runtime has no global execution lock. Avoid multiple agent processes sharing a
+process-local preview: the handle must be promoted by the runtime instance that created
+it.
+
+For shared workspaces, expect commit-time stale failures. The correct response is a new
+preview and review, not force application.
+
+## Failure policy for agents
+
+| Signal | Agent action |
+|---|---|
+| `denied` | Stop or reduce scope; do not route around VSH |
+| `pending_approval` | Ask the trusted reviewer; do not auto-promote |
+| `VshStaleError` / stale tool error | Re-read task context and create a new preview |
+| Budget exceeded | Simplify/chunk deliberately; never request unlimited budget |
+| Recovery conflict | Stop the workspace and notify an operator |
+| `committed=false` | Never claim the requested host change completed |
+
+## Good agent tasks
+
+- update generated configuration from multiple checked-in inputs;
+- apply a consistent refactor across a bounded subtree;
+- normalize manifests and metadata;
+- inspect workspace state and return a typed summary;
+- stage a migration for human review;
+- apply a reviewed exact transaction after dependency revalidation.
+
+Tasks that require network calls, subprocesses, arbitrary package imports, or host paths
+outside the workspace should be split: perform those operations in a separate trusted
+tool, pass bounded data into VSH, and keep filesystem mutation inside the transaction.
+
+---
+
+# Architecture
+
+Canonical URL: https://fswair.github.io/vsh/ARCHITECTURE/
+
+VSH is a transactional filesystem simulator with one Rust semantic core. Native Rust,
+Python/PyO3, CLI, and MCP all enter the same `vsh-runtime` facade.
+
+## System shape
+
+```text
+Rust application ───────────────────────────────┐
+                                                │
+Python application ── PyO3 typed adapter ───────┤
+CLI / MCP ── bounded Python envelope ── PyO3 ───┤
+                                                ▼
+                                         vsh-runtime
+                       ┌────────────────────────┼───────────────────────┐
+                       ▼                        ▼                       ▼
+                snapshot + VFS          Monty supervisor       policy + state
+                       │                        │                       │
+                       └──────────── canonical transaction ────────────┘
+                                                │
+                                                ▼
+                              dependency revalidation + committer
+                                                │
+                                                ▼
+                                      verified host receipt
+```
+
+## Core invariants
+
+### One source of semantics
+
+The Rust facade owns simulation, decision, state transition, durable artifacts,
+revalidation, commit, and recovery. Python owns argument/result conversion and maps
+typed errors to an exception hierarchy. MCP adds a bounded JSON-safe representation.
+
+### No host mount in the guest
+
+Monty receives a synthetic absolute `/workspace` namespace. Filesystem operations are
+typed calls handled by the Rust adapter against `VirtualFs`. There is no guest-visible
+host path, subprocess, network, or ambient environment capability.
+
+### Preview is non-mutating
+
+Snapshot and copy-on-write effects remain virtual until a transaction owns a valid
+reservation and passes dependency/capability revalidation. Policy decisions and guest
+return values cannot write the host.
+
+### Commit has one owner
+
+Only `vsh-commit` applies host mutations. It receives a canonical plan and exact
+preconditions, journals progress, verifies results, and makes interrupted work
+recoverable. Adapters cannot implement alternate writers.
+
+## Execution path
+
+### Runtime open
+
+1. Resolve and pin the workspace capability.
+2. Establish a protected internal or trusted external data-directory capability.
+3. Reject workspace/data overlap and symlink redirection.
+4. Open bounded blob and transaction stores.
+5. Recover incomplete trusted commit state.
+6. Validate and initialize supervised worker configuration.
+
+### Run
+
+1. Validate source and request limits.
+2. Capture a bounded immutable base snapshot.
+3. Execute exact source in a supervised Monty worker.
+4. Serve typed calls through policy into copy-on-write `VirtualFs`.
+5. Freeze an ordered canonical diff and dependency set.
+6. Evaluate deterministic transaction policy.
+7. Bind identity and retain/persist the exact pending artifact.
+8. Return a receipt, or continue into auto commit when authorized.
+
+### Commit
+
+1. Persist an auto-approved process-local artifact if necessary.
+2. Consume the single-use reservation.
+3. Revalidate workspace/runtime identity and every bound dependency.
+4. Write durable intent and canonical plan.
+5. Apply capability-rooted operations with journal checkpoints.
+6. Verify affected host nodes.
+7. Mark committed and clean recoverable temporary state.
+
+## Crate boundaries
+
+| Crate | Boundary |
+|---|---|
+| `vsh-types` | Canonical values, digests, paths, and lifecycle legality |
+| `vsh-vfs` | Snapshot representation and virtual effect semantics |
+| `vsh-policy` | Call authorization and deterministic transaction decision |
+| `vsh-monty` | Guest protocol, worker supervision, values, and budgets |
+| `vsh-store` | Immutable blobs, approval grants, and atomic records |
+| `vsh-commit` | Revalidation, host mutation, verification, recovery |
+| `vsh-runtime` | Public orchestration facade and receipts |
+| `vsh-python` | Thin PyO3 conversion/error boundary |
+| `vsh-monty-worker` | Exact-version crash-isolated execution binary |
+
+See the [crate map](rust/crates.md) for package names and dependency guidance.
+
+## Concurrency model
+
+- No global runtime execution lock exists.
+- Each runtime owns a bounded pool of clean supervised workers.
+- Snapshot/simulation/policy work does not hold the commit coordination lock.
+- Same-workspace commits serialize the minimal identity recheck and mutation window.
+- Independent workspace runtimes scale in parallel.
+- Python releases the GIL during native open, run, preview, commit, and recovery.
+
+## Durability model
+
+Transaction state transitions are compare-and-swap operations. Approval grants bind a
+principal and time interval. A reservation is consumed once. Blob IDs and checksummed
+frames detect corruption and binding mismatch.
+
+Commit recovery distinguishes:
+
+- safe finalization of an already-applied verified operation;
+- safe rollback to original state;
+- cleanup of owned temporary state;
+- orphan/conflict where ownership cannot be proven.
+
+The last category is reported, not guessed away.
+
+## Performance model
+
+The hot preview path avoids durable fsync only for deterministic auto-approved
+artifacts, and only inside a hard-capped process-local cache. Approval-required work is
+durable immediately. Promotion moves exact bytes into durable storage before consuming
+the reservation.
+
+Python performs one PyO3 call for a whole transaction and uses a typed result converter.
+The remaining warm cost is dominated by real snapshot traversal and Monty/VirtualFs
+work. See [Performance](performance.md).
+
+## Public contract
+
+High-level callers should use `Runtime`, `RunRequest`, `Receipt`, and typed errors. The
+facade re-exports lower-level configuration and evidence types, but applications should
+not assemble an alternative commit pipeline.
+
+- [Python SDK](python/)
+- [Rust SDK](rust/)
+- [MCP server](integrations/mcp.md)
+- [Guarantees](rust-rewrite/GUARANTEES.md)
+
+---
+
+# Security model
+
+Canonical URL: https://fswair.github.io/vsh/security/
+
+VSH protects a host workspace from unreviewed filesystem effects by removing ambient
+authority, simulating through typed capabilities, binding approval to exact evidence,
+and revalidating before one trusted writer commits.
+
+## Trust boundaries
+
+| Component | Trust level | Authority |
+|---|---|---|
+| Monty source | Untrusted | Bounded computation and typed virtual calls only |
+| Supervised worker | Contained | No host mount, subprocess, network, or ambient environment |
+| Rust runtime | Trusted | Snapshot, policy, state, artifact, and orchestration |
+| Committer | Most privileged | Capability-rooted mutation and recovery |
+| Python/MCP adapter | Boundary code | Shape conversion and error mapping; no semantics |
+
+## Main controls
+
+- Workspace and protected runtime/data roots are opened as capabilities and their
+  identities are rechecked across observation and mutation boundaries.
+- Internal symlinks, redirected storage, workspace/data overlap, and root replacement
+  fail closed.
+- Guest-visible paths are normalized under a synthetic `/workspace` root.
+- Protected paths are denied before their names or bytes reach the worker.
+- Program, intent, snapshot, dependencies, diff, policy, and configuration bind the
+  transaction ID.
+- Commit consumes a single-use reservation and verifies read/write preconditions.
+- State logs and commit metadata are checksummed and bounded; complete corrupt frames
+  fail rather than being treated as torn appends.
+- Journals, plans, markers, and recovery reads use no-follow identity checks and hard
+  size limits.
+- Rust panics cannot unwind through PyO3.
+
+## What approval means
+
+Approval means a principal accepts one exact pending artifact for a bounded time. It
+does not grant general workspace access, change policy, authorize reruns, or waive
+revalidation.
+
+Auto-approval is a deterministic policy result, not an AI judgement. Strict and
+paranoid profiles force mutations to an independent approval boundary.
+
+## Explicit non-goals
+
+VSH is not:
+
+- a kernel, VM, container, seccomp, or multi-tenant isolation boundary;
+- a POSIX shell or subprocess sandbox;
+- a network sandbox;
+- an unrestricted CPython environment;
+- protection against a malicious trusted host or replaced VSH binary;
+- a substitute for filesystem permissions, backups, deployment rollback, or secrets
+  management.
+
+## Deployment rules
+
+1. Pin the runtime, worker, Python wheel, and Cargo/Python locks together.
+2. Keep the durable data directory trusted and separate from agent-controlled content.
+3. Treat `worker_path`, `workspace_root`, policy, and maximum budgets as host config.
+4. Run one of the shipped supervised worker modes for untrusted code.
+5. Stop on recovery conflicts; do not automate deletion of ambiguous artifacts.
+6. Retain receipts and reviewer identity according to your audit policy.
+7. Run RustSec, `cargo-deny`, strict hash-locked Python audit, and artifact validation
+   before release.
+
+For attack assumptions, controls, security test families, and residual risk, read the
+full [threat model](rust-rewrite/THREAT_MODEL.md). The exact supported/non-supported
+promises are in [Guarantees](rust-rewrite/GUARANTEES.md).
+
+---
+
+# Performance
+
+Canonical URL: https://fswair.github.io/vsh/performance/
+
+VSH is designed so the Python boundary and safety machinery do not become the next
+bottleneck after removing the legacy Python engine. The retained benchmark record uses
+the public Rust facade and an isolated CPython wheel over the same optimized worker.
+
+Captured on 2026-08-29; values below are local macOS arm64 evidence, not universal
+service-level objectives.
+
+## Post-hardening warm latency
+
+The final validation includes capability-rooted storage, identity rechecks, bounded
+streaming reads, and fail-closed recovery handling.
+
+| Workload | Rust p50 | PyO3 p50 | Estimated incremental PyO3 p50 |
+|---|---:|---:|---:|
+| No-op preview | 0.279 ms | 0.151 ms | within run noise |
+| Read 10 files | 0.870 ms | 0.837 ms | 2.4 µs |
+| Edit 20 files | 1.817 ms | 1.797 ms | 2.7 µs |
+| Search 10,000 files | 66.918 ms | 66.621 ms | 9.7 µs |
+| Rename 100-file subtree | 57.965 ms | 56.944 ms | 8.5 µs |
+| Delete 100-file subtree | 47.057 ms | 46.996 ms | 16.5 µs |
+| Delete 5,050 nodes | 174.850 ms | 165.026 ms | 1.3 µs |
+
+The two harnesses run in separate processes, so their end-to-end wall medians are not
+subtracted. The PyO3 estimate compares each surface's wall-minus-native-internal API
+envelope. This avoids manufacturing a binding win from cross-process noise.
+
+## Scaling
+
+Four independent runtimes reached:
+
+- **4.15×** speedup through the native Rust surface;
+- **4.20×** speedup through Python/PyO3.
+
+The throughput case amortizes thread creation. It demonstrates that worker pooling,
+GIL release, and identity hardening did not introduce a process-global serialization
+point. It does not promise linear scaling on every storage device or shared workspace.
+
+## Cold start
+
+In the primary retained 100-sample record, 30 independent cold runtimes measured:
+
+| Stage | Native p50 / p99 | Python p50 / p99 |
+|---|---:|---:|
+| Runtime open | 21.2 / 26.1 ms | 17.5 / 26.6 ms |
+| First worker call | 4.85 / 5.40 ms | 4.68 / 6.20 ms |
+
+Cold values are reported separately from warm percentiles. Long-lived hosts should
+reuse a runtime; process-per-call deployment pays startup and discards the bounded
+worker pool.
+
+## Driver-process memory
+
+`/usr/bin/time -l` over the seven-case matrix reported:
+
+| Surface | Maximum resident set | Peak memory footprint |
+|---|---:|---:|
+| Native Rust | 25.47 MiB | 20.69 MiB |
+| CPython 3.14 + PyO3 | 45.80 MiB | 34.34 MiB |
+
+These are driver-process high-water marks. They do **not** sum supervised worker
+processes and therefore are not a whole-tree memory ceiling.
+
+## Bottlenecks removed
+
+### Durable write on every preview
+
+The first implementation synchronously persisted every auto-approved preview. No-op,
+10-file read, and 20-file edit medians were 11.896, 12.991, and 14.010 ms, with more
+than 95% of no-op time in bind/store fsync work.
+
+A bounded process-local cache now retains exact auto-approved previews. Promotion first
+persists the artifact, then reserves, revalidates, and commits. Approval-required work
+remains durable at preview completion. Development-wheel latency improved about 24.6×,
+5.2×, and 3.4× for those three cases without relaxing commit ordering.
+
+### Root-relative metadata resolution
+
+The first 10,000-file search spent 257.8 ms of 293.2 ms in snapshot capture. Unix
+snapshot traversal now reads no-follow metadata from already-open parent capabilities.
+Snapshot p50 fell to 31.2 ms (8.3×), and end-to-end search fell to 66.9 ms (4.4×).
+
+## Reproduce
+
+```bash
+export VSH_WORKER="$PWD/.venv/bin/vsh-monty-worker"
+
+cargo build --release --locked -p vsh-runtime --example native_benchmark
+target/release/examples/native_benchmark \
+  --iterations 100 \
+  --cold-iterations 30 \
+  --parallel-workers 4 \
+  --worker "$VSH_WORKER" \
+  --output native-rust.json
+
+python benchmarks/native_pyo3.py \
+  --iterations 100 \
+  --cold-iterations 30 \
+  --parallel-workers 4 \
+  --output native-pyo3.json
+```
+
+The harnesses have no third-party benchmark dependency. Compare runs from the same
+machine state and release profile; do not subtract unrelated Rust and Python wall
+samples.
+
+## Remaining evidence
+
+Hosted supported-platform runs still need whole worker-tree RSS, frozen legacy-Python
+comparison, and adversarial stale/symlink/double-execute performance artifacts. Those
+are release gates, not claims hidden from this page.
+
+The complete methodology and raw-artifact paths are retained in the
+[performance record](rust-rewrite/PERFORMANCE.md).
+
+---
+
+# Development
+
+Canonical URL: https://fswair.github.io/vsh/development/
+
+The workspace builds one Rust core, a PyO3 wheel, a supervised worker, and this Zensical
+documentation site.
+
+## Bootstrap
+
+```bash
+uv sync --frozen --all-groups --extra mcp
+rustup show active-toolchain
+```
+
+Rust is pinned in `rust-toolchain.toml`; Python and documentation dependencies are
+locked in `uv.lock`. Zensical is exactly pinned to `0.0.57`.
+
+## Documentation
+
+Preview locally:
+
+```bash
+uv run zensical serve
+```
+
+Build with CI-equivalent validation:
+
+```bash
+uv run zensical build --clean --strict
+```
+
+Page source lives under `docs/`, navigation and theme configuration in
+`zensical.toml`, and VSH-specific presentation in:
+
+- `docs/assets/stylesheets/vsh.css`;
+- `docs/assets/javascripts/copy-markdown.js`;
+- `docs/assets/mark.svg`.
+
+Every page receives a **Copy as Markdown** action. It fetches the exact page source from
+the configured repository action, so keep `repo_url`, `edit_uri`, and deployed branch
+aligned.
+
+## Python gates
+
+```bash
+uv run ruff check
+uv run ruff format --check
+uv run ty check
+uv run basedpyright
+uv run pytest \
+  tests/test_native_binding.py \
+  tests/test_native_runtime.py \
+  tests/test_python_surface.py \
+  --cov=src/vsh --cov-branch --cov-report=term-missing --cov-fail-under=100
+```
+
+## Rust gates
+
+```bash
+cargo fmt --all -- --check
+cargo llvm-cov \
+  --workspace --all-features --all-targets --locked --summary-only \
+  --ignore-filename-regex '(vsh-python|vsh-worker)' \
+  --fail-under-lines 79 \
+  --fail-under-functions 70 \
+  --fail-under-regions 81
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
+```
+
+## Security and release gates
+
+```bash
+cargo audit --file Cargo.lock
+cargo deny --all-features --locked check
+uv build
+```
+
+The release workflow additionally validates every crate archive, wheel and sdist,
+installs wheels in clean interpreters, runs preview/commit smoke tests, checks exact
+versions, and publishes only through protected tag-triggered environments.
+
+## Documentation writing rules
+
+- Describe behavior owned by the current native runtime, not removed legacy modules.
+- Mark local measurements with platform, date, sample count, and scope.
+- Never present driver RSS as whole-worker-tree RSS.
+- Keep Python and Rust signatures separate even when behavior is shared.
+- Use `preview` in first examples; explain exact transaction promotion before auto mode.
+- Link deep security claims to the threat model or guarantee record.
+
+---
+
+# VSH Rust rewrite guarantees and non-guarantees
+
+Canonical URL: https://fswair.github.io/vsh/rust-rewrite/GUARANTEES/
+
+## Guarantees
+
+When VSH is the only filesystem authority available to the untrusted program and the
+documented platform/configuration requirements are met, VSH guarantees:
+
+- The program executes against virtual state before any host mutation.
+- Supported filesystem operations share one Rust VirtualFs semantics.
+- A deterministic deny cannot be overridden by an approval judge.
+- Approval, when needed, binds to the exact transaction artifact.
+- The same transaction cannot be committed twice.
+- Commit revalidates every recorded content, metadata, directory, and write dependency.
+- Stale, malformed, worker-crashed, over-budget, or failed-revalidation transactions
+  do not reach host mutation.
+- Only the trusted committer writes the host workspace.
+- Successful commit is checked against the canonical expected final state.
+- Protected reads are denied before bytes enter Monty or cross the PyO3 boundary.
+- CPU/time/memory/call/read/write/output/overlay budgets are enforced and a failed
+  worker is discarded.
+- Rust and Python surfaces call the same core and must pass the same golden corpus.
+- Python does not have a fallback execution engine.
+- Model-facing results and output are bounded; durable transaction artifacts stay
+  internal until a separately bounded artifact-read API is released.
+- Process-local auto-approved preview retention has hard count and encoded-byte caps;
+  capacity exhaustion fails before another preview handle is retained.
+
+## Conditional guarantees
+
+- Crash recovery requires the transaction database, journal, staging area, and target
+  workspace to use supported durability/filesystem semantics.
+- Atomicity across multiple files is implemented as recoverable journaled commit; it is
+  not claimed to be a universal filesystem-level atomic multi-file transaction.
+- A trusted-process or machine crash after commit reservation may interrupt a multi-file
+  mutation; the durable journal and staging/quarantine evidence make it recoverable on
+  the documented filesystems.
+- Confidentiality applies to the typed VSH/Monty surface. It is void if the caller also
+  exposes raw shell, unrestricted Python, another filesystem tool, or direct file
+  descriptors to the untrusted program.
+- Concurrency safety covers recorded dependencies. Unmodeled external side effects are
+  outside the transaction.
+- An auto-approved preview handle is resumable only by the same live `Runtime`. VSH
+  persists its exact artifact before commit reservation; approval-required previews are
+  durable immediately and may be resumed after restart.
+- “No known vulnerability” is a timestamped registry/advisory result, not proof that no
+  vulnerability exists.
+
+## Non-guarantees
+
+VSH does not guarantee:
+
+- that an allowed edit is useful, correct, or desired by the user,
+- that a fresh judge is infallible,
+- protection against a compromised trusted VSH process or host administrator,
+- arbitrary shell, subprocess, network, device, IPC, or kernel sandboxing,
+- compatibility with every host filesystem or network filesystem,
+- preservation of behavior that conflicts with the new security invariants,
+- zero-copy for every Python value or platform,
+- a specific latency on undeclared hardware,
+- immunity from undiscovered CVEs,
+- indefinite compatibility with unpinned external clients.
+
+## Language parity contract
+
+For identical runtime configuration, workspace base, program, intent, mode, and budget:
+
+- Rust and Python return the same decision kind.
+- Canonical diff, transaction digest, risk flags, and receipt fields are equivalent.
+- Error categories are one-to-one; Python exceptions map from native error kinds.
+- Both surfaces enforce the same resource and capability limits.
+- A Python call cannot enable behavior unavailable to the native API.
+
+Representation details may be idiomatic per language, but semantics may not diverge.
+
+---
+
+# Native Rust and Python parity contract
+
+Canonical URL: https://fswair.github.io/vsh/rust-rewrite/PARITY_CONTRACT/
+
+The PyO3 SDK is an adapter over the native crate. This document defines what “same
+engine” means in tests and releases.
+
+## Canonical input
+
+A parity case fixes:
+
+- workspace fixture and base digest,
+- program bytes and code hash,
+- normalized runtime configuration,
+- intent,
+- run mode and receipt detail,
+- execution budget,
+- deterministic clock/random fixtures where relevant.
+
+## Canonical output
+
+The comparison projection contains:
+
+```text
+decision
+error kind (when present)
+transaction digest
+base snapshot id/digest
+created/modified/deleted/renamed paths
+read and write dependency kinds
+risk flags
+resource counters
+commit and verification status
+artifact identity/content hash
+```
+
+Wall-clock timings, process-local handles, human formatting, and language-specific stack
+frames are excluded from equality but validated independently.
+
+An auto-approved preview handle is process-local on both surfaces. Its bound artifact
+becomes durable before reservation when the same live runtime promotes it. Pending
+independent-approval artifacts are durable at preview completion.
+
+## Required tests
+
+- Rust direct call and Python PyO3 call produce equal projections.
+- Invalid paths map to the same native error kind and Python exception class.
+- Protected reads are denied before returning any bytes on both surfaces.
+- Resource-limit failures produce no commit and the same failure kind.
+- Panic/worker crash does not unwind through Python and leaves a recoverable state.
+- Concurrent Python calls release the GIL and do not serialize independent runtimes.
+- Compact/full receipts differ only in documented detail, not decisions or digests.
+- Large payloads return the same artifact content hash without mandatory inline copies.
+- Version metadata agrees across crate, extension, Python package, and built wheel.
+
+## Boundary budget
+
+Benchmarks measure a native Rust call and an equivalent PyO3 call around the same core
+operation. Python boundary p50 overhead must remain within the plan budget, and p99 must
+not introduce unexplained tail amplification. Bytes copied and Python objects allocated
+are recorded for large-payload cases.
+
+---
+
+# Rust dependency policy and initial admission record
+
+Canonical URL: https://fswair.github.io/vsh/rust-rewrite/DEPENDENCY_POLICY/
+
+Checked: 2026-08-29
+
+## Admission gate
+
+Every direct crate requires:
+
+1. a stable, non-yanked exact version,
+2. active maintenance from an identifiable established project,
+3. official crates.io/source metadata,
+4. acceptable license,
+5. compatible MSRV,
+6. justified minimal features,
+7. no known unwaived RustSec/CVE advisory in the resolved lockfile,
+8. a reason `std` or an existing dependency is insufficient,
+9. review of transitive and native-library additions,
+10. a removal/replacement path.
+
+Cargo requirements use `=x.y.z`; `Cargo.lock` is committed. Git dependencies,
+wildcards, unknown registries, abandoned crates, and convenience-only dependencies are
+not accepted.
+
+## Initially admitted ecosystem
+
+| Item | Pin | Authority | Purpose | Notes |
+|---|---:|---|---|---|
+| Rust | `1.95.0` | Rust project | compiler/toolchain | Matches Monty 0.0.21 MSRV. |
+| `monty` | `=0.0.21` | Pydantic | interpreter | Stable published crate; MIT. |
+| `monty-types` | `=0.0.21` | Pydantic | typed calls/limits | Same release train and MSRV. |
+| `monty-proto` | `=0.0.21` | Pydantic | worker wire protocol and lossless Monty value → native Python conversion | Official same-release protocol/converter; worker feature disabled. |
+| `monty-alloc` | `=0.0.21` | Pydantic | worker-wide bounded allocator | Official same-release allocator; only `exit-code`, defaults disabled. |
+| `get-size2` | `=0.10.1` in `Cargo.lock` | get-size2 project | Monty/Ruff transitive memory accounting | Latest compatible patch from Monty 0.0.21's release lock; 0.10.3 changes `compact_str` to 0.10 and does not compile with Ruff 0.0.3's 0.9 type. |
+| `pyo3` | `=0.29.2` | PyO3 | CPython binding | MIT/Apache-2.0; Rust 1.83 floor. |
+| `blake3` | `=1.8.7` | BLAKE3 team | content/snapshot/diff identity | Official active implementation; only `std`, no rayon/mmap/serde. |
+| `cap-std` | `=4.0.3` | Bytecode Alliance | capability-rooted host filesystem access | Stable/non-yanked latest; no default features; Apache-2.0 WITH LLVM-exception/Apache-2.0/MIT. |
+| `postcard` | `=1.1.3` | postcard project | exact Monty result in durable approval artifact | Stable/non-yanked latest; direct edge enables only `alloc`; MIT/Apache-2.0. |
+| Maturin | `==1.15.0` | PyO3 | wheel build/publish | Build tool, not runtime dependency. |
+| cargo-audit | `=0.22.2` | RustSec ecosystem | advisory gate | Install/run with `--locked`. |
+| cargo-deny | `=0.20.2` | Embark ecosystem | source/license/advisory gate | Install/run with `--locked`. |
+| cargo-llvm-cov | `=0.9.0` | taiki-e | stable Rust line/function/region coverage gate | Active immutable upstream release; CI-only tool installed with its published lockfile. |
+| pip-audit | `==2.10.1` | Python Packaging Authority | Python advisory gate | Ephemeral CI tool; audits the hash-locked export with strict failure. |
+| Zensical | `==0.0.57` | Zensical project | versioned documentation site | MIT; Python 3.10+; development-only dependency. Release 0.0.57 was published 2026-08-21. |
+
+Published metadata and advisory sources reported no known vulnerability for Maturin
+1.15.0 and Monty 0.0.21 at check time. This is point-in-time evidence, not a
+claim that any dependency is intrinsically safe and not a substitute for auditing the
+resolved Cargo.lock on every build.
+
+The core Python wheel has no pure-Python runtime dependency. The optional MCP adapter
+pins the actively maintained stable `fastmcp==3.4.7`; it is not imported by `vsh` or
+the native SDK path. Maturin remains exact-pinned at `1.15.0` in both the build system
+and developer environment. Zensical is exact-pinned at `0.0.57` only in the developer
+and documentation graph, so it does not enlarge the wheel's runtime surface. Its
+official release and PyPI metadata were current at review time, and the hash-locked
+audit found no known vulnerability in its resolved graph. Python resolution is
+committed in `uv.lock`. After the
+2026-08-29 advisory refresh, the affected optional/development transitives were moved
+to `cryptography==50.0.1`, `mcp==1.29.1`, `pydantic-settings==2.15.0`, and
+`starlette==1.6.0`; all four are hash-pinned by that lockfile.
+
+`cap-std` is admitted because ordinary path-based `std::fs` operations cannot preserve
+the directory capability across rename races without a platform-specific descriptor
+layer. VSH uses only its filesystem handles, disables defaults, and pins opened parent
+directories through commit. Its upstream MSRV is below VSH's Rust 1.95 floor. Removal
+requires an equally reviewed capability implementation and the same race suite.
+
+`postcard` is admitted only for Monty's exact `MontyObject`, whose serde implementation
+already made postcard part of the Monty 0.0.21 resolved graph. The direct VSH edge adds
+no registry package and enables only `alloc`; VSH's surrounding artifact envelope is a
+manual, bounds-checked, versioned codec. This keeps path/diff/policy data out of serde
+and permits replacing postcard if Monty's public value representation changes.
+
+`monty-proto` is admitted for two narrow uses. The worker and parent use its official,
+typed protobuf messages and bounded frame helpers; `vsh-python` enables its official
+`python` converter to map `MontyObject` directly to native CPython objects under the
+GIL. This avoids JSON, `repr` parsing, and duplicate semantic mappings. The crate's
+`worker` feature is intentionally disabled. Removal is straightforward if Monty moves
+the converter/protocol into `monty-types` or exposes equivalent public APIs.
+
+`monty-alloc` is admitted only in the isolated worker process. Its global limited
+allocator makes the memory ceiling independent from Monty's bytecode-duration and VSH
+I/O budgets. The parent process does not install it. The direct edge adds no unrelated
+pool, async, telemetry, or networking dependency.
+
+The published `monty-runtime =0.0.21` binary and `monty-proto/worker` feature were
+evaluated and rejected. Their locked graph selects yanked `chacha20 =0.10.0` through
+`monty-type-checking` and Ruff's notebook/random stack; a fresh resolution is also
+unsatisfiable with the currently published constraints. VSH does not waive the yank,
+patch crates.io, fork Monty, or copy that dependency graph. `vsh-monty-worker` is a
+minimal same-workspace binary built on Monty's public `MontyRun`/`RunProgress` API,
+the official protocol types, `monty-alloc`, and `std` supervision.
+
+## Feature policy
+
+- PyO3 starts with only the features needed for an extension module.
+- Per-Python-version wheels are the default; `abi3-py311` is benchmark-gated.
+- Monty's runtime/pool/type-checking/telemetry features are not selected.
+- Core VSH crates do not pull async, TLS, HTTP, tracing exporters, or serialization
+  frameworks unless the owning phase proves the need.
+- Dev/benchmark dependencies receive the same advisory/source/license scrutiny.
+- Monty's published `postcard` declaration enables its default `heapless-cas`
+  feature. On the supported macOS/Linux/Windows targets this does not select
+  `atomic-polyfill`; target-aware checks are mandatory so an unused universal-lock
+  entry is not confused with shipped code.
+
+## Required commands once Cargo.lock exists
+
+```bash
+cargo test --workspace --all-targets --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo doc --workspace --all-features --no-deps --locked
+cargo audit
+cargo deny --all-features --locked check
+cargo tree --duplicates --locked
+uv export --quiet --frozen --all-groups --extra mcp --no-emit-project \
+  --output-file /tmp/vsh-audit-requirements.txt
+uvx --from pip-audit==2.10.1 pip-audit \
+  --requirement /tmp/vsh-audit-requirements.txt --require-hashes \
+  --disable-pip --strict --progress-spinner off
+```
+
+CI tool installation itself is exact and locked:
+
+```bash
+cargo install cargo-audit --version 0.22.2 --locked
+cargo install cargo-deny --version 0.20.2 --locked
+uvx --from pip-audit==2.10.1 pip-audit --version
+```
+
+## Current resolved graph result
+
+The current lockfile contains nine workspace packages and 223 registry package
+entries. The direct external runtime dependencies are `monty =0.0.21`,
+`monty-types =0.0.21`, `monty-proto =0.0.21`, `monty-alloc =0.0.21`, `pyo3 =0.29.2`,
+`blake3 =1.8.7`, `cap-std =4.0.3`, and `postcard =1.1.3`; the rest are exact lockfile
+resolutions of those dependencies.
+Checks on 2026-08-29 refreshed 1,226 RustSec advisories and scanned all 232 lockfile
+packages after worker admission. `cargo audit` found no known vulnerability or yanked
+package. In particular, neither `chacha20` nor `monty-type-checking` is present. Exact
+registry metadata was refreshed for every new direct pin.
+The same lockfile passed cargo-deny 0.20.2 with all workspace features across the
+configured supported-target matrix: advisories, bans, licenses, and sources all pass.
+The hash-locked Python export, including the optional MCP, development, and Zensical
+documentation graphs, passed pip-audit 2.10.1 in strict mode on 2026-08-29 with no
+known vulnerabilities.
+
+The supported target matrix (`aarch64`/`x86_64` macOS, `aarch64`/`x86_64` Linux, and
+`x86_64` Windows) reports:
+
+- no known RustSec vulnerability or unsoundness advisory,
+- no selected unmaintained crate,
+- no yanked package,
+- only crates.io/workspace sources,
+- only reviewed licenses,
+- no unrecorded duplicate-version exception.
+
+There are ten exact, reviewed duplicate-version exceptions. Four come from Monty
+0.0.21 and its Ruff/parser/proc-macro graph (`getrandom 0.2.17`, `hashbrown 0.16.1`,
+`itertools 0.14.0`, and `syn 2.0.119`); six are platform-specific generations retained
+by `cap-std 4.0.3` (`io-lifetimes 2.0.4`, `windows-sys 0.59.0`/`0.60.2`,
+`windows-targets 0.52.6`, and its GNU/MSVC x86_64 artifacts). Exact inclusion reasons
+are recorded inline in `deny.toml`; every new duplicate remains denied.
+
+`cargo audit` additionally reports `RUSTSEC-2023-0089` for `atomic-polyfill 1.0.3` as
+an unmaintained, lock-only package. The path is Monty's published default
+`postcard -> heapless-cas`; `atomic-polyfill` is target-specific to embedded
+architectures outside VSH's support matrix and `cargo tree` selects it for none of the
+shipped targets. It has no vulnerability/CVE advisory, is not ignored in
+`deny.toml`, and target-aware `cargo deny` passes. This upstream manifest issue is a
+release-tracked exception: VSH must not add an embedded target or claim a warning-free
+universal lock until Monty removes the default feature.
+
+`deny.toml` still rejects unmaintained and unsound advisories across every selected
+target graph, plus yanked packages, wildcard requirements, unknown registries, and
+unknown Git sources. A clean scan means "no applicable advisory published in the
+refreshed database at scan time"; it never replaces code review, provenance review, or
+continuous rescanning.
+
+## Pending admissions
+
+Database backends, property-testing helpers, temporary-file support, external
+worker-pool dependencies, and benchmarking libraries are not pre-approved by category.
+The current worker pool is a bounded short-lock `std` implementation. Select future
+candidates only when measurements establish a need, compare `std`/existing options,
+verify current maintenance/advisories, then add an admission entry before changing
+Cargo.toml.
+
+## VSH registry packages
+
+The same-workspace VSH packages are project-owned code, not admitted third-party
+dependencies. On 2026-08-28 the official crates.io API returned `404` for
+`vsh-types`, `vsh-store`, `vsh-vfs`, `vsh-policy`, `vsh-commit`, `vsh-monty`,
+`vsh-runtime`, and `vsh-monty-worker`; registry ownership must still be rechecked at
+the irreversible first publish. Each manifest permits only `crates-io` publication,
+and every inter-package requirement is the exact lockstep version `=0.3.0`.
+
+The intended first-publish order is:
+
+```text
+vsh-types → vsh-store → vsh-vfs → vsh-policy
+          → vsh-commit + vsh-monty → vsh-runtime → vsh-monty-worker
+```
+
+`cargo package --workspace --exclude vsh-python --offline --no-verify --locked` produces
+all eight registry source archives. The explicit exclusion matters because Cargo 1.95
+also packages a `publish = false` workspace member when a whole workspace is selected.
+Cargo 1.95.0 verifies the dependency-free `vsh-types` archive, then its temporary
+multi-package registry currently stops with Cargo's internal `no hash listed for
+vsh-types 0.3.0` error. Dependent dry-runs therefore become executable only in the
+normal publish order after each predecessor exists in crates.io; this is not waived and
+does not authorize publishing without an explicit release action.
+
+## CI and release build supply chain
+
+The hosted workflows do not use moving action tags. They pin the complete commit SHA
+for checkout 7.0.1, setup-uv 9.0.0, Maturin action 1.51.0, artifact upload 7.0.1,
+artifact download 8.0.1, and build-provenance attestation 4.2.2. Human-readable release
+tags remain comments beside each SHA for auditability. setup-uv installs exact uv
+0.12.1; the project and release action install exact Maturin 1.15.0 and Rust 1.95.0.
+
+The release job builds wheels before it receives any publish authority, installs and
+exercises every wheel, verifies the sdist can rebuild the extension plus separate
+worker from the locked workspace, rejects legacy Python engine paths, validates all
+eight crate archives, and emits SHA-256 hashes. Manual dispatch is build-only. Only an
+exact version tag can enter protected crates.io and PyPI environments.
+
+---
+
+# VSH Rust rewrite threat model
+
+Canonical URL: https://fswair.github.io/vsh/rust-rewrite/THREAT_MODEL/
+
+## Security objective
+
+Execute an untrusted Monty Python program against a virtual workspace, decide whether
+its exact resulting transaction is allowed, and apply only that transaction through a
+trusted committer without exposing unauthorized host data or mutation paths.
+
+## Assets
+
+- Workspace file integrity, confidentiality, names, metadata, and permissions.
+- Protected files and secret material.
+- Immutable snapshots, blobs, transaction digests, approval decisions, and receipts.
+- Checksummed bounded transaction logs, immutable approval artifacts, and commit journal.
+- Host resources: CPU, memory, descriptors, disk, output, and wall-clock time.
+- Rust/Python API semantic parity.
+- Dependency and release provenance.
+
+## Trust boundaries
+
+| Component | Trust level | Notes |
+|---|---|---|
+| User goal | trusted intent, untrusted data | It constrains approval but may contain hostile text. |
+| Main agent and generated program | untrusted | It may deliberately attempt escape, exfiltration, or exhaustion. |
+| Python caller/PyO3 inputs | untrusted | Python cannot grant capabilities or bypass native validation. |
+| Monty interpreter/worker | isolated execution component | It receives no raw host mount and is discarded after unsafe termination. |
+| Configured worker executable | trusted installation input | Exact Monty version is checked; choosing a replacement binary grants native-code authority. |
+| VirtualFs and deterministic policy | trusted security core | Complete mediation and one filesystem semantics live here. |
+| Fresh judge | advisory/separate principal | It cannot reverse deterministic deny. |
+| Transaction store | trusted state | CAS transitions enforce single-use commit. |
+| Committer | smallest trusted host writer | It alone may mutate the real workspace. |
+| External concurrent process | adversarial race source | Revalidation must detect dependency changes. |
+| Third-party dependencies | supply-chain risk | Exact pins and continuous advisory/license/source checks apply. |
+
+## Attacker capabilities
+
+Assume an attacker can:
+
+- control Monty source code and input paths,
+- use `..`, absolute paths, platform separators, symlinks, rename chains, and races,
+- enumerate directories and condition outputs on secret data,
+- request huge reads/writes/output or infinite computation,
+- crash a worker or process at any commit boundary,
+- replay, duplicate, reorder, or mutate transaction/approval identifiers,
+- call public Rust or Python APIs with malformed values,
+- trigger Python exceptions, finalization, threads, or interpreter shutdown,
+- race the workspace between snapshot, approval, revalidation, and commit,
+- exploit a vulnerable transitive dependency if one is present.
+
+Assume the attacker cannot already execute arbitrary host-native code in the trusted VSH
+process. If raw host shell/filesystem tools are simultaneously available, VSH is not a
+complete security boundary.
+
+## Primary threats and controls
+
+### Host escape and confused paths
+
+Threats: absolute paths, parent traversal, separator ambiguity, symlink/junction races,
+rename escape, and time-of-check/time-of-use gaps.
+
+Controls:
+
+- validated `VPath` is relative and normalized,
+- capability-rooted descriptor access in the committer,
+- no path resolution fallback to ambient process CWD,
+- symlink policy applied before data exposure and again at commit,
+- adversarial platform/path tests.
+
+### Confidentiality and output exfiltration
+
+Threats: reading `.env`, keys, credentials, protected metadata, or encoding secrets into
+stdout, errors, diffs, and receipts.
+
+Controls:
+
+- pre-call read capability policy,
+- default-deny protected patterns,
+- output and error payload budgets,
+- compact receipts and artifact handles,
+- redaction is defense-in-depth, not permission to perform the read.
+
+### Virtual/host semantic divergence
+
+Threats: simulator predicts one effect while a distinct executor performs another;
+recursive and rename descendants are incompletely represented.
+
+Controls:
+
+- one VirtualFs implementation,
+- canonical diff derived from final virtual state,
+- committer applies the diff rather than replaying the original program,
+- property tests against an independent filesystem model,
+- post-commit expected-state verification.
+
+### Stale approval and replay
+
+Threats: approval reused for different bytes/state, double execution, concurrent token
+use, or approval after workspace drift.
+
+Controls:
+
+- approval binds transaction digest, base snapshot, code hash, policy result, and diff,
+- persisted state-machine CAS reservation,
+- ReadSet/WriteSet revalidation,
+- single-use commit transition,
+- expiry where external approval is used.
+
+### Partial commit and crash consistency
+
+Threats: process death after staging, first rename, deletion, verification, state-log
+compaction, or before transaction-state finalization leaves undefined host state.
+
+Controls:
+
+- staging/quarantine,
+- durable commit journal,
+- two alternating state logs selected by a fixed-size double-buffered control record,
+- compacted log synchronization before the control generation can become active,
+- idempotent recovery protocol,
+- fault injection at every journal boundary,
+- post-commit verification before final state.
+
+### Resource exhaustion
+
+Threats: infinite computation, recursive trees, giant output, many OS calls, descriptor
+exhaustion, blob/overlay growth, and worker poisoning after a limit.
+
+Controls:
+
+- wall time, memory, calls, bytes, entries, output, and overlay budgets,
+- bounded data structures and receipt sizes,
+- per-runtime count and encoded-byte ceilings for process-local preview artifacts,
+- discard workers after limit/panic,
+- no unbounded queues or process-global serialization.
+
+### PyO3 boundary failure
+
+Threats: panic unwinds through FFI, GIL held during long work, borrowed Python data
+outlives the GIL, Python exception interrupts transaction cleanup, or Python widens
+capability configuration.
+
+Controls:
+
+- catch/map panic before the FFI boundary and fail closed,
+- own/validate data before releasing the GIL,
+- keep Python objects outside the native hot path,
+- native transaction guard performs cleanup regardless of Python exception,
+- validate Python-result compatibility before artifact persistence or reservation so a
+  known conversion failure cannot occur after auto-commit,
+- parity and concurrency tests through both language surfaces.
+
+### Supply chain
+
+Threats: abandoned crate, compromised release, known advisory, yanked version, malicious
+feature/default dependency, source substitution, or unreviewed lockfile drift.
+
+Controls:
+
+- deny-by-default admission records,
+- exact version pins and committed lockfile,
+- crates.io/workspace sources only,
+- minimal features,
+- `cargo audit` and `cargo deny`,
+- explicit dependency update reviews,
+- release provenance and built-artifact tests.
+
+## Security test families
+
+- Host containment: absolute/parent/symlink/rename/mount escape.
+- Destructive virtual execution: recursive delete changes only overlay before commit.
+- Recursive correctness: final state and canonical diff include descendants exactly.
+- Snapshot consistency: lazy reads become immutable or mark the transaction stale.
+- Approval integrity: any transaction component change invalidates approval.
+- Double commit: concurrent second reservation fails before host mutation.
+- Worker crash: no host effect and worker is not reused.
+- Secrets: denied bytes never reach Monty, Python, stdout, error, artifact, or receipt.
+- Recovery: every injected crash boundary converges to a defined recoverable state.
+- FFI parity: Rust/Python decisions, errors, receipts, and side effects match.
+
+## Explicit non-goals
+
+- Protecting a host where the same agent also has unrestricted shell/filesystem access.
+- Detecting all malicious intent or proving user-request semantic correctness.
+- Providing a full OS/container sandbox for network, processes, devices, or syscalls not
+  exposed by the supported typed Monty surface.
+- Guaranteeing that no undiscovered dependency vulnerability exists.
+- Preventing a privileged host administrator from modifying VSH state.
+
+---
+
+# VSH merge coverage contract
+
+Canonical URL: https://fswair.github.io/vsh/rust-rewrite/COVERAGE/
+
+Captured: 2026-08-29
+
+Coverage is a merge gate, not an inferred property of the test count. Python and Rust
+use separate measurements because the CPython extension and supervised worker cross
+process/runtime boundaries that one coverage runtime cannot merge honestly.
+
+## Python release surface
+
+The Python gate runs all native binding, runtime, CLI, and MCP/CodeMode tests with
+line and branch measurement:
+
+```bash
+uv run pytest \
+  tests/test_native_binding.py \
+  tests/test_native_runtime.py \
+  tests/test_python_surface.py \
+  --cov=src/vsh --cov-branch --cov-report=term-missing --cov-fail-under=100
+```
+
+Current result: 38 tests, 179 statements, 40 branches, 100% line and 100% branch
+coverage.
+
+`pyproject.toml` omits only code that Maturin excludes from the wheel, plus the static
+version literal. The legacy Python engine remains in the repository as a migration
+oracle but is neither shipped nor counted as release-surface coverage. The release
+artifact validator independently rejects legacy engine paths in wheels and sdists.
+
+## Rust core
+
+CI installs exact `cargo-llvm-cov =0.9.0` with `--locked` and runs every workspace
+crate, feature, target, and test under stable Rust 1.95 coverage instrumentation:
+
+```bash
+cargo llvm-cov \
+  --workspace --all-features --all-targets --locked --summary-only \
+  --ignore-filename-regex '(vsh-python|vsh-worker)' \
+  --fail-under-lines 79 \
+  --fail-under-functions 70 \
+  --fail-under-regions 81
+```
+
+Current stable-toolchain core result:
+
+| Metric | Measured | Merge floor |
+|---|---:|---:|
+| Lines | 80.50% | 79% |
+| Functions | 71.76% | 70% |
+| Regions | 82.51% | 81% |
+
+The measurement executed 133 Rust tests. The ignore expression affects the threshold
+report, not test execution. `vsh-python`
+is loaded and exercised by the 38 Python/PyO3 tests. `vsh-worker` is exercised through
+eight real subprocess protocol/isolation tests. Both report zero when measured only by
+the parent `cargo test` profile because they execute in a CPython runtime or a child
+process; counting those zeros as untested Rust core would misstate both boundaries.
+
+Rust 100% is not a merge target. Mutually exclusive Unix/Windows paths, injected I/O
+failures, child-process code, and the CPython extension cannot all be represented
+honestly by one stable-toolchain parent-process report. Chasing a headline number by
+removing defensive branches or counting generated/subprocess code as covered would
+weaken the signal. Instead, critical invariants have explicit behavioral tests:
+single-use reservation finalization, every durable commit boundary, stale writes,
+workspace/runtime relocation, internal symlink replacement, bounded directory growth,
+checksummed state corruption, worker frame/output limits, GIL release, and Python panic
+translation. The aggregate floor prevents broad regressions; these tests protect the
+high-risk contracts even where platform error branches remain unexecuted locally.
+
+Rust branch coverage is not claimed: `cargo-llvm-cov --branch` remains nightly-only and
+unstable. VSH keeps its production and coverage compiler pinned to stable Rust 1.95,
+and uses stable region coverage plus explicit adversarial behavioral tests instead of
+silently adding a nightly toolchain. Python branch coverage remains a hard 100% gate.
+
+Coverage floors may only rise or stay fixed. Lowering or expanding an omission requires
+an evidence-backed plan change and review.
+
+---
+
+# Migration from the Python command engine to VSH 0.3 native runtime
+
+Canonical URL: https://fswair.github.io/vsh/rust-rewrite/MIGRATION/
+
+The PyPI distribution remains `vbash` and the import package remains `vsh`, but VSH
+0.3 replaces the command-specific Python simulator/executor lifecycle with one native
+transaction API. The built wheel contains no Python fallback engine.
+
+## Python API
+
+Old command models such as `LsCommand`, registry lookup, `snapshot_workspace`,
+`simulate_command`, `approve_plan`, and `execute_approved` are not compatibility
+aliases. Compose one Monty program and call the PyO3-backed runtime:
+
+```python
+from vsh import RunMode, RunRequest, Runtime
+
+runtime = Runtime.open("/path/to/workspace")
+receipt = runtime.run(
+    RunRequest(
+        "from pathlib import Path\n"
+        "Path('/workspace/out.txt').write_text('native')",
+        mode=RunMode.AUTO,
+    )
+)
+```
+
+Use `runtime.preview(request)` when no host mutation is allowed. An auto-approved
+preview may be promoted with `runtime.commit(receipt.transaction, now_unix_ms)` in the
+same live runtime. Under strict policy, `approve(...)` binds an independent principal
+and expiry to the exact durable artifact before commit.
+Call `runtime.discard_preview(receipt.transaction)` when an auto-approved preview will
+not be promoted; this releases its bounded process-local retention without host effect.
+
+## MCP and CLI
+
+The former search/schema/snapshot/simulate/approve/execute tool sequence is replaced by
+one normal MCP tool, `vsh_run`. Put the complete multi-file operation in one program.
+Preview promotion is a second `vsh_run` call containing the returned `transaction`, no
+code, and `mode="auto"`.
+
+The CLI equivalents are:
+
+```bash
+vsh run --workspace . --mode preview --code 'from pathlib import Path; Path("/workspace/a").write_text("x")'
+vsh run --workspace . --mode auto --transaction TRANSACTION_ID
+vsh serve
+```
+
+## Rust API
+
+Depend on package `vsh-runtime` at the exact release version; its library target is
+named `vsh`. Native deployments also install the matching `vsh-monty-worker` or pass a
+trusted executable path with `RuntimeConfig::with_worker_path`.
+
+## Deliberate compatibility breaks
+
+- There is no shell-command registry or per-command schema in the release wheel.
+- There is no JSON hop between simulation, policy, and commit.
+- Results are native Rust/Python Monty values; unsupported Python projections fail
+  before an auto-commit.
+- Protected paths are hidden and denied before their names or bytes enter Monty.
+- Preview handles are bounded; auto-approved handles are process-local, while
+  independent-approval artifacts are durable.
+
+---
+
+# VSH dual-registry release
+
+Canonical URL: https://fswair.github.io/vsh/rust-rewrite/RELEASE/
+
+The release workflow builds both language surfaces from one tag without publishing
+anything during an ordinary branch build or manual `workflow_dispatch` run.
+
+## Artifact matrix
+
+`workflow_dispatch` is the safe build-only rehearsal. It produces and validates:
+
+- CPython 3.11, 3.12, 3.13, and 3.14 wheels;
+- manylinux 2.28 x86_64 and aarch64;
+- macOS x86_64 and arm64;
+- Windows x86_64;
+- one installable sdist containing the complete locked Rust workspace needed to build
+  the matching extension and worker;
+- eight crates.io archives, explicitly excluding the non-published PyO3 build crate;
+- a deterministic `SHA256SUMS` manifest.
+
+Every wheel is installed into an empty environment and must complete a real native
+preview and commit using its bundled exact-version worker. The aggregate validator
+rejects a missing platform/Python tag, missing or non-executable worker, missing native
+extension, legacy Python engine path, incomplete sdist workspace, corrupt archive, or
+wrong version before a publish job is eligible.
+
+## Publication authority
+
+Only a pushed `v<project.version>` tag enables publication. A manual workflow run does
+not publish. The tag path requires protected GitHub environments:
+
+- `crates-io` with `CARGO_REGISTRY_TOKEN`;
+- `pypi` configured as a PyPI trusted publisher.
+
+The workflow publishes crates in dependency order and waits for every exact version to
+be visible through the crates.io API before publishing its dependents. PyPI publication
+runs only after all eight crates succeed. Python artifacts receive GitHub build
+provenance and are uploaded with uv trusted publishing.
+
+Before the first irreversible tag, recheck registry ownership/availability and review
+the release environments. The intended crate names were unclaimed when checked during
+implementation, but that observation is not permanent.
+
+## Pinned build supply chain
+
+Release actions use immutable commit SHAs. The selected releases are recorded beside
+each `uses:` line in `.github/workflows/publish.yml`. The build tools are exact:
+
+- Rust 1.95.0;
+- uv 0.12.1;
+- Maturin 1.15.0;
+- the dependency versions in `Cargo.lock` and `uv.lock`.
+
+No registry publication was performed while implementing the rewrite.
+
+---
+
+# Rust rewrite plan validation
+
+Canonical URL: https://fswair.github.io/vsh/rust-rewrite/PLAN_VALIDATION/
+
+Validated: 2026-08-29\
+Scope: current working tree against `plans/vsh_rust_rewrite_dual_sdk.md`
+
+## Requirement matrix
+
+| Plan requirement | Result | Evidence |
+|---|---|---|
+| One semantic core for Rust and Python | Satisfied locally | `vsh-runtime` owns the facade; `vsh._native` is a thin PyO3 adapter. The shipped Python surface contains no simulator, policy, transaction state machine, or committer fallback. |
+| Native crates.io SDK plus PyPI SDK | Satisfied locally | Eight publishable crate archives and one CPython 3.14 wheel/sdist build locally; the wheel installs in an empty environment and performs a bundled-worker preview and real commit. |
+| Exact, reviewed, active dependencies | Satisfied for the supported target graph | Direct Rust dependencies are exact-pinned, `Cargo.lock`/`uv.lock` are frozen, 1,226 RustSec advisories were refreshed, `cargo-deny 0.20.2` passes advisories/bans/licenses/sources, and strict hash-locked `pip-audit 2.10.1` reports no vulnerability. The documented embedded-only `atomic-polyfill` lock entry is not selected by any supported target. |
+| Capability-rooted complete mediation | Satisfied locally | Workspace, `.vsh-runtime`, data, blob, transaction, stage, quarantine, plan, journal, marker, and coordination handles are identity checked. Workspace/data overlap, canonical aliases, internal symlinks, root/runtime relocation, and parent swaps fail closed. |
+| Zero host effects during simulation | Satisfied locally | Monty runs in a supervised exact-version worker with no host mount. Filesystem calls map to `VirtualFs`; protected and absolute host paths are denied before bytes enter the worker. |
+| Bounded latency and memory surfaces | Satisfied for implemented paths | Program, OS calls, per-call/total I/O, events, frames, output, result, exception, paths, directory entries, snapshot nodes/depth/bytes, artifacts, state log, journal, plan, conflicts, and preview cache have hard bounds. Blob and host content verification stream or read through an explicit ceiling. |
+| Deterministic durable state and single-use commit | Satisfied locally | Exact transaction binding, CAS lifecycle edges, reservation consumption, approval expiry, checksummed append log, two-slot compaction, durable intent/completion witnesses, post-commit verification, and recovery are exercised. Preflight failures after reservation end in `Failed`; complete checksum-corrupt frames never roll state backward. |
+| Concurrency and crash recovery | Satisfied locally | Same-workspace commits serialize only revalidation/mutation; independent runtimes scale in parallel. Every injected durable commit boundary recovers to the original or committed state, and ambiguous ownership remains untouched. |
+| Safe and low-overhead PyO3 boundary | Satisfied locally | Native calls release the GIL, including runtime open/recovery; panics are caught before crossing FFI; errors share `VshRuntimeError`; results use Monty's typed converter rather than JSON. The final 100-sample validation estimates 1.3–16.5 microseconds distinguishable incremental PyO3 p50. |
+| Coverage is an enforced merge signal | Satisfied locally | 133 Rust tests measure 80.50% lines, 71.76% functions, and 82.51% regions; CI floors are raised to 79/70/81. The 38 shipped-Python tests retain 100% line and branch coverage. See `COVERAGE.md` for boundary rationale. |
+| Reproducible release workflow | Implemented; hosted execution outstanding | Versions agree at 0.3.0, actions/tools are immutable or exact-pinned, local archives validate, and ordinary/manual workflows cannot publish. The 20-wheel hosted matrix, provenance, protected environments, registry visibility waits, and actual publication require GitHub/registry authority. |
+| Dual-SDK documentation and agent integration | Satisfied locally | Zensical 0.0.57 builds 35 source pages in strict mode. Rust and Python APIs are separated; architecture, examples, use cases, benchmarks, security, MCP, and agent workflows are covered. Every page exposes its exact source through Copy as Markdown and supports automatic light/dark themes. `/llms.txt` indexes and `/llms-full.txt` concatenates all 35 Markdown sources. |
+
+## Findings resolved during validation
+
+1. `Runtime.open` held the GIL while Rust opened/recovered stores. It now detaches around the native operation and has a deterministic lock-contention thread test.
+2. Ambient `.vsh-runtime/data` and blob paths could be redirected by symlinks. Storage now uses pinned `DataDirectory` capabilities and real-child identity checks.
+3. Explicit data directories could overlap the workspace through lexical, canonical, or prospective aliases. Preflight and post-open separation checks reject them before persistent writes.
+4. A renamed/replaced workspace or protected runtime directory could leave a valid old handle. The committer records and revalidates both identities before and after observation/mutation boundaries.
+5. Commit preflight failures after consuming a reservation could leave `Reserved` stranded. Binding, size, lock, and identity failures now atomically finalize it as `Failed`.
+6. A full final state-log frame with a bad checksum was treated like a torn append and silently truncated. Only incomplete EOF data is repaired now; a complete corrupt frame fails closed.
+7. Blob verification materialized the entire file. It now hashes in fixed-size chunks, and bounded retrieval rejects oversized content before returning bytes.
+8. Lazy host reads, journal/marker/plan recovery reads, and directory revalidation retained growth races that could allocate beyond the pre-observed size. Reads now use explicit `limit + 1` ceilings, and directory revalidation has an entry bound.
+9. Recovery could follow a replaced internal plan/journal/marker symlink. Existing internal files and recovery transaction directories are now opened only after no-follow type and identity validation.
+10. Python internal failures inherited directly from `RuntimeError`, bypassing the public VSH base. `VshInternalError` now derives from `VshRuntimeError`, with matching stubs and tests.
+11. Public Rust error/value contracts and worker frame/protobuf edge cases lacked direct coverage. Stable message/source and bounded protocol tests now cover them.
+12. Subprocess coverage left `*.profraw` files beside the worker sources, so Cargo included 77 test artefacts in the worker crate. They were removed, globally ignored, and the final worker archive dropped from 85 files to the intended 8.
+
+No new runtime dependency was introduced for these fixes, and workspace Rust crates continue to forbid `unsafe` code.
+
+## Local gate record
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`: pass.
+- `cargo llvm-cov --workspace --all-features --all-targets --locked ...`: 133/133 tests pass; 80.50/71.76/82.51 coverage.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked`: pass.
+- PyO3/Python release-surface tests: 38/38 pass; 100% line and branch coverage.
+- Ruff format/lint, ty, and basedpyright: pass.
+- `cargo audit`: no known vulnerability or yanked package; one documented non-selected embedded-target maintenance warning.
+- `cargo deny --all-features --locked check`: advisories, bans, licenses, and sources pass.
+- Strict hash-locked Python audit: no known vulnerability.
+- `zensical build --clean --strict`: 35/35 Markdown sources build; all 35 source-backed pages derive their exact Markdown URL and load the dark-red light/dark theme plus Copy as Markdown asset.
+- `scripts/generate_llms_txt.py --check`: the compact index and 35-page full corpus are deterministic and current; both are copied unchanged to the site root.
+- Documentation examples: all 20 Python code blocks pass syntax compilation; custom JavaScript passes `node --check`.
+- Local CPython 3.14 wheel, sdist, and eight crate archives: structure validation passes; isolated wheel preview/commit smoke passes.
+- Paired 100-sample native/PyO3 benchmark plus 30 cold starts: binding overhead and independent-runtime scaling budgets pass; raw JSON and Markdown are retained under `playground/reports/rust-rewrite-python-v0.3.0/`.
+
+## Remaining gates
+
+There is no known code-side blocker in the locally exercised macOS arm64/Python 3.14
+surface. These are release gates, not locally solvable implementation defects:
+
+- run the hosted Linux/macOS/Windows and CPython 3.11–3.14 wheel matrix;
+- compare the complete matrix with a clean, frozen legacy-Python baseline;
+- capture supported-platform whole worker-tree RSS and adversarial performance cases;
+- freeze the baseline/release identities in clean commits and tags;
+- verify registry ownership, protected environments, credentials, and provenance before
+  the first irreversible publish.
+
+---
+
+# API reference
+
+Canonical URL: https://fswair.github.io/vsh/API/
+
+VSH exposes one Rust-owned execution model through two deliberately separate language
+surfaces.
+
+## Choose a language
+
+| Surface | Package | Reference |
+|---|---|---|
+| Python | PyPI distribution `vbash`, import `vsh` | [Python API](python/api.md) |
+| Rust | Cargo package `vsh-runtime`, library `vsh` | [Rust API](rust/api.md) |
+| MCP | `vbash[mcp]`, stdio tool `vsh_run` | [MCP server](integrations/mcp.md) |
+
+Python is a thin PyO3 adapter; simulation, policy, transaction state, commit, and
+recovery do not have a parallel Python implementation. See the
+[language parity contract](rust-rewrite/PARITY_CONTRACT.md).
+
+## Shared concepts
+
+- [Transactions and exact promotion](guides/transactions.md)
+- [Policies and resource budgets](guides/policies-and-budgets.md)
+- [Architecture and trust boundaries](ARCHITECTURE.md)
+- [Typed MCP receipt envelope](integrations/mcp.md#output-envelope)
+
+!!! note "Version 0.3 compatibility break"
+
+    Legacy command-registry, plan-token, shell-rendering, CodeMode discovery, and
+    Python committer APIs are not part of the 0.3 native surface. Follow the
+    [migration guide](rust-rewrite/MIGRATION.md) instead of importing removed modules.
+
+---
+
+# Transaction artifacts
+
+Canonical URL: https://fswair.github.io/vsh/ARTIFACTS/
+
+VSH retains the minimum bounded evidence required to promote, reject, recover, and
+audit a filesystem transaction. This page describes native transaction artifacts; the
+legacy Python agent-output spill store is not part of VSH 0.3.
+
+## Bound identity
+
+An artifact binds:
+
+- program digest and optional intent digest;
+- base snapshot and runtime configuration;
+- read and write dependency digests;
+- canonical diff digest;
+- deterministic policy digest and decision;
+- bounded Monty result, stdout, counters, and change detail.
+
+Changing any bound input produces another transaction identity.
+
+## Retention classes
+
+| Decision | Retention | Reason |
+|---|---|---|
+| Denied | Receipt/state evidence only | Cannot be committed |
+| Auto-approved preview | Bounded process-local artifact | Avoid fsync on the common preview path |
+| Pending approval | Durable immutable blob + state | Must survive reviewer delay and restart |
+| Promoted auto-approved preview | Persisted before reservation | Recovery requires exact bytes before mutation |
+| Committed/recovery-required | Durable state, plan, journal, marker as needed | Verification and crash recovery |
+
+Process-local retention is bounded by both artifact count and aggregate encoded bytes.
+Call `discard_preview` for abandoned handles.
+
+## Integrity and recovery
+
+Artifacts are content-addressed and decoded under size/cardinality/path limits. A
+decoded transaction binding must match the requested record. State log frames are
+checksummed; only incomplete EOF data is repairable, while a complete corrupt frame
+fails closed.
+
+Commit plans, journals, and markers are opened with no-follow identity validation.
+Recovery leaves ambiguous ownership untouched and reports it to the host.
+
+See [Transactions](guides/transactions.md), [Architecture](ARCHITECTURE.md), and the
+full [Threat model](rust-rewrite/THREAT_MODEL.md).
+
+---
+
+# Performance baseline
+
+Canonical URL: https://fswair.github.io/vsh/BASELINE/
+
+The active VSH 0.3 baseline is the paired native Rust and PyO3 release matrix captured
+on 2026-08-29. It replaces legacy Python command-engine comparisons as the merge
+baseline for the rewrite.
+
+Read:
+
+- [Performance overview and results](performance.md)
+- [Full reproducibility record](rust-rewrite/PERFORMANCE.md)
+- [Coverage and merge floors](rust-rewrite/COVERAGE.md)
+- [Plan validation and remaining hosted gates](rust-rewrite/PLAN_VALIDATION.md)
+
+Historical reports under `playground/reports/` remain engineering evidence but must not
+be mixed with the current native/PyO3 matrix. In particular, compare only equivalent
+workloads, release profiles, machines, worker identities, and sample protocols.
+
+---
+
+# CodeMode server
+
+Canonical URL: https://fswair.github.io/vsh/CODEMODE/
+
+`vsh-codemode` is the agent-oriented stdio entry point in VSH 0.3. It exposes the same
+single `vsh_run` tool as `vsh serve`, then adds server instructions and the
+`vsh_run_transaction` MCP prompt.
+
+```bash
+uv run vsh-codemode
+```
+
+The legacy multi-tool CodeMode surface was removed during the Rust rewrite. One tool
+keeps discovery and prompt cost small without maintaining a parallel command registry.
+The agent supplies one bounded Monty program; Rust owns snapshot, simulation, canonical
+diff, policy, state, revalidation, commit, and recovery.
+
+Project rules can be appended without forking the server:
+
+```bash
+VSH_CODEMODE_INSTRUCTIONS_FILE=.vsh/agent-rules.md uv run vsh-codemode
+```
+
+or with `VSH_CODEMODE_INSTRUCTIONS` for a short inline rule. File content is placed
+before inline content when both variables are set.
+
+Use the current guides:
+
+- [MCP server setup and `vsh_run` schema](integrations/mcp.md)
+- [Agent protocol and failure behavior](integrations/agents.md)
+- [Migration from the legacy Python engine](rust-rewrite/MIGRATION.md)
+
+Do not configure removed tools such as `search`, `get_schema`, `simulate`, `approve`,
+`execute_approved`, or `vsh_sandbox`. Independent approval remains available through a
+trusted Python or Rust SDK host and is intentionally absent from the model-facing MCP
+surface.
+
+---
+
+# Native core and PyO3 performance record
+
+Canonical URL: https://fswair.github.io/vsh/rust-rewrite/PERFORMANCE/
+
+Captured: 2026-08-29\
+Native artifact: `playground/reports/rust-rewrite-python-v0.3.0/native-rust-release-20260829.json`\
+PyO3 artifact: `playground/reports/rust-rewrite-python-v0.3.0/native-pyo3-release-20260829.json`\
+macOS RSS artifact: `playground/reports/rust-rewrite-python-v0.3.0/memory-macos-arm64-20260829.json`\
+Historical development artifact: `playground/reports/rust-rewrite-python-v0.3.0/native-pyo3-dev-20260828.json`
+Post-hardening native validation: `playground/reports/rust-rewrite-python-v0.3.0/native-rust-validation-20260829.json`\
+Post-hardening PyO3 validation: `playground/reports/rust-rewrite-python-v0.3.0/native-pyo3-validation-20260829.json`
+
+## Reproducible command
+
+Both harnesses have no third-party benchmark dependency. The native harness calls the
+public `vsh-runtime` facade directly; the Python harness calls the PyO3 extension from
+an isolated CPython 3.14 environment installed from the built wheel. Both use the exact
+release worker bundled in that wheel.
+
+```bash
+export VSH_WORKER="$PWD/.venv/bin/vsh-monty-worker"
+cargo build --release --locked -p vsh-runtime --example native_benchmark
+target/release/examples/native_benchmark \
+  --iterations 100 \
+  --cold-iterations 30 \
+  --parallel-workers 4 \
+  --worker "$VSH_WORKER" \
+  --output native-rust-release-20260829.json
+
+python benchmarks/native_pyo3.py \
+  --iterations 100 \
+  --cold-iterations 30 \
+  --parallel-workers 4 \
+  --output native-pyo3-release-20260829.json
+```
+
+The paired record uses the same fat-LTO release profile for the Rust example, PyO3
+extension, and matching worker. The development artifact retains the earlier 30-sample
+workload as a compiler-independent hot-path regression aid.
+
+## Result after bottleneck closure
+
+| Case | state / changed paths | Rust wall p50 / p99 | PyO3 wall p50 / p99 | Rust API envelope p50 | Python wall − internal p50 | estimated PyO3-only p50 |
+|---|---|---:|---:|---:|---:|---:|
+| no-op preview | auto / 0 | 0.138 / 0.202 ms | 0.127 / 0.159 ms | 4.4 µs | 7.0 µs | 2.6 µs |
+| read 10 files | auto / 0 | 0.673 / 0.820 ms | 0.648 / 0.884 ms | 4.3 µs | 7.2 µs | 2.9 µs |
+| edit 20 files | auto / 20 | 1.278 / 1.560 ms | 1.224 / 1.610 ms | 4.5 µs | 7.4 µs | 2.9 µs |
+| search 10k files | auto / 0 | 66.397 / 67.346 ms | 66.594 / 67.905 ms | 880.5 µs | 896.0 µs | 15.5 µs |
+| rename 100-file subtree | pending / 202 | 56.005 / 59.092 ms | 55.947 / 58.204 ms | 1011.9 µs | 995.8 µs | within run noise |
+| delete 100-file subtree | pending / 101 | 47.916 / 51.657 ms | 47.835 / 49.852 ms | 1003.9 µs | 1010.0 µs | 6.1 µs |
+| delete 5,050 nodes | pending / 5,050 | 161.563 / 208.407 ms | 159.891 / 168.949 ms | 1568.1 µs | 1573.5 µs | 5.4 µs |
+
+The native API envelope is the direct Rust-call wall time minus the receipt's internal
+timer. The Python equivalent contains that same envelope plus PyO3 request/result
+conversion, so their p50 difference estimates PyO3-only cost. Because the two
+harnesses run in separate processes, their end-to-end wall medians are intentionally
+not subtracted from each other. Across the seven cases the estimated incremental PyO3
+p50 cost is 2.6–15.5 µs where distinguishable and stays far below both the 10% and
+100 µs acceptance ceilings. The large-tree API envelope is mostly native cleanup
+outside the receipt timer, not binding conversion. No case shows greater than 15% PyO3
+p99 amplification in the retained 100-sample pair. A repeated PyO3 run was used after
+an earlier run contained two isolated scheduler/disk outliers; both raw retained
+artifacts contain p50/p95/p99/min/max and sample count.
+
+The throughput case amortizes thread creation over 20 transactions per runtime, 80
+transactions total. Four independent native runtimes reached 3.53× speedup; the PyO3
+surface reached 2.71× while releasing the GIL. Thirty independent cold runtimes report
+runtime-open p50/p99 of 21.2/26.1 ms in native Rust and 17.5/26.6 ms through Python;
+first-worker-call p50/p99 is 4.85/5.40 ms and 4.68/6.20 ms respectively. Cold values
+are reported separately and are not folded into warm percentiles.
+
+On macOS arm64, `/usr/bin/time -l` over the seven-case matrix reported driver-process
+peak RSS of 26,705,920 bytes (25.47 MiB) for native Rust and 48,021,504 bytes
+(45.80 MiB) for CPython 3.14 plus PyO3. This is a high-water mark for the calling
+process, not the sum of independently supervised worker processes; the raw scope and
+commands are retained in the memory artifact.
+
+## Post-hardening regression validation
+
+After capability-rooted data storage, workspace/runtime identity checks, bounded
+streaming reads, and fail-closed journal handling were added, the paired 100-sample
+matrix was rerun with 30 independent cold starts:
+
+| Case | Rust p50 | PyO3 p50 | estimated incremental PyO3 p50 |
+|---|---:|---:|---:|
+| no-op preview | 0.279 ms | 0.151 ms | within run noise |
+| read 10 files | 0.870 ms | 0.837 ms | 2.4 µs |
+| edit 20 files | 1.817 ms | 1.797 ms | 2.7 µs |
+| search 10k files | 66.918 ms | 66.621 ms | 9.7 µs |
+| rename 100-file subtree | 57.965 ms | 56.944 ms | 8.5 µs |
+| delete 100-file subtree | 47.057 ms | 46.996 ms | 16.5 µs |
+| delete 5,050 nodes | 174.850 ms | 165.026 ms | 1.3 µs |
+
+The Python boundary remains below both acceptance ceilings in every case. Four
+independent runtimes reached 4.15x native and 4.20x PyO3 speedup, so the new identity
+checks did not introduce a process-global serialization point. The retained primary
+run remains the quieter performance record: this validation followed several long
+LTO/coverage builds; the native no-op process in particular shows run-order/system
+variance that is absent from the separately executed Python process. Small read/edit
+medians remain above the primary record, concentrated in Monty execution and snapshot
+filesystem time rather than FFI. This is recorded as variance, not presented as a win,
+and cross-process wall medians are never subtracted to manufacture a binding number. A
+clean hosted run against the frozen Python baseline remains a Phase 10 release gate.
+
+## Bottleneck closure
+
+The first run of the same benchmark showed no-op/read/edit p50 values of 11.896,
+12.991, and 14.010 ms. Stage attribution placed more than 95% of the warm no-op in
+`bind_and_store`: every auto-approved preview synchronously fsynced an immutable blob,
+its directory, and the state log.
+
+Auto-approved `Preview` now validates and bounds its exact artifact but retains it in a
+hard-capped process-local cache. Promotion first persists the artifact and lifecycle
+record, then reserves and revalidates it. Approval-required transactions remain durable
+at preview completion. The benchmark explicitly discards each sampled preview after
+timing so a long run measures work rather than retained handles. This reduced the same
+dev-wheel cases by approximately 24.6×, 5.2×, and 3.4× without weakening
+commit/recovery ordering. Release optimization lowers the final warm p50 values again
+to the primary table above.
+
+The first isolated 10k-file search smoke exposed a second bottleneck: snapshot p50 was
+257.8 ms of a 293.2 ms transaction because each child metadata lookup re-resolved its
+full capability-relative path from the workspace root. Snapshot capture now obtains
+no-follow metadata directly from the already-open parent directory entry on Unix;
+Windows retains the full-metadata path needed for stable file identity. This uses the
+same exact-pinned `cap-std` API and does not add a dependency or relax symlink/race
+checks. Snapshot p50 fell to 31.2 ms (8.3×) and end-to-end search to 66.9 ms (4.4×).
+The final search is balanced between snapshot (46.6%) and actual Monty/VFS directory
+search (51.9%), rather than dominated by path re-resolution overhead.
+
+The expanded mutation matrix preserves the normal balanced-policy path rather than
+weakening it for a benchmark: rename, subtree delete, and 5,050-node delete all finish
+as `pending_approval`, so their totals include bounded durable artifact persistence.
+The 5,050-node case stays inside the production one-second and 10,000 OS-call caps; its
+native p50 is distributed across snapshot (32.7 ms), Monty/VFS execution (93.8 ms),
+diff plus policy (16.7 ms), and bind/store (16.7 ms). No hidden per-operation FFI loop
+is introduced: each workload is one Python-to-Rust transaction call.
+
+The remaining warm cost is dominated by real snapshot and Monty/VFS work rather than
+PyO3. The remaining release matrix requires equivalent frozen-Python-baseline cases,
+supported-platform and whole-worker-tree RSS CI measurements, and performance artifacts
+for the adversarial stale/symlink/double-execute and large-artifact cases that are
+currently covered as correctness/security tests.
+
+---
+
+# Rust rewrite Phase 0 baseline
+
+Canonical URL: https://fswair.github.io/vsh/rust-rewrite/PHASE_0_BASELINE/
+
+Captured: 2026-08-28\
+Python version: VSH 0.3.0\
+Baseline revision candidate: `7c7d5cbeaa88f58b99a1cc23953a0ad3b6bc5d91`
+
+## Baseline status
+
+The candidate revision contained an MCP import regression: CodeMode modules imported
+`mcp.server.FastMCP`, while the project uses the third-party `fastmcp.FastMCP` API and
+passes its `version=` constructor argument. Eleven test modules failed during collection.
+
+The Phase 0 working tree contains the narrow correction:
+
+- `src/vsh/mcp/codemode_server.py`, `prompts.py`, and `surface.py` import
+  `fastmcp.FastMCP`.
+- `resources.py` uses the concrete supported `fastmcp.resources.function_resource`
+  import instead of a fallback that mixes two APIs.
+
+A release tag must point to a commit containing this correction. The baseline is not
+considered immutable until that clean commit/tag exists.
+
+## Verification
+
+Command:
+
+```bash
+uv run pytest -q
+```
+
+Result after the correction:
+
+```text
+441 passed
+100.00% line and branch coverage
+8.68 seconds pytest-reported runtime
+```
+
+The count includes eight native PyO3 binding smoke and path-contract tests introduced
+by the Phase 1 skeleton. The original corrected Python baseline remains 433 tests; no
+existing test was removed or relaxed.
+
+There are 3,488 third-party `pathspec` deprecation warnings. They do not fail the
+current gate, but warning elimination must be tracked separately; the Rust rewrite may
+not copy a broad warning suppression.
+
+Focused MCP regression command:
+
+```bash
+uv run pytest \
+  tests/test_mcp.py \
+  tests/test_mcp_codemode.py \
+  tests/test_agent_codemode_mcp.py \
+  -q --no-cov
+```
+
+Result: 34 passed.
+
+## Latency baseline
+
+Artifact directory:
+
+```text
+playground/reports/rust-rewrite-python-v0.3.0/
+```
+
+Command:
+
+```bash
+uv run python playground/benchmark_vsh_vs_native.py \
+  --iterations 25 \
+  --file-count 50 \
+  --file-size 512 \
+  --output-dir playground/reports/rust-rewrite-python-v0.3.0 \
+  --no-plots
+```
+
+Environment:
+
+- Apple M1, 8 cores, 8 GB RAM
+- macOS 26.1 arm64
+- Python 3.12.10
+- FastMCP 3.4.2
+- Pydantic 2.13.4
+- pydantic-monty 0.0.18
+
+Matrix:
+
+- 25 commands
+- 25 samples per command/mode
+- modes: native subprocess, VSH apply-only, VSH full lifecycle
+
+Aggregate median statistics:
+
+| Mode | Median of command medians | Geometric mean of command medians |
+|---|---:|---:|
+| Native subprocess | 5.647 ms | 6.007 ms |
+| VSH apply-only | 0.151 ms | 0.166 ms |
+| VSH full lifecycle | 3.755 ms | 3.747 ms |
+
+Notable full-lifecycle medians:
+
+| Command | Median |
+|---|---:|
+| `cat` | 2.241 ms |
+| `grep` | 5.944 ms |
+| `rg` | 8.492 ms |
+| `cp` | 4.851 ms |
+| `mkdir` | 6.351 ms |
+| `rm` | 6.253 ms |
+| `sed_inplace` | 5.294 ms |
+
+The full lifecycle has visible long-tail outliers in several cases. The new benchmark
+must add p95/p99 and stage attribution; median-only improvement is insufficient.
+
+## Token baseline
+
+Existing recorded artifacts are retained under:
+
+```text
+playground/reports/baseline-pre-roadmap-20260609-193413/
+playground/reports/current-verified-20260610-002353/
+```
+
+The verified recorded agent run reached one `apply_batch` call. A fresh live-model run
+is intentionally not part of the deterministic Phase 0 command because it can incur
+external cost and stochastic drift. Refreshing it requires an explicit recorded model,
+provider, prompt, and run count.
+
+## Required expansion before performance closure
+
+The existing command benchmark does not yet cover the full rewrite acceptance matrix.
+Add deterministic cases for:
+
+- read 10 files,
+- search 10k files,
+- edit 20 files in one transaction,
+- rename/delete subtrees,
+- massive delete,
+- stale workspace and symlink races,
+- double execute,
+- Monty cold/warm worker cost,
+- Python FFI floor and bytes copied,
+- independent-runtime concurrency,
+- peak RSS and overlay size.
+
+## Phase 0 open item
+
+- Create the clean baseline commit/tag after the import regression correction and the
+  Phase 0 documents are reviewed. Codex will not create a commit or tag without explicit
+  user direction.
+
+---
+
+# Rust rewrite Phase 2 — immutable snapshot and VirtualFs
+
+Canonical URL: https://fswair.github.io/vsh/rust-rewrite/PHASE_2_VFS/
+
+Implemented: 2026-08-28
+
+## Delivered core
+
+- `vsh-store::BlobStore`
+  - BLAKE3 content addressing,
+  - sharded immutable layout,
+  - same-directory temporary write, file sync, atomic rename, and read-time hash
+    verification,
+  - deduplication and corruption fail-closed behavior.
+- `vsh-vfs::SnapshotBuilder` / `BaseSnapshot`
+  - canonical path-ordered manifest identity,
+  - validated directory parents,
+  - eager metadata and eager or lazy content,
+  - first-read capture that accepts bytes only when both surrounding `FileStamp`
+    observations equal the snapshot stamp and byte length still matches,
+  - one shared capture across concurrent snapshot readers.
+- `vsh-vfs::VirtualFs`
+  - `exists`, `metadata`, `read`, `read_link`, `read_dir`, `write`, `append`,
+    `mkdir`, `unlink`, `rmdir`, `remove_tree`, and `rename`,
+  - copy-on-write overlay with component-aware subtree whiteouts,
+  - opaque symlinks that are never followed implicitly,
+  - operation-owned effect ledger,
+  - base `ReadObservation` and `WritePrecondition` sets,
+  - canonical path-ordered diff and domain-separated digest,
+  - full descendant expansion for subtree deletes,
+  - transaction-local size/work metrics.
+
+The crate has no host commit API. Apart from immutable blob installation, all writes
+remain inside the transaction overlay.
+
+## Correctness invariants covered
+
+1. Base snapshot nodes never change due to virtual mutations.
+2. A lazy blob becomes immutable after exactly one stable capture.
+3. Stamp or byte-length drift fails the read; stale bytes are never returned.
+4. Reads of file content and directory listings retain commit-time dependencies.
+5. Every written host path retains its original base precondition.
+6. Create-then-delete and same-content writes disappear from canonical diff while
+   remaining visible in the observed effect ledger.
+7. Recursive delete expands every base descendant in the canonical diff.
+8. Deleting or renaming a subtree hides stale base and overlay descendants even if its
+   root directory is recreated later.
+9. Subtree membership uses normalized path components, not string prefixes or fragile
+   lexicographic range assumptions.
+10. Repeated canonical-diff generation is stable, including lazy renamed content.
+
+## Property/model gate
+
+The std-only deterministic generator executes 48 mixed operations for each of 128
+seeds. For every sequence it:
+
+1. applies operations to `VirtualFs`,
+2. derives canonical diff,
+3. applies that diff to an independent flat base-state model,
+4. compares the model with materialized final virtual state,
+5. derives the diff again and verifies exact equality.
+
+No property-testing crate was added; this avoids another runtime/dev dependency while
+retaining deterministic reproduction by seed. More adversarial generators will be
+added with Monty call integration.
+
+## Touched-state performance evidence
+
+A 10,002-node snapshot test modifies one file. The diff reports:
+
+```text
+candidate_paths: 1
+expanded_delete_paths: 0
+changed_paths: 1
+materialized_after_bytes: 7
+```
+
+Normal file updates therefore do not scan the base manifest. Recursive deletion and
+rename deliberately scale with their affected subtree because policy, revalidation,
+and commit must account for every changed node; hiding that work would recreate the
+old massive-delete bug.
+
+## Dependency delta
+
+The only new direct crate is the exact pin `blake3 =1.8.7` with default features
+disabled and only `std` enabled. The resolved lockfile has no duplicate versions.
+`cargo audit` and the strengthened all-graph `cargo deny` policy passed after the
+addition with no advisory waiver.
+
+## Deferred to owning phases
+
+- The capability-rooted host `ContentLoader` adapter belongs to Monty/host integration.
+  Phase 2 defines and verifies its before/read/after contract but does not grant host
+  authority itself.
+- Host revalidation and commit remain forbidden until the trusted committer phase.
+- Rename is correctness-equivalent delete/create in canonical diff. A compact rename
+  annotation is performance/UX work only and may not become a correctness dependency.
+- Persistent snapshot indexes, mmap, compression, Merkle DAGs, and parallel hashing
+  remain benchmark-gated; none is pre-authorized as a dependency.
+
+---
+
+# Phase 3 Monty typed-call integration
+
+Canonical URL: https://fswair.github.io/vsh/rust-rewrite/PHASE_3_MONTY/
+
+Checked: 2026-08-28
+
+## Delivered production path
+
+`vsh-monty` consumes Monty 0.0.21's public `OsFunctionCall` enum directly. Production
+execution runs in the supervised `vsh-monty-worker` child; the parent alone owns the
+`VirtualFs` transaction and answers typed calls. The interpreter receives no host
+mount, environment inheritance, process API, socket, or commit authority.
+
+The implemented filesystem surface includes:
+
+- existence and kind predicates,
+- text/byte reads, writes, and appends,
+- metadata and deterministic directory listing,
+- lexical `absolute`/`resolve` inside the synthetic namespace,
+- `mkdir`, including `parents`/`exist_ok`,
+- `unlink`, `rmdir`, and subtree-aware rename,
+- open-time read checks, truncation, and append-create semantics,
+- synthetic `HOME`/`PWD` plus explicit `getenv`/`environ`,
+- denied clock calls until a transaction-frozen clock is supplied.
+
+Every resulting effect is attributed as `EffectOrigin::MontyOsCall`. Store corruption,
+stale lazy content, and internal path invariants stop execution outside Python exception
+handling; expected virtual filesystem errors retain Python exception semantics.
+
+## Namespace and authority
+
+Monty sees `/workspace`; core VSH retains only relative `VPath` values. Relative paths
+and `/workspace/...` map to that single namespace. Other absolute paths, drive/UNC
+forms, NULs, traversal, and overlong paths cannot become host paths. Boolean predicates
+return false for out-of-namespace inputs; read/write operations fail with a virtual
+`PermissionError`.
+
+Directory results and file handles carry canonical synthetic absolute paths. No adapter
+method can commit, resolve a host root, read host environment variables, spawn a
+process, or open a socket.
+
+## Isolation and supervision
+
+`vsh-monty-worker` uses Monty's public `MontyRun`/`RunProgress` seam and official
+protobuf messages without enabling `monty-proto/worker`. That official feature and the
+published `monty-runtime` binary were rejected because their 0.0.21 dependency graph
+selects yanked `chacha20 0.10.0`. VSH neither forks Monty nor admits the yanked graph.
+
+The parent verifies the exact worker version, clears its environment, uses piped typed
+messages, applies a wall-clock watchdog, bounds diagnostics, kills/reaps failed workers,
+and only returns a worker to the short-lock idle pool after a successful reset. Limit,
+protocol, crash, timeout, and reset failures discard the process. `InProcessMonty`
+remains available only as an explicitly selected trusted/test harness.
+
+## Independent limits
+
+The worker's limited allocator enforces a process-wide memory ceiling. The parent
+independently enforces:
+
+- source bytes, bytecode duration, recursion depth, and wall-clock duration,
+- typed OS-call count and total worker-event count,
+- per-call and cumulative read/write bytes,
+- path bytes and returned directory entries,
+- output, result, exception, frame, and diagnostic bytes.
+
+Frame kind and declared length are classified before nested protobuf decoding. An
+oversized result is therefore rejected as `ResultBytes` without allocating or decoding
+the contained Monty object. A hard host limit stops without resuming the suspended
+program, so sandbox code cannot catch and continue past it.
+
+The current append implementation materializes existing immutable content before
+writing the next blob. Its bytes count against the read budget. Chunked/rope-style
+append remains measurement-gated because it must preserve canonical diff identity.
+
+## Verification
+
+The in-process adapter suite covers the complete typed mapping, path/per-call/cumulative
+I/O limits, protected reads, namespace denial, and exact diff semantics. Eight
+end-to-end subprocess tests additionally cover:
+
+- exact typed VFS execution and clean warm reuse,
+- native `Runtime` auto-commit through the worker,
+- catchable protected-read denial without secret materialization,
+- output overflow followed by process discard,
+- oversized result rejection before object decode,
+- bounded floods of tiny print events,
+- wall-timeout kill/reap followed by a fresh successful worker,
+- rejection of an executable reporting the wrong Monty version.
+
+The resolved graph has no known applicable RustSec/CVE advisory and no yanked package;
+see `DEPENDENCY_POLICY.md` for the dated evidence and the transparent lock-only embedded
+target caveat.
+
+## Remaining measurement work
+
+The production isolation boundary and warm-worker reuse are implemented. Release-mode
+cold-start, warm-checkout, reset, discard, steady-state throughput, and RSS distributions
+still need recorded benchmark baselines on each supported platform. Those measurements
+may tune pool and budget defaults, but may not weaken typed authority or dependency
+policy.

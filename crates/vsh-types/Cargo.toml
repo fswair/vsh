@@ -1,0 +1,17 @@
+[package]
+name = "vsh-types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Core value types and state transitions for VSH"
+publish = ["crates-io"]
+
+[dependencies]
+blake3.workspace = true
+
+[lints]
+workspace = true

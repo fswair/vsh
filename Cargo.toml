@@ -1,0 +1,71 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/vsh-types",
+    "crates/vsh-store",
+    "crates/vsh-vfs",
+    "crates/vsh-policy",
+    "crates/vsh-monty",
+    "crates/vsh-commit",
+    "crates/vsh-sdk",
+    "crates/vsh-python",
+    "crates/vsh-worker",
+]
+default-members = [
+    "crates/vsh-types",
+    "crates/vsh-store",
+    "crates/vsh-vfs",
+    "crates/vsh-policy",
+    "crates/vsh-monty",
+    "crates/vsh-commit",
+    "crates/vsh-sdk",
+]
+
+[workspace.package]
+version = "0.3.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+authors = ["Mert <62549656+fswair@users.noreply.github.com>"]
+repository = "https://github.com/fswair/vsh"
+homepage = "https://github.com/fswair/vsh"
+
+[workspace.dependencies]
+blake3 = { version = "=1.8.7", default-features = false, features = ["std"] }
+cap-std = { version = "=4.0.3", default-features = false }
+monty = { version = "=0.0.21", default-features = false }
+monty-alloc = { version = "=0.0.21", default-features = false, features = ["exit-code"] }
+monty-proto = { version = "=0.0.21", default-features = false }
+monty-types = { version = "=0.0.21", default-features = false }
+postcard = { version = "=1.1.3", default-features = false, features = ["alloc"] }
+pyo3 = { version = "=0.29.2", default-features = false }
+vsh-monty = { path = "crates/vsh-monty", version = "=0.3.0" }
+vsh-commit = { path = "crates/vsh-commit", version = "=0.3.0" }
+vsh-policy = { path = "crates/vsh-policy", version = "=0.3.0" }
+vsh-types = { path = "crates/vsh-types", version = "=0.3.0" }
+vsh-store = { path = "crates/vsh-store", version = "=0.3.0" }
+vsh-vfs = { path = "crates/vsh-vfs", version = "=0.3.0" }
+vsh-runtime = { path = "crates/vsh-sdk", version = "=0.3.0" }
+
+[workspace.lints.rust]
+elided_lifetimes_in_paths = "deny"
+missing_docs = "warn"
+unsafe_code = "forbid"
+unused_lifetimes = "deny"
+unused_qualifications = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.bench]
+inherits = "release"
+debug = true
+strip = false

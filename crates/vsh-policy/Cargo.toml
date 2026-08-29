@@ -1,0 +1,21 @@
+[package]
+name = "vsh-policy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Deterministic read-capability and transaction policy for VSH"
+publish = ["crates-io"]
+
+[dependencies]
+vsh-types.workspace = true
+vsh-vfs.workspace = true
+
+[dev-dependencies]
+vsh-store.workspace = true
+
+[lints]
+workspace = true

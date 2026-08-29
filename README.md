@@ -1,128 +1,162 @@
-# vsh
+# VSH
 
-Validation-first command engine for AI agents operating on workspaces.
+VSH is one low-latency transactional filesystem simulator with two SDK surfaces:
 
-`vsh` is not a POSIX shell emulator. It is a **safe command planning and execution control layer** for AI agents: shell-like intent becomes typed `StructuredCommand` models, side effects are simulated on a workspace snapshot, plans are approved, drift is revalidated, and only then are mutations applied to the real filesystem. Read commands validate path access and return captured stdout on execution; simulation does not stream file contents.
+- native Rust through the `vsh-runtime` package (`vsh` library target),
+- Python through the `vbash` PyPI distribution and `vsh` import package.
 
-## Install
+Both surfaces execute the same Rust pipeline. Python is a thin PyO3 binding; it does
+not contain a fallback simulator or committer.
+
+```text
+Monty program → immutable snapshot → Rust VirtualFs → canonical diff → policy
+              → dependency revalidation → recoverable commit → verified receipt
+```
+
+VSH is not a POSIX shell and never gives Monty a host filesystem mount, subprocess,
+network, or ambient environment capability.
+
+## Python
+
+Install the wheel:
 
 ```bash
 uv add vbash
 ```
 
-`uv sync` installs the project plus `dev` and `agent` dependency groups (including `pydantic-ai`).
-
-For pip-only workflows:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev,agent]"
-```
-
-## Quick start
-
-```bash
-vsh search ls
-vsh schema vsh_list
-vsh serve
-```
-
-## End-to-end lifecycle
+Run one complete transaction. `PREVIEW` guarantees that host files are unchanged;
+`AUTO` commits only a deterministic native auto-approval.
 
 ```python
-from vsh import LsCommand
-from vsh.execute import execute_approved
-from vsh.plans import approve_plan
-from vsh.simulate.engine import simulate_command
-from vsh.snapshot.builder import snapshot_workspace
+from vsh import ReceiptDetail, RunMode, RunRequest, Runtime
 
-workspace = "/path/to/project"
-snapshot = snapshot_workspace(workspace, cwd=workspace)
-result = simulate_command(LsCommand(path=".", all=True), snapshot)
-token = approve_plan(result.plan_id)
-execution = execute_approved(token.token)
+runtime = Runtime.open("/path/to/workspace")
+receipt = runtime.run(
+    RunRequest(
+        """
+from pathlib import Path
+text = Path('/workspace/input.txt').read_text()
+Path('/workspace/output.txt').write_text(text.upper())
+len(text)
+""",
+        mode=RunMode.AUTO,
+        detail=ReceiptDetail.FULL,
+    )
+)
 
-print(execution.applied, execution.matches_prediction)
+print(receipt.state, receipt.result, receipt.changes)
 ```
 
-Flow: **search → get_schema → snapshot → simulate → approve → execute_approved**
+The GIL is released while snapshotting, executing Monty, generating the diff,
+evaluating policy, revalidating dependencies, and committing.
 
-## Documentation
+## Rust
 
-- [Architecture](https://github.com/fswair/vsh/blob/main/docs/ARCHITECTURE.md) — modules, lifecycle, drift detection, persistence
-- [API reference](https://github.com/fswair/vsh/blob/main/docs/API.md) — public Python/MCP surface
-- [Artifacts & execution_reason](https://github.com/fswair/vsh/blob/main/docs/ARTIFACTS.md) — spill store, agent tools, mutation rationale
-- [CodeMode MCP server](https://github.com/fswair/vsh/blob/main/docs/CODEMODE.md) — discovery-first FastMCP server and prompts
+Until the first registry release, use the workspace package directly:
+
+```toml
+[dependencies]
+vsh-runtime = { path = "crates/vsh-sdk", version = "=0.3.0" }
+```
+
+```rust,no_run
+use vsh::{ReceiptDetail, RunMode, RunRequest, Runtime, RuntimeConfig};
+
+fn main() -> Result<(), vsh::VshError> {
+    let runtime = Runtime::open(RuntimeConfig::new("/path/to/workspace"))?;
+    let receipt = runtime.run(
+        RunRequest::new(
+            "from pathlib import Path\nPath('/workspace/output.txt').write_text('ok')",
+        )
+        .with_mode(RunMode::Auto)
+        .with_detail(ReceiptDetail::Full),
+    )?;
+    println!("{:?} {}", receipt.state, receipt.transaction);
+    Ok(())
+}
+```
+
+Production execution expects the matching `vsh-monty-worker` executable. Python
+wheels bundle it; native embedders configure its trusted path through
+`RuntimeConfig::with_worker_path`.
 
 ## MCP
 
-`vsh serve` starts the default FastMCP server.
-
-For **CodeMode-style discovery** (search → schema on demand → simulate → approve → execute), use the dedicated server:
+Install the optional adapter and start the stdio server:
 
 ```bash
-vsh serve-codemode
-# or
-vsh-codemode
+uv add "vbash[mcp]"
+vsh serve
 ```
 
-See [docs/CODEMODE.md](https://github.com/fswair/vsh/blob/main/docs/CODEMODE.md) for the CodeMode inspiration, prompts, and client config examples.
+The server exposes exactly one normal tool, `vsh_run`. A multi-file operation is one
+Monty program, one Rust transaction, one policy decision, and one Python-to-Rust call.
+An auto-approved preview can later be promoted by passing its returned transaction
+handle with `mode="auto"`; VSH revalidates dependencies before any mutation.
 
-Both servers expose the same compact tool surface:
+Auto-approved previews use a bounded process-local fast path and must be promoted by
+the same live `Runtime` (or MCP server process). The exact artifact is made durable
+before reservation and commit. Transactions that require independent approval are
+durable immediately and survive a runtime restart.
 
-- tools: `search`, `get_schema`, `snapshot_workspace`, `simulate`, `approve`, `execute_approved`
-- resources: workspace snapshot/projection, command spec cards, simulation records
+## Security and dependency policy
 
-## pydantic-ai agent
+- External Rust crates are exact-pinned in the workspace manifest and lockfile.
+- Unknown, abandoned, yanked, Git-only, wildcard, and unreviewed crates are rejected.
+- `cargo audit` and `cargo deny` are release gates.
+- The hash-locked optional/development Python graph is a strict `pip-audit` gate.
+- Protected paths are denied before names or bytes enter Monty.
+- Approval binds the exact program, snapshot, read/write dependencies, canonical diff,
+  policy, execution configuration, and intent.
+- The committer is the only host writer and serializes only same-workspace commit
+  revalidation/mutation; independent runtimes do not share a global lock.
+- Process-local preview retention is fail-closed and bounded by both artifact count and
+  encoded bytes; it cannot become an unbounded parent-process cache.
+
+See [the threat model](docs/rust-rewrite/THREAT_MODEL.md),
+[guarantees](docs/rust-rewrite/GUARANTEES.md), and
+[dependency record](docs/rust-rewrite/DEPENDENCY_POLICY.md). Upgrade and benchmark
+details are in the [migration guide](docs/rust-rewrite/MIGRATION.md) and
+[performance record](docs/rust-rewrite/PERFORMANCE.md). Merge coverage scope and floors
+are recorded in the [coverage contract](docs/rust-rewrite/COVERAGE.md). The cross-platform build,
+validation, provenance, and dual-registry order are in the
+[release guide](docs/rust-rewrite/RELEASE.md).
+
+## Documentation
+
+The detailed Rust, Python, MCP, agent, architecture, security, and benchmark guides are
+built with the exactly pinned Zensical toolchain:
 
 ```bash
-cp .env.example .env
-# fill in MODEL_NAME and OPENROUTER_API_KEY
-
-uv run python examples/pydantic_ai_agent_demo.py --mode live
-
-# Artifact spill + execution_reason (live model — set MODEL_NAME in .env)
-uv run python examples/artifact_spill_demo.py
+uv run python scripts/generate_llms_txt.py
+uv run zensical serve
+uv run zensical build --clean --strict
 ```
 
-```python
-from vsh.agent import create_vsh_agent
-
-agent, vsh = create_vsh_agent(os.environ["MODEL_NAME"], "/path/to/workspace")
-result = agent.run_sync("List files safely.", deps=vsh.deps)
-```
-
-## Configuration
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `VSH_DATA_DIR` | `~/.vsh` | JSON persistence directory |
-| `VSH_PERSIST` | `1` | Set `0` to disable disk writes |
-| `VSH_PROTECTED_PATTERNS` | built-in defaults | Comma-separated protected path globs |
-| `VSH_PROTECTED_PATTERNS_FILE` | — | Newline-separated protected globs file |
-| `VSH_MAX_TOUCHED_PATHS` | `500` | Simulation limit for touched paths |
-| `MODEL_NAME` | — | Live agent model id (demo) |
+Start at [`docs/index.md`](docs/index.md). The site includes a VSH-specific dark-red
+design, automatic light/dark palette selection, and a **Copy as Markdown** action on
+every page. It also publishes a compact LLM index at `/llms.txt` and the complete
+Markdown source corpus at `/llms-full.txt`, with navigation pages first; CI verifies
+both generated files are current.
 
 ## Development
 
 ```bash
-ruff check src tests
-ruff format src tests
-ty check
-basedpyright src tests
-pytest tests/
+uv sync --frozen --all-groups --extra mcp
+cargo fmt --all -- --check
+cargo test --workspace --all-targets --locked
+cargo llvm-cov --workspace --all-features --all-targets --locked --summary-only \
+  --ignore-filename-regex '(vsh-python|vsh-worker)' \
+  --fail-under-lines 79 --fail-under-functions 70 --fail-under-regions 81
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+uv run ruff check
+uv run ruff format --check
+uv run pytest \
+  tests/test_native_binding.py tests/test_native_runtime.py tests/test_python_surface.py \
+  --cov=src/vsh --cov-branch --cov-report=term-missing --cov-fail-under=100
+cargo run --release --locked -p vsh-runtime --example native_benchmark -- \
+  --worker "$PWD/.venv/bin/vsh-monty-worker"
 ```
-
-## Performance benchmarks
-
-Compare every vsh command against native shell (5 runs, median + min/max, plots):
-
-```bash
-uv run python playground/benchmark_vsh_vs_native.py
-```
-
-Reports land in `playground/reports/<timestamp>/`. See [playground/README.md](https://github.com/fswair/vsh/blob/main/playground/README.md).
 
 ## License
 

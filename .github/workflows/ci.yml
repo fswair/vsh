@@ -4,26 +4,94 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
 
 jobs:
   quality:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-      - run: uv sync --all-groups
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.1"
+      - run: uv sync --frozen --all-groups --extra mcp
+      - run: >-
+          uv export --quiet --frozen --all-groups --extra mcp
+          --no-emit-project
+          --output-file /tmp/vsh-audit-requirements.txt
+      - run: >-
+          uvx --from pip-audit==2.10.1 pip-audit
+          --requirement /tmp/vsh-audit-requirements.txt
+          --require-hashes
+          --disable-pip
+          --strict
+          --progress-spinner off
       - run: uv run ruff check
       - run: uv run ruff format --check
-      - run: uv run ty check
+      - name: Verify LLM documentation bundles
+        run: uv run python scripts/generate_llms_txt.py --check
+      - name: Build Zensical documentation
+        run: uv run zensical build --clean --strict
+      - run: >-
+          uv run ty check
+          src/vsh/__init__.py
+          src/vsh/_version.py
+          src/vsh/cli.py
+          src/vsh/mcp/__init__.py
+          src/vsh/mcp/codemode_server.py
+          src/vsh/mcp/native_tools.py
+          src/vsh/mcp/prompts.py
+          src/vsh/mcp/server.py
+          src/vsh/mcp/surface.py
+          tests/test_native_binding.py
+          tests/test_native_runtime.py
+          tests/test_python_surface.py
+          benchmarks/native_pyo3.py
+          release/check_versions.py
+          release/smoke_wheel.py
+          release/validate_artifacts.py
       - run: uv run basedpyright
-      - run: uv run pytest
+      - name: Enforce Python release-surface line and branch coverage
+        run: >-
+          uv run pytest
+          tests/test_native_binding.py
+          tests/test_native_runtime.py
+          tests/test_python_surface.py
+          --cov=src/vsh --cov-branch --cov-report=term-missing --cov-fail-under=100
 
-  benchmark:
+  rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-      - run: uv sync --all-groups
-      - run: uv run python playground/benchmark_vsh_vs_native.py --iterations 5 --file-count 50 --no-plots
-      - run: uv run python playground/benchmark_vsh_vs_native.py --iterations 3 --file-count 1000 --file-size 128 --no-plots
-      - run: uv run python playground/benchmark_vsh_vs_native.py --iterations 1 --file-count 10000 --file-size 32 --no-plots --modes native
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.1"
+      - run: >-
+          rustup toolchain install 1.95.0 --profile minimal
+          --component rustfmt,clippy,llvm-tools-preview
+      - run: cargo fmt --all -- --check
+      - run: cargo install cargo-llvm-cov --version 0.9.0 --locked
+      - name: Enforce stable Rust core coverage floors
+        run: >-
+          cargo llvm-cov
+          --workspace --all-features --all-targets --locked --summary-only
+          --ignore-filename-regex '(vsh-python|vsh-worker)'
+          --fail-under-lines 79
+          --fail-under-functions 70
+          --fail-under-regions 81
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
+      - run: cargo install cargo-audit --version 0.22.2 --locked
+      - run: cargo audit --file Cargo.lock
+      - run: cargo install cargo-deny --version 0.20.2 --locked
+      - run: cargo deny --all-features --locked check
+      - run: uv sync --frozen --all-groups --extra mcp
+      - run: uv build
+      - run: >-
+          uv run pytest
+          tests/test_native_binding.py
+          tests/test_native_runtime.py
+          tests/test_python_surface.py
+          -q --no-cov

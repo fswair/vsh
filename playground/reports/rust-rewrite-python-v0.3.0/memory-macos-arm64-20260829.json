@@ -1,0 +1,39 @@
+{
+  "schema": "vsh-driver-peak-rss-v1",
+  "captured_on": "2026-08-29",
+  "environment": {
+    "os": "macOS 26.1 (25B78)",
+    "arch": "arm64",
+    "kernel": "Darwin 25.1.0",
+    "measurement": "/usr/bin/time -l",
+    "scope": "driver process high-water; supervised worker RSS is not summed"
+  },
+  "workload": {
+    "warm_iterations_per_case": 30,
+    "cold_iterations": 10,
+    "parallel_workers": 4,
+    "cases": [
+      "noop",
+      "read_10",
+      "edit_20",
+      "search_10k",
+      "rename_subtree_100",
+      "delete_subtree_100",
+      "massive_delete_5k"
+    ]
+  },
+  "native_rust": {
+    "maximum_resident_set_bytes": 26705920,
+    "peak_memory_footprint_bytes": 21693440,
+    "wall_seconds": 11.91,
+    "user_seconds": 5.33,
+    "system_seconds": 4.99
+  },
+  "cpython_pyo3": {
+    "maximum_resident_set_bytes": 48021504,
+    "peak_memory_footprint_bytes": 36013376,
+    "wall_seconds": 12.38,
+    "user_seconds": 5.46,
+    "system_seconds": 5.06
+  }
+}

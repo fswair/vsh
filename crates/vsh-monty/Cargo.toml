@@ -1,0 +1,25 @@
+[package]
+name = "vsh-monty"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Typed Monty OS-call adapter for the VSH virtual filesystem"
+publish = ["crates-io"]
+
+[dependencies]
+monty.workspace = true
+monty-proto.workspace = true
+monty-types.workspace = true
+vsh-policy.workspace = true
+vsh-types.workspace = true
+vsh-vfs.workspace = true
+
+[dev-dependencies]
+vsh-store.workspace = true
+
+[lints]
+workspace = true
