@@ -5,6 +5,12 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      publish_sdist_only:
+        description: Publish only the Python source distribution (release recovery)
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -36,6 +42,7 @@ jobs:
 
   linux-wheels:
     name: ${{ matrix.platform.id }} / CPython ${{ matrix.python }}
+    if: github.event_name != 'workflow_dispatch' || inputs.publish_sdist_only != true
     needs: metadata
     runs-on: ${{ matrix.platform.runner }}
     strategy:
@@ -93,6 +100,7 @@ jobs:
 
   native-wheels:
     name: ${{ matrix.platform.id }} / CPython ${{ matrix.python }}
+    if: github.event_name != 'workflow_dispatch' || inputs.publish_sdist_only != true
     needs: metadata
     runs-on: ${{ matrix.platform.runner }}
     strategy:
@@ -179,6 +187,7 @@ jobs:
 
   crate-archives:
     name: crates.io source archives
+    if: github.event_name != 'workflow_dispatch' || inputs.publish_sdist_only != true
     needs: metadata
     runs-on: ubuntu-24.04
     steps:
@@ -198,6 +207,7 @@ jobs:
 
   verify-artifacts:
     name: Verify complete release set
+    if: github.event_name != 'workflow_dispatch' || inputs.publish_sdist_only != true
     needs: [metadata, linux-wheels, native-wheels, source-distribution, crate-archives]
     runs-on: ubuntu-24.04
     steps:
@@ -314,3 +324,41 @@ jobs:
           uv publish --trusted-publishing always
           --check-url https://pypi.org/simple/
           release-dist/vbash-*.whl release-dist/vbash-*.tar.gz
+
+  publish-pypi-sdist-only:
+    name: Attest and publish PyPI source distribution
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_sdist_only == true
+    needs: [metadata, source-distribution]
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/project/vbash/
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.1"
+      - name: Download source distribution
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-sdist
+          path: release-dist
+      - name: Validate source distribution
+        run: >-
+          python3 release/validate_artifacts.py release-dist
+          --version "${{ needs.metadata.outputs.version }}"
+          --wheel-count 0 --crate-count 0
+      - name: Attest source distribution
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release-dist/*.tar.gz
+      - name: Publish with PyPI trusted publishing
+        run: >-
+          uv publish --trusted-publishing always
+          --check-url https://pypi.org/simple/
+          release-dist/vbash-*.tar.gz
