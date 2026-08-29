@@ -31,13 +31,13 @@ jobs:
           version: "0.12.1"
           enable-cache: true
       - name: Configure GitHub Pages
-        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
       - name: Verify LLM documentation bundles
         run: python3 scripts/generate_llms_txt.py --check
       - name: Build documentation without the native project
         run: uvx --from zensical==0.0.57 zensical build --clean --strict
       - name: Upload GitHub Pages artifact
-        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
           path: site
 
@@ -51,4 +51,4 @@ jobs:
     steps:
       - name: Deploy documentation
         id: deployment
-        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5
