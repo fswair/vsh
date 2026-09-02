@@ -7,7 +7,7 @@ crossing.
 ## Install and start
 
 ```bash
-uv add 'vbash[mcp]==0.3.0'
+uv add 'vsh-python[mcp]==0.3.1'
 uv run vsh serve
 ```
 

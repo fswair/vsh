@@ -1665,14 +1665,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
+name = "vbash"
+version = "0.3.1"
+dependencies = [
+ "vsh",
+]
+
+[[package]]
 name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "vsh"
+version = "0.3.1"
+dependencies = [
+ "vsh-runtime",
+]
+
+[[package]]
 name = "vsh-commit"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "blake3",
  "cap-fs-ext",
@@ -1685,8 +1699,9 @@ dependencies = [
 
 [[package]]
 name = "vsh-monty"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
+ "get-size2",
  "monty",
  "monty-proto",
  "monty-types",
@@ -1698,7 +1713,7 @@ dependencies = [
 
 [[package]]
 name = "vsh-monty-worker"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "monty",
  "monty-alloc",
@@ -1713,7 +1728,7 @@ dependencies = [
 
 [[package]]
 name = "vsh-policy"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "vsh-store",
  "vsh-types",
@@ -1722,17 +1737,17 @@ dependencies = [
 
 [[package]]
 name = "vsh-python"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "monty-proto",
  "pyo3",
+ "vsh",
  "vsh-monty-worker",
- "vsh-runtime",
 ]
 
 [[package]]
 name = "vsh-runtime"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "postcard",
  "vsh-commit",
@@ -1745,7 +1760,7 @@ dependencies = [
 
 [[package]]
 name = "vsh-store"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "blake3",
  "cap-fs-ext",
@@ -1755,14 +1770,14 @@ dependencies = [
 
 [[package]]
 name = "vsh-types"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "blake3",
 ]
 
 [[package]]
 name = "vsh-vfs"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "vsh-store",
  "vsh-types",

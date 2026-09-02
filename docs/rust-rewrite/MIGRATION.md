@@ -1,8 +1,10 @@
 # Migration from the Python command engine to VSH 0.3 native runtime
 
-The PyPI distribution remains `vbash` and the import package remains `vsh`, but VSH
-0.3 replaces the command-specific Python simulator/executor lifecycle with one native
-transaction API. The built wheel contains no Python fallback engine.
+The primary PyPI distribution is now `vsh-python` and the import package remains `vsh`.
+The old `vbash` distribution is a metadata-only exact-version installer, so existing
+environments retain the same import and CLI without carrying a second implementation.
+VSH 0.3 replaces the command-specific Python simulator/executor lifecycle with one
+native transaction API. The built wheel contains no Python fallback engine.
 
 ## Python API
 
@@ -47,8 +49,9 @@ vsh serve
 
 ## Rust API
 
-Depend on package `vsh-runtime` at the exact release version; its library target is
-named `vsh`. Native deployments also install the matching `vsh-monty-worker` or pass a
+Depend on package `vsh` at the exact release version. `vsh-runtime` remains its
+implementation crate; `vbash` is an exact-version compatibility re-export. Native
+deployments also install the matching `vsh-monty-worker` or pass a
 trusted executable path with `RuntimeConfig::with_worker_path`.
 
 ## Deliberate compatibility breaks

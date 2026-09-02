@@ -1,0 +1,33 @@
+[project]
+name = "vbash"
+version = "0.3.1"
+description = "Compatibility installer for VSH"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "Mert" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+keywords = ["agents", "commands", "mcp", "simulation", "workspaces"]
+dependencies = ["vsh-python==0.3.1"]
+
+[project.optional-dependencies]
+mcp = ["vsh-python[mcp]==0.3.1"]
+
+[project.urls]
+Documentation = "https://fswair.github.io/vsh/"
+Repository = "https://github.com/fswair/vsh"
+
+[build-system]
+requires = ["setuptools==84.0.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = []

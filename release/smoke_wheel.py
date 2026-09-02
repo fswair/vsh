@@ -42,7 +42,7 @@ def main() -> None:
         workspace = Path(raw_workspace)
         exercise_runtime(workspace)
 
-    print(f"vbash {__version__}: rust engine, bundled worker, preview, and commit verified")
+    print(f"vsh-python {__version__}: rust engine, bundled worker, preview, and commit verified")
 
 
 if __name__ == "__main__":

@@ -17,11 +17,11 @@ crate-type = ["cdylib"]
 [dependencies]
 monty-proto = { workspace = true, features = ["python"] }
 pyo3 = { workspace = true, features = ["extension-module", "macros"] }
-vsh-runtime.workspace = true
+vsh.workspace = true
 
 [build-dependencies]
 # Keep the separately installed worker package in Maturin's sdist workspace graph.
-vsh-monty-worker = { path = "../vsh-worker", version = "=0.3.0" }
+vsh-monty-worker = { path = "../vsh-worker", version = "=0.3.1" }
 
 [lints]
 workspace = true

@@ -13,14 +13,16 @@ anything during an ordinary branch build or manual `workflow_dispatch` run.
 - Windows x86_64;
 - one installable sdist containing the complete locked Rust workspace needed to build
   the matching extension and worker;
-- eight crates.io archives, explicitly excluding the non-published PyO3 build crate;
+- one metadata-only `vbash` compatibility wheel and sdist exact-pinned to `vsh-python`;
+- ten crates.io archives, explicitly excluding the non-published PyO3 build crate;
 - a deterministic `SHA256SUMS` manifest.
 
 Every wheel is installed into an empty environment and must complete a real native
 preview and commit using its bundled exact-version worker. The aggregate validator
 rejects a missing platform/Python tag, missing or non-executable worker, missing native
-extension, legacy Python engine path, incomplete sdist workspace, corrupt archive, or
-wrong version before a publish job is eligible.
+extension, legacy Python engine path, incomplete sdist workspace, compatibility package
+code payload, loose/mismatched mirror dependency, corrupt archive, or wrong version
+before a publish job is eligible.
 
 ## Publication authority
 
@@ -28,16 +30,19 @@ Only a pushed `v<project.version>` tag enables publication. A manual workflow ru
 not publish. The tag path requires protected GitHub environments:
 
 - `crates-io` with `CARGO_REGISTRY_TOKEN`;
-- `pypi` configured as a PyPI trusted publisher.
+- `pypi` configured as a PyPI trusted publisher for both `vsh-python` and `vbash`.
 
 The workflow publishes crates in dependency order and waits for every exact version to
-be visible through the crates.io API before publishing its dependents. PyPI publication
-runs only after all eight crates succeed. Python artifacts receive GitHub build
-provenance and are uploaded with uv trusted publishing.
+be visible through the crates.io API before publishing its dependents. `vsh-runtime`
+precedes `vsh`, and `vsh` precedes the compatibility crate `vbash`. PyPI publication
+runs only after all ten crates succeed; `vsh-python` is published before the empty
+`vbash` compatibility distribution. Python artifacts receive GitHub build provenance
+and are uploaded with uv trusted publishing.
 
 Before the first irreversible tag, recheck registry ownership/availability and review
-the release environments. The intended crate names were unclaimed when checked during
-implementation, but that observation is not permanent.
+the release environments. The `vsh`, `vbash`, and `vsh-runtime` crate handles were
+owned by the project account when checked on 2026-09-02, but registry state is not a
+permanent build-time assumption.
 
 ## Pinned build supply chain
 

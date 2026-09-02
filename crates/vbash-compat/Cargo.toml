@@ -1,0 +1,23 @@
+[package]
+name = "vbash"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Compatibility alias that mirrors the matching vsh release"
+keywords = ["agents", "sandbox", "simulation", "workspace"]
+categories = ["development-tools"]
+publish = ["crates-io"]
+
+[lib]
+name = "vsh"
+doc = false
+
+[dependencies]
+vsh-primary = { package = "vsh", path = "../vsh", version = "=0.3.1" }
+
+[lints]
+workspace = true

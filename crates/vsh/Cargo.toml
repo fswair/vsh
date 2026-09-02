@@ -1,0 +1,19 @@
+[package]
+name = "vsh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Low-latency transactional filesystem simulation and execution for agents"
+keywords = ["agents", "sandbox", "simulation", "workspace"]
+categories = ["development-tools"]
+publish = ["crates-io"]
+
+[dependencies]
+vsh-runtime-core = { package = "vsh-runtime", path = "../vbash", version = "=0.3.1" }
+
+[lints]
+workspace = true

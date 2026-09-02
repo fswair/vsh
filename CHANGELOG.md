@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Promoted `vsh` to the primary crates.io facade while retaining `vsh-runtime` as the
+  implementation crate.
+- Renamed the native PyPI distribution to `vsh-python`; the import package and CLI
+  remain `vsh`.
+- Converted both `vbash` registry handles into exact-version compatibility mirrors:
+  crates.io re-exports `vsh`, while PyPI contains metadata only and installs
+  `vsh-python`.
+- Advanced the lockstep release version to `0.3.1` because PyPI release files are
+  immutable and the published `vbash==0.3.0` payload cannot be replaced.
+
 ### Added
 
 - Protected workspace path policy (`VSH_PROTECTED_PATTERNS`, `VSH_PROTECTED_PATTERNS_FILE`)
@@ -16,6 +28,8 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Fresh crates.io consumers now retain the Monty-compatible `get-size2 =0.10.1`
+  resolution instead of selecting the incompatible 0.10.3/Ruff combination.
 - `vsh_list` now rejects workspace escapes (`/`, `..`, paths outside the root) during simulation
 - Execution layer enforces workspace boundaries via `ExecutionContext.resolve_within_workspace`
 

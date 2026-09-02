@@ -1,6 +1,6 @@
 # Rust dependency policy and initial admission record
 
-Checked: 2026-08-29
+Checked: 2026-09-02
 
 ## Admission gate
 
@@ -37,6 +37,7 @@ not accepted.
 | `cap-fs-ext` | `=4.0.3` | Bytecode Alliance | stable Windows by-handle identity for `cap-std` metadata | Official same-release extension; Windows-only edge; only `std`, defaults disabled; same accepted license family as `cap-std`. |
 | `postcard` | `=1.1.3` | postcard project | exact Monty result in durable approval artifact | Stable/non-yanked latest; direct edge enables only `alloc`; MIT/Apache-2.0. |
 | Maturin | `==1.15.0` | PyO3 | wheel build/publish | Build tool, not runtime dependency. |
+| Setuptools | `==84.0.0` | Python Packaging Authority | metadata-only `vbash` compatibility wheel/sdist | Build-only; no OSV match for 84.0.0 when checked 2026-09-02. |
 | cargo-audit | `=0.22.2` | RustSec ecosystem | advisory gate | Install/run with `--locked`. |
 | cargo-deny | `=0.20.2` | Embark ecosystem | source/license/advisory gate | Install/run with `--locked`. |
 | cargo-llvm-cov | `=0.9.0` | taiki-e | stable Rust line/function/region coverage gate | Active immutable upstream release; CI-only tool installed with its published lockfile. |
@@ -48,7 +49,9 @@ Published metadata and advisory sources reported no known vulnerability for Matu
 claim that any dependency is intrinsically safe and not a substitute for auditing the
 resolved Cargo.lock on every build.
 
-The core Python wheel has no pure-Python runtime dependency. The optional MCP adapter
+The core Python wheel has no pure-Python runtime dependency. The metadata-only
+`vbash` compatibility distribution exact-pins `vsh-python` and uses current,
+exact-pinned Setuptools only as its isolated build backend. The optional MCP adapter
 pins the actively maintained stable `fastmcp==3.4.7`; it is not imported by `vsh` or
 the native SDK path. Maturin remains exact-pinned at `1.15.0` in both the build system
 and developer environment. Zensical is exact-pinned at `0.0.57` only in the developer
@@ -117,7 +120,7 @@ the official protocol types, `monty-alloc`, and `std` supervision.
 ```bash
 cargo test --workspace --all-targets --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo doc --workspace --all-features --no-deps --locked
+cargo doc --workspace --all-features --no-deps --locked --exclude vsh-runtime
 cargo audit
 cargo deny --all-features --locked check
 cargo tree --duplicates --locked
@@ -138,19 +141,23 @@ uvx --from pip-audit==2.10.1 pip-audit --version
 
 ## Current resolved graph result
 
-The current lockfile contains nine workspace packages and 224 registry package
+The current lockfile contains eleven workspace packages and 224 registry package
 entries. The direct external runtime dependencies are `monty =0.0.21`,
 `monty-types =0.0.21`, `monty-proto =0.0.21`, `monty-alloc =0.0.21`, `pyo3 =0.29.2`,
-`blake3 =1.8.7`, `cap-std =4.0.3`, `cap-fs-ext =4.0.3` (Windows only), and
-`postcard =1.1.3`; the rest are exact lockfile resolutions of those dependencies.
-Checks on 2026-08-29 refreshed 1,226 RustSec advisories and scanned all 233 lockfile
+`blake3 =1.8.7`, `cap-std =4.0.3`, `cap-fs-ext =4.0.3` (Windows only),
+`postcard =1.1.3`, and the `get-size2 =0.10.1` compatibility guard; the rest are
+exact lockfile resolutions of those dependencies. The guard is carried by
+`vsh-monty` because a fresh downstream lock otherwise selects `get-size2 0.10.3`,
+whose `compact-str 0.10` integration is incompatible with Monty 0.0.21's Ruff 0.0.3
+graph on `compact-str 0.9`.
+Checks on 2026-09-02 refreshed 1,239 RustSec advisories and scanned all 235 lockfile
 packages after worker admission. `cargo audit` found no known vulnerability or yanked
 package. In particular, neither `chacha20` nor `monty-type-checking` is present. Exact
 registry metadata was refreshed for every new direct pin.
 The same lockfile passed cargo-deny 0.20.2 with all workspace features across the
 configured supported-target matrix: advisories, bans, licenses, and sources all pass.
 The hash-locked Python export, including the optional MCP, development, and Zensical
-documentation graphs, passed pip-audit 2.10.1 in strict mode on 2026-08-29 with no
+documentation graphs, passed pip-audit 2.10.1 in strict mode on 2026-09-02 with no
 known vulnerabilities.
 
 The supported target matrix (`aarch64`/`x86_64` macOS, `aarch64`/`x86_64` Linux, and
@@ -197,25 +204,25 @@ Cargo.toml.
 ## VSH registry packages
 
 The same-workspace VSH packages are project-owned code, not admitted third-party
-dependencies. On 2026-08-28 the official crates.io API returned `404` for
-`vsh-types`, `vsh-store`, `vsh-vfs`, `vsh-policy`, `vsh-commit`, `vsh-monty`,
-`vsh-runtime`, and `vsh-monty-worker`; registry ownership must still be rechecked at
-the irreversible first publish. Each manifest permits only `crates-io` publication,
-and every inter-package requirement is the exact lockstep version `=0.3.0`.
+dependencies. On 2026-09-02 the crates.io owner API identified `fswair` as owner of
+the transferred `vsh` and `vbash` handles as well as the already published `vsh-*`
+graph. Each manifest permits only `crates-io` publication, and every inter-package
+requirement is the exact lockstep version `=0.3.1`.
 
 The intended first-publish order is:
 
 ```text
 vsh-types → vsh-store → vsh-vfs → vsh-policy
-          → vsh-commit + vsh-monty → vsh-runtime → vsh-monty-worker
+          → vsh-commit + vsh-monty → vsh-runtime → vsh → vbash
+                                                └→ vsh-monty-worker
 ```
 
 `cargo package --workspace --exclude vsh-python --offline --no-verify --locked` produces
-all eight registry source archives. The explicit exclusion matters because Cargo 1.95
+all ten registry source archives. The explicit exclusion matters because Cargo 1.95
 also packages a `publish = false` workspace member when a whole workspace is selected.
 Cargo 1.95.0 verifies the dependency-free `vsh-types` archive, then its temporary
 multi-package registry currently stops with Cargo's internal `no hash listed for
-vsh-types 0.3.0` error. Dependent dry-runs therefore become executable only in the
+vsh-types 0.3.1` error. Dependent dry-runs therefore become executable only in the
 normal publish order after each predecessor exists in crates.io; this is not waived and
 does not authorize publishing without an explicit release action.
 

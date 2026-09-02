@@ -59,6 +59,15 @@ jobs:
           release/smoke_wheel.py
           release/validate_artifacts.py
       - run: uv run basedpyright
+      - name: Verify lockstep registry package identities
+        run: python3 release/check_versions.py
+      - name: Build and validate metadata-only vbash compatibility distributions
+        run: |
+          RELEASE_VERSION="$(python3 release/check_versions.py)"
+          uv build --clear --out-dir /tmp/vbash-compat-dist compat/vbash
+          python3 release/validate_artifacts.py /tmp/vbash-compat-dist \
+            --version "$RELEASE_VERSION" --wheel-count 0 --crate-count 0 \
+            --python-surface compat
       - name: Enforce Python release-surface line and branch coverage
         run: >-
           uv run pytest
@@ -78,6 +87,10 @@ jobs:
           rustup toolchain install 1.95.0 --profile minimal
           --component rustfmt,clippy,llvm-tools-preview
       - run: cargo fmt --all -- --check
+      - name: Verify a fresh downstream vbash resolution and vsh import
+        run: >-
+          CARGO_TARGET_DIR=target/consumer-smoke cargo check
+          --manifest-path release/rust-consumer-smoke/Cargo.toml
       - run: cargo install cargo-llvm-cov --version 0.9.0 --locked
       - name: Enforce stable Rust core coverage floors
         run: >-
@@ -88,7 +101,9 @@ jobs:
           --fail-under-functions 70
           --fail-under-regions 81
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
+      - run: >-
+          RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features
+          --no-deps --locked --exclude vsh-runtime
       - run: cargo install cargo-audit --version 0.22.2 --locked
       - run: cargo audit --file Cargo.lock
       - run: cargo install cargo-deny --version 0.20.2 --locked

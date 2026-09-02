@@ -72,13 +72,13 @@ virtual state and binds the resulting artifact to what was actually observed.
 
 - **1.3–16.5 µs:** estimated incremental PyO3 p50 in post-hardening cases.
 - **4.15× / 4.20×:** four-runtime native / Python throughput speedup.
-- **134 + 38 tests:** Rust and shipped-Python tests in the merge record.
+- **135 + 41 tests:** Rust and shipped-Python tests in the merge record.
 
 ## One semantic core, two SDKs
 
-Python does not reimplement simulation or commit semantics. The `vbash` wheel exposes
-the native runtime through PyO3 and bundles the matching supervised Monty worker. Rust
-embedders use the `vsh-runtime` crate directly. Both produce the same transaction,
+Python does not reimplement simulation or commit semantics. The `vsh-python` wheel
+exposes the native runtime through PyO3 and bundles the matching supervised Monty
+worker. Rust embedders use the `vsh` crate. Both produce the same transaction,
 snapshot, diff, decision, state transition, and commit proof.
 
 === "Python"
@@ -170,33 +170,37 @@ it executes the whole program and returns evidence, but it never changes host fi
 
 === "Python"
 
-    The distribution is named `vbash`; the import package and CLI are named `vsh`.
+    The distribution is named `vsh-python`; the import package and CLI are named `vsh`.
 
     ```bash
-    uv add vbash==0.3.0
+    uv add vsh-python==0.3.1
     ```
 
     ```bash
-    python -m pip install vbash==0.3.0
+    python -m pip install vsh-python==0.3.1
     ```
 
 === "MCP"
 
     ```bash
-    uv add 'vbash[mcp]==0.3.0'
+    uv add 'vsh-python[mcp]==0.3.1'
     uv run vsh serve
     ```
 
-=== "Rust workspace"
-
-    Until the first crates.io publication, consume the checked-out crate directly:
+=== "Rust"
 
     ```toml
     [dependencies]
-    vsh-runtime = { path = "crates/vbash", version = "=0.3.0" }
+    vsh = "=0.3.1"
     ```
 
-    The Cargo package is `vsh-runtime`; its library target is imported as `vsh`.
+    `vsh-runtime` remains the implementation crate; applications use the `vsh` facade.
+
+!!! note "Legacy installer names"
+
+    `vbash==0.3.1` on PyPI installs exactly `vsh-python==0.3.1` and contains no
+    modules. The crates.io `vbash = "=0.3.1"` crate similarly re-exports exactly
+    `vsh = "=0.3.1"`. New dependency declarations should use the primary names above.
 
 ## First preview
 
@@ -704,24 +708,28 @@ configuration cannot be silently promoted under another.
 
 Canonical URL: https://fswair.github.io/vsh/python/
 
-The `vbash` distribution is a native Python package: its public `vsh` module is backed
+The `vsh-python` distribution is a native Python package: its public `vsh` module is backed
 by a PyO3 extension linked to the same Rust runtime used by native callers. There is no
 Python simulator fallback.
 
 ## Install
 
 ```bash
-uv add vbash==0.3.0
+uv add vsh-python==0.3.1
 ```
 
 For the optional MCP adapter:
 
 ```bash
-uv add 'vbash[mcp]==0.3.0'
+uv add 'vsh-python[mcp]==0.3.1'
 ```
 
 Supported interpreters are CPython 3.11, 3.12, 3.13, and 3.14. Release wheels bundle
 the exact `vsh-monty-worker` that matches the extension.
+
+The legacy `vbash==0.3.1` distribution is a metadata-only compatibility installer.
+It has no import package of its own and exact-pins `vsh-python==0.3.1`; `import vsh`
+therefore remains unchanged.
 
 ## Minimal transaction
 
@@ -829,7 +837,7 @@ assert normalize_path("src/vsh/./core/../lib.rs") == "src/vsh/lib.rs"
 
 ### `__version__: str`
 
-The Python distribution, extension, Rust workspace, and worker share version `0.3.0`.
+The Python distribution, extension, Rust workspace, and worker share version `0.3.1`.
 
 ## `RunMode`
 
@@ -1230,25 +1238,21 @@ auto-approved artifacts belong to the runtime that created them.
 
 Canonical URL: https://fswair.github.io/vsh/rust/
 
-`vsh-runtime` is the native facade crate. Its library target is named `vsh`, so Rust
-code imports `use vsh::...`. It owns the same runtime called by Python through PyO3.
+`vsh` is the application-facing native crate. It re-exports the implementation from
+`vsh-runtime`, which is also called by Python through PyO3.
 
 ## Add the crate
 
-Before the first registry publication, use the workspace package:
+Keep the exact version pin required by the project supply-chain policy:
 
 ```toml
 [dependencies]
-vsh-runtime = { path = "crates/vbash", version = "=0.3.0" }
+vsh = "=0.3.1"
 ```
 
-After registry publication, keep the exact version pin required by the project supply
-chain policy:
-
-```toml
-[dependencies]
-vsh-runtime = "=0.3.0"
-```
+The compatibility crate `vbash = "=0.3.1"` contains no implementation and re-exports
+the exact matching `vsh` release under the same `use vsh::...` library name. New
+applications should depend on `vsh` directly.
 
 The default production configuration expects a matching trusted
 `vsh-monty-worker` executable. Put it on `PATH` or set an explicit path.
@@ -1325,7 +1329,7 @@ Continue with the [Rust API reference](api.md), [crate map](crates.md), or
 
 Canonical URL: https://fswair.github.io/vsh/rust/api/
 
-This page documents the application-facing `vsh-runtime` facade. Rustdoc remains the
+This page documents the application-facing `vsh` facade. Rustdoc remains the
 exhaustive source for every re-exported lower-level field and error variant.
 
 ## Constants and diagnostics
@@ -1507,11 +1511,13 @@ single-writer architecture and is not recommended.
 Canonical URL: https://fswair.github.io/vsh/rust/crates/
 
 The workspace is split by authority and change rate. Applications normally depend only
-on `vsh-runtime`; the other crates make boundaries auditable and publishable.
+on `vsh`; the other crates make boundaries auditable and publishable.
 
 | Cargo package | Library/binary | Responsibility |
 |---|---|---|
-| `vsh-runtime` | `vsh` | Public native SDK and orchestration facade |
+| `vsh` | `vsh` | Primary public SDK handle; re-exports the runtime facade |
+| `vbash` | `vsh` | Implementation-free compatibility re-export of exact-version `vsh` |
+| `vsh-runtime` | `vsh` | Native orchestration implementation behind `vsh` |
 | `vsh-types` | `vsh_types` | Paths, digests, node state, transaction IDs and lifecycle |
 | `vsh-vfs` | `vsh_vfs` | Immutable snapshots and copy-on-write virtual effects |
 | `vsh-policy` | `vsh_policy` | Protected capabilities, deterministic decision and risk manifests |
@@ -1519,7 +1525,7 @@ on `vsh-runtime`; the other crates make boundaries auditable and publishable.
 | `vsh-store` | `vsh_store` | Immutable blobs, approvals, and atomic transaction state |
 | `vsh-commit` | `vsh_commit` | Revalidation, journaled mutation, verification, and recovery |
 | `vsh-monty-worker` | binary | Exact-version crash-isolated guest execution process |
-| `vsh-python` | `vsh._native` | Non-published PyO3 adapter used by the `vbash` wheel |
+| `vsh-python` | `vsh._native` | Non-published PyO3 adapter used by the `vsh-python` wheel |
 
 ## Dependency direction
 
@@ -1533,6 +1539,8 @@ vsh-monty ── vsh-commit
        \       /
         vsh-runtime
              |
+            vsh ── vbash compatibility crate
+             |
           vsh-python
 ```
 
@@ -1542,18 +1550,19 @@ host mutation.
 
 ## Which crate should I depend on?
 
-- **Application or agent host:** `vsh-runtime`.
-- **Custom receipt/state tooling:** prefer types re-exported by `vsh-runtime` before
+- **Application or agent host:** `vsh`.
+- **Custom receipt/state tooling:** prefer types re-exported by `vsh` before
   adding a direct lower-level dependency.
 - **Alternative deterministic policy:** `vsh-policy` types are already re-exported.
 - **Worker packaging:** ship the exact matching `vsh-monty-worker` binary; do not mix
   worker/runtime versions.
-- **Python extension:** consume `vbash`; do not depend on `vsh-python` from crates.io
+- **Python extension:** consume `vsh-python` from PyPI; do not depend on the Cargo
+  package `vsh-python` from crates.io
   because it is intentionally not published as a standalone crate.
 
 ## Version and supply-chain contract
 
-All workspace packages share version `0.3.0`, Rust 1.95.0, edition 2024, and Apache-2.0.
+All workspace packages share version `0.3.1`, Rust 1.95.0, edition 2024, and Apache-2.0.
 Direct external crates are exact-pinned, the lockfile is committed, workspace crates
 forbid unsafe code, and CI runs RustSec plus license/source/duplicate policy checks.
 
@@ -1566,7 +1575,7 @@ See the [dependency admission policy](../rust-rewrite/DEPENDENCY_POLICY.md) and
 
 Canonical URL: https://fswair.github.io/vsh/rust/examples/
 
-The examples below use the `vsh` library target from the `vsh-runtime` package.
+The examples below use the application-facing `vsh` crate.
 
 ## Preview and inspect
 
@@ -1668,7 +1677,7 @@ use vsh::{Runtime, RuntimeConfig};
 
 let config = RuntimeConfig::new("/srv/workspaces/job-17")
     .with_data_directory("/srv/vsh-state/job-17")
-    .with_worker_path("/opt/vsh/0.3.0/vsh-monty-worker")
+    .with_worker_path("/opt/vsh/0.3.1/vsh-monty-worker")
     .with_max_idle_workers(8);
 let runtime = Runtime::open(config)?;
 ```
@@ -1706,7 +1715,7 @@ crossing.
 ## Install and start
 
 ```bash
-uv add 'vbash[mcp]==0.3.0'
+uv add 'vsh-python[mcp]==0.3.1'
 uv run vsh serve
 ```
 
@@ -2039,8 +2048,9 @@ tool, pass bounded data into VSH, and keep filesystem mutation inside the transa
 
 Canonical URL: https://fswair.github.io/vsh/ARCHITECTURE/
 
-VSH is a transactional filesystem simulator with one Rust semantic core. Native Rust,
-Python/PyO3, CLI, and MCP all enter the same `vsh-runtime` facade.
+VSH is a transactional filesystem simulator with one Rust semantic core. Native Rust
+enters through the `vsh` facade; Python/PyO3, CLI, and MCP reach the same
+`vsh-runtime` implementation.
 
 ## System shape
 
@@ -2132,7 +2142,9 @@ recoverable. Adapters cannot implement alternate writers.
 | `vsh-monty` | Guest protocol, worker supervision, values, and budgets |
 | `vsh-store` | Immutable blobs, approval grants, and atomic records |
 | `vsh-commit` | Revalidation, host mutation, verification, recovery |
-| `vsh-runtime` | Public orchestration facade and receipts |
+| `vsh` | Primary public SDK facade |
+| `vbash` | Implementation-free compatibility re-export of `vsh` |
+| `vsh-runtime` | Orchestration implementation and receipts |
 | `vsh-python` | Thin PyO3 conversion/error boundary |
 | `vsh-monty-worker` | Exact-version crash-isolated execution binary |
 
@@ -2446,7 +2458,7 @@ cargo llvm-cov \
   --fail-under-functions 70 \
   --fail-under-regions 81
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked --exclude vsh-runtime
 ```
 
 ## Security and release gates
@@ -2621,7 +2633,7 @@ are recorded for large-payload cases.
 
 Canonical URL: https://fswair.github.io/vsh/rust-rewrite/DEPENDENCY_POLICY/
 
-Checked: 2026-08-29
+Checked: 2026-09-02
 
 ## Admission gate
 
@@ -2658,6 +2670,7 @@ not accepted.
 | `cap-fs-ext` | `=4.0.3` | Bytecode Alliance | stable Windows by-handle identity for `cap-std` metadata | Official same-release extension; Windows-only edge; only `std`, defaults disabled; same accepted license family as `cap-std`. |
 | `postcard` | `=1.1.3` | postcard project | exact Monty result in durable approval artifact | Stable/non-yanked latest; direct edge enables only `alloc`; MIT/Apache-2.0. |
 | Maturin | `==1.15.0` | PyO3 | wheel build/publish | Build tool, not runtime dependency. |
+| Setuptools | `==84.0.0` | Python Packaging Authority | metadata-only `vbash` compatibility wheel/sdist | Build-only; no OSV match for 84.0.0 when checked 2026-09-02. |
 | cargo-audit | `=0.22.2` | RustSec ecosystem | advisory gate | Install/run with `--locked`. |
 | cargo-deny | `=0.20.2` | Embark ecosystem | source/license/advisory gate | Install/run with `--locked`. |
 | cargo-llvm-cov | `=0.9.0` | taiki-e | stable Rust line/function/region coverage gate | Active immutable upstream release; CI-only tool installed with its published lockfile. |
@@ -2669,7 +2682,9 @@ Published metadata and advisory sources reported no known vulnerability for Matu
 claim that any dependency is intrinsically safe and not a substitute for auditing the
 resolved Cargo.lock on every build.
 
-The core Python wheel has no pure-Python runtime dependency. The optional MCP adapter
+The core Python wheel has no pure-Python runtime dependency. The metadata-only
+`vbash` compatibility distribution exact-pins `vsh-python` and uses current,
+exact-pinned Setuptools only as its isolated build backend. The optional MCP adapter
 pins the actively maintained stable `fastmcp==3.4.7`; it is not imported by `vsh` or
 the native SDK path. Maturin remains exact-pinned at `1.15.0` in both the build system
 and developer environment. Zensical is exact-pinned at `0.0.57` only in the developer
@@ -2738,7 +2753,7 @@ the official protocol types, `monty-alloc`, and `std` supervision.
 ```bash
 cargo test --workspace --all-targets --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo doc --workspace --all-features --no-deps --locked
+cargo doc --workspace --all-features --no-deps --locked --exclude vsh-runtime
 cargo audit
 cargo deny --all-features --locked check
 cargo tree --duplicates --locked
@@ -2759,19 +2774,23 @@ uvx --from pip-audit==2.10.1 pip-audit --version
 
 ## Current resolved graph result
 
-The current lockfile contains nine workspace packages and 224 registry package
+The current lockfile contains eleven workspace packages and 224 registry package
 entries. The direct external runtime dependencies are `monty =0.0.21`,
 `monty-types =0.0.21`, `monty-proto =0.0.21`, `monty-alloc =0.0.21`, `pyo3 =0.29.2`,
-`blake3 =1.8.7`, `cap-std =4.0.3`, `cap-fs-ext =4.0.3` (Windows only), and
-`postcard =1.1.3`; the rest are exact lockfile resolutions of those dependencies.
-Checks on 2026-08-29 refreshed 1,226 RustSec advisories and scanned all 233 lockfile
+`blake3 =1.8.7`, `cap-std =4.0.3`, `cap-fs-ext =4.0.3` (Windows only),
+`postcard =1.1.3`, and the `get-size2 =0.10.1` compatibility guard; the rest are
+exact lockfile resolutions of those dependencies. The guard is carried by
+`vsh-monty` because a fresh downstream lock otherwise selects `get-size2 0.10.3`,
+whose `compact-str 0.10` integration is incompatible with Monty 0.0.21's Ruff 0.0.3
+graph on `compact-str 0.9`.
+Checks on 2026-09-02 refreshed 1,239 RustSec advisories and scanned all 235 lockfile
 packages after worker admission. `cargo audit` found no known vulnerability or yanked
 package. In particular, neither `chacha20` nor `monty-type-checking` is present. Exact
 registry metadata was refreshed for every new direct pin.
 The same lockfile passed cargo-deny 0.20.2 with all workspace features across the
 configured supported-target matrix: advisories, bans, licenses, and sources all pass.
 The hash-locked Python export, including the optional MCP, development, and Zensical
-documentation graphs, passed pip-audit 2.10.1 in strict mode on 2026-08-29 with no
+documentation graphs, passed pip-audit 2.10.1 in strict mode on 2026-09-02 with no
 known vulnerabilities.
 
 The supported target matrix (`aarch64`/`x86_64` macOS, `aarch64`/`x86_64` Linux, and
@@ -2818,25 +2837,25 @@ Cargo.toml.
 ## VSH registry packages
 
 The same-workspace VSH packages are project-owned code, not admitted third-party
-dependencies. On 2026-08-28 the official crates.io API returned `404` for
-`vsh-types`, `vsh-store`, `vsh-vfs`, `vsh-policy`, `vsh-commit`, `vsh-monty`,
-`vsh-runtime`, and `vsh-monty-worker`; registry ownership must still be rechecked at
-the irreversible first publish. Each manifest permits only `crates-io` publication,
-and every inter-package requirement is the exact lockstep version `=0.3.0`.
+dependencies. On 2026-09-02 the crates.io owner API identified `fswair` as owner of
+the transferred `vsh` and `vbash` handles as well as the already published `vsh-*`
+graph. Each manifest permits only `crates-io` publication, and every inter-package
+requirement is the exact lockstep version `=0.3.1`.
 
 The intended first-publish order is:
 
 ```text
 vsh-types → vsh-store → vsh-vfs → vsh-policy
-          → vsh-commit + vsh-monty → vsh-runtime → vsh-monty-worker
+          → vsh-commit + vsh-monty → vsh-runtime → vsh → vbash
+                                                └→ vsh-monty-worker
 ```
 
 `cargo package --workspace --exclude vsh-python --offline --no-verify --locked` produces
-all eight registry source archives. The explicit exclusion matters because Cargo 1.95
+all ten registry source archives. The explicit exclusion matters because Cargo 1.95
 also packages a `publish = false` workspace member when a whole workspace is selected.
 Cargo 1.95.0 verifies the dependency-free `vsh-types` archive, then its temporary
 multi-package registry currently stops with Cargo's internal `no hash listed for
-vsh-types 0.3.0` error. Dependent dry-runs therefore become executable only in the
+vsh-types 0.3.1` error. Dependent dry-runs therefore become executable only in the
 normal publish order after each predecessor exists in crates.io; this is not waived and
 does not authorize publishing without an explicit release action.
 
@@ -3052,7 +3071,7 @@ Controls:
 
 Canonical URL: https://fswair.github.io/vsh/rust-rewrite/COVERAGE/
 
-Captured: 2026-08-29
+Captured: 2026-09-02
 
 Coverage is a merge gate, not an inferred property of the test count. Python and Rust
 use separate measurements because the CPython extension and supervised worker cross
@@ -3071,7 +3090,7 @@ uv run pytest \
   --cov=src/vsh --cov-branch --cov-report=term-missing --cov-fail-under=100
 ```
 
-Current result: 38 tests, 179 statements, 40 branches, 100% line and 100% branch
+Current result: 41 tests, 179 statements, 40 branches, 100% line and 100% branch
 coverage.
 
 `pyproject.toml` omits only code that Maturin excludes from the wheel, plus the static
@@ -3097,13 +3116,13 @@ Current stable-toolchain core result:
 
 | Metric | Measured | Merge floor |
 |---|---:|---:|
-| Lines | 80.52% | 79% |
-| Functions | 71.78% | 70% |
-| Regions | 82.53% | 81% |
+| Lines | 80.54% | 79% |
+| Functions | 71.88% | 70% |
+| Regions | 82.55% | 81% |
 
-The measurement executed 134 Rust tests. The ignore expression affects the threshold
+The measurement executed 135 Rust tests. The ignore expression affects the threshold
 report, not test execution. `vsh-python`
-is loaded and exercised by the 38 Python/PyO3 tests. `vsh-worker` is exercised through
+is loaded and exercised by the 41 Python/PyO3 tests. `vsh-worker` is exercised through
 eight real subprocess protocol/isolation tests. Both report zero when measured only by
 the parent `cargo test` profile because they execute in a CPython runtime or a child
 process; counting those zeros as untested Rust core would misstate both boundaries.
@@ -3133,9 +3152,11 @@ an evidence-backed plan change and review.
 
 Canonical URL: https://fswair.github.io/vsh/rust-rewrite/MIGRATION/
 
-The PyPI distribution remains `vbash` and the import package remains `vsh`, but VSH
-0.3 replaces the command-specific Python simulator/executor lifecycle with one native
-transaction API. The built wheel contains no Python fallback engine.
+The primary PyPI distribution is now `vsh-python` and the import package remains `vsh`.
+The old `vbash` distribution is a metadata-only exact-version installer, so existing
+environments retain the same import and CLI without carrying a second implementation.
+VSH 0.3 replaces the command-specific Python simulator/executor lifecycle with one
+native transaction API. The built wheel contains no Python fallback engine.
 
 ## Python API
 
@@ -3180,8 +3201,9 @@ vsh serve
 
 ## Rust API
 
-Depend on package `vsh-runtime` at the exact release version; its library target is
-named `vsh`. Native deployments also install the matching `vsh-monty-worker` or pass a
+Depend on package `vsh` at the exact release version. `vsh-runtime` remains its
+implementation crate; `vbash` is an exact-version compatibility re-export. Native
+deployments also install the matching `vsh-monty-worker` or pass a
 trusted executable path with `RuntimeConfig::with_worker_path`.
 
 ## Deliberate compatibility breaks
@@ -3213,14 +3235,16 @@ anything during an ordinary branch build or manual `workflow_dispatch` run.
 - Windows x86_64;
 - one installable sdist containing the complete locked Rust workspace needed to build
   the matching extension and worker;
-- eight crates.io archives, explicitly excluding the non-published PyO3 build crate;
+- one metadata-only `vbash` compatibility wheel and sdist exact-pinned to `vsh-python`;
+- ten crates.io archives, explicitly excluding the non-published PyO3 build crate;
 - a deterministic `SHA256SUMS` manifest.
 
 Every wheel is installed into an empty environment and must complete a real native
 preview and commit using its bundled exact-version worker. The aggregate validator
 rejects a missing platform/Python tag, missing or non-executable worker, missing native
-extension, legacy Python engine path, incomplete sdist workspace, corrupt archive, or
-wrong version before a publish job is eligible.
+extension, legacy Python engine path, incomplete sdist workspace, compatibility package
+code payload, loose/mismatched mirror dependency, corrupt archive, or wrong version
+before a publish job is eligible.
 
 ## Publication authority
 
@@ -3228,16 +3252,19 @@ Only a pushed `v<project.version>` tag enables publication. A manual workflow ru
 not publish. The tag path requires protected GitHub environments:
 
 - `crates-io` with `CARGO_REGISTRY_TOKEN`;
-- `pypi` configured as a PyPI trusted publisher.
+- `pypi` configured as a PyPI trusted publisher for both `vsh-python` and `vbash`.
 
 The workflow publishes crates in dependency order and waits for every exact version to
-be visible through the crates.io API before publishing its dependents. PyPI publication
-runs only after all eight crates succeed. Python artifacts receive GitHub build
-provenance and are uploaded with uv trusted publishing.
+be visible through the crates.io API before publishing its dependents. `vsh-runtime`
+precedes `vsh`, and `vsh` precedes the compatibility crate `vbash`. PyPI publication
+runs only after all ten crates succeed; `vsh-python` is published before the empty
+`vbash` compatibility distribution. Python artifacts receive GitHub build provenance
+and are uploaded with uv trusted publishing.
 
 Before the first irreversible tag, recheck registry ownership/availability and review
-the release environments. The intended crate names were unclaimed when checked during
-implementation, but that observation is not permanent.
+the release environments. The `vsh`, `vbash`, and `vsh-runtime` crate handles were
+owned by the project account when checked on 2026-09-02, but registry state is not a
+permanent build-time assumption.
 
 ## Pinned build supply chain
 
@@ -3257,24 +3284,24 @@ No registry publication was performed while implementing the rewrite.
 
 Canonical URL: https://fswair.github.io/vsh/rust-rewrite/PLAN_VALIDATION/
 
-Validated: 2026-08-29\
+Validated: 2026-09-02\
 Scope: current working tree against `plans/vsh_rust_rewrite_dual_sdk.md`
 
 ## Requirement matrix
 
 | Plan requirement | Result | Evidence |
 |---|---|---|
-| One semantic core for Rust and Python | Satisfied locally | `vsh-runtime` owns the facade; `vsh._native` is a thin PyO3 adapter. The shipped Python surface contains no simulator, policy, transaction state machine, or committer fallback. |
-| Native crates.io SDK plus PyPI SDK | Satisfied locally | Eight publishable crate archives and one CPython 3.14 wheel/sdist build locally; the wheel installs in an empty environment and performs a bundled-worker preview and real commit. |
-| Exact, reviewed, active dependencies | Satisfied for the supported target graph | Direct Rust dependencies are exact-pinned, `Cargo.lock`/`uv.lock` are frozen, 1,226 RustSec advisories were refreshed, `cargo-deny 0.20.2` passes advisories/bans/licenses/sources, and strict hash-locked `pip-audit 2.10.1` reports no vulnerability. The documented embedded-only `atomic-polyfill` lock entry is not selected by any supported target. |
+| One semantic core for Rust and Python | Satisfied locally | `vsh-runtime` owns the implementation behind the public `vsh` facade; `vsh._native` is a thin PyO3 adapter. The shipped Python surface contains no simulator, policy, transaction state machine, or committer fallback. |
+| Native crates.io SDK plus PyPI SDK | Satisfied locally | Ten publishable crate archives, the `vsh-python` native wheel/sdist, and metadata-only `vbash` compatibility artifacts build locally; the native wheel installs in an empty environment and performs a bundled-worker preview and real commit. |
+| Exact, reviewed, active dependencies | Satisfied for the supported target graph | Direct Rust dependencies are exact-pinned, `Cargo.lock`/`uv.lock` are frozen, and a fresh downstream `vbash` graph compiles with the exact Monty-compatible `get-size2 =0.10.1` guard. 1,239 RustSec advisories were refreshed, `cargo-deny 0.20.2` passes advisories/bans/licenses/sources, and strict hash-locked `pip-audit 2.10.1` reports no vulnerability. The documented embedded-only `atomic-polyfill` lock entry is not selected by any supported target. |
 | Capability-rooted complete mediation | Satisfied locally | Workspace, `.vsh-runtime`, data, blob, transaction, stage, quarantine, plan, journal, marker, and coordination handles are identity checked. Workspace/data overlap, canonical aliases, internal symlinks, root/runtime relocation, and parent swaps fail closed. |
 | Zero host effects during simulation | Satisfied locally | Monty runs in a supervised exact-version worker with no host mount. Filesystem calls map to `VirtualFs`; protected and absolute host paths are denied before bytes enter the worker. |
 | Bounded latency and memory surfaces | Satisfied for implemented paths | Program, OS calls, per-call/total I/O, events, frames, output, result, exception, paths, directory entries, snapshot nodes/depth/bytes, artifacts, state log, journal, plan, conflicts, and preview cache have hard bounds. Blob and host content verification stream or read through an explicit ceiling. |
 | Deterministic durable state and single-use commit | Satisfied locally | Exact transaction binding, CAS lifecycle edges, reservation consumption, approval expiry, checksummed append log, two-slot compaction, durable intent/completion witnesses, post-commit verification, and recovery are exercised. Preflight failures after reservation end in `Failed`; complete checksum-corrupt frames never roll state backward. |
 | Concurrency and crash recovery | Satisfied locally | Same-workspace commits serialize only revalidation/mutation; independent runtimes scale in parallel. Every injected durable commit boundary recovers to the original or committed state, and ambiguous ownership remains untouched. |
 | Safe and low-overhead PyO3 boundary | Satisfied locally | Native calls release the GIL, including runtime open/recovery; panics are caught before crossing FFI; errors share `VshRuntimeError`; results use Monty's typed converter rather than JSON. The final 100-sample validation estimates 1.3–16.5 microseconds distinguishable incremental PyO3 p50. |
-| Coverage is an enforced merge signal | Satisfied locally | 134 Rust tests measure 80.52% lines, 71.78% functions, and 82.53% regions; CI floors are raised to 79/70/81. The 38 shipped-Python tests retain 100% line and branch coverage. See `COVERAGE.md` for boundary rationale. |
-| Reproducible release workflow | Implemented; hosted execution outstanding | Versions agree at 0.3.0, actions/tools are immutable or exact-pinned, local archives validate, and ordinary/manual workflows cannot publish. The 20-wheel hosted matrix, provenance, protected environments, registry visibility waits, and actual publication require GitHub/registry authority. |
+| Coverage is an enforced merge signal | Satisfied locally | 135 Rust tests measure 80.54% lines, 71.88% functions, and 82.55% regions; CI floors are 79/70/81. The 41 shipped-Python tests retain 100% line and branch coverage. See `COVERAGE.md` for boundary rationale. |
+| Reproducible release workflow | Implemented; hosted execution outstanding | Versions agree at 0.3.1, actions/tools are immutable or exact-pinned, mirror packages are exact-version and payload-checked, local archives validate, and ordinary/manual workflows cannot publish. The 20-wheel hosted matrix, provenance, protected environments, registry visibility waits, and actual publication require GitHub/registry authority. |
 | Dual-SDK documentation and agent integration | Satisfied locally | Zensical 0.0.57 builds 35 source pages in strict mode. Rust and Python APIs are separated; architecture, examples, use cases, benchmarks, security, MCP, and agent workflows are covered. Every page exposes its exact source through Copy as Markdown and supports automatic light/dark themes. `/llms.txt` indexes and `/llms-full.txt` concatenates all 35 Markdown sources. |
 
 ## Findings resolved during validation
@@ -3297,10 +3324,11 @@ No new runtime dependency was introduced for these fixes, and workspace Rust cra
 ## Local gate record
 
 - `cargo fmt --all -- --check`: pass.
+- Fresh downstream `vbash` resolution and `use vsh::...` compile smoke: pass.
 - `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`: pass.
-- `cargo llvm-cov --workspace --all-features --all-targets --locked ...`: 134/134 tests pass; 80.52/71.78/82.53 coverage.
-- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked`: pass.
-- PyO3/Python release-surface tests: 38/38 pass; 100% line and branch coverage.
+- `cargo llvm-cov --workspace --all-features --all-targets --locked ...`: 135/135 tests pass; 80.54/71.88/82.55 coverage.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked --exclude vsh-runtime`: pass.
+- PyO3/Python release-surface tests: 41/41 pass; 100% line and branch coverage.
 - Ruff format/lint, ty, and basedpyright: pass.
 - `cargo audit`: no known vulnerability or yanked package; one documented non-selected embedded-target maintenance warning.
 - `cargo deny --all-features --locked check`: advisories, bans, licenses, and sources pass.
@@ -3308,7 +3336,7 @@ No new runtime dependency was introduced for these fixes, and workspace Rust cra
 - `zensical build --clean --strict`: 35/35 Markdown sources build; all 35 source-backed pages derive their exact Markdown URL and load the dark-red light/dark theme plus Copy as Markdown asset.
 - `scripts/generate_llms_txt.py --check`: the compact index and 35-page full corpus are deterministic and current; both are copied unchanged to the site root.
 - Documentation examples: all 20 Python code blocks pass syntax compilation; custom JavaScript passes `node --check`.
-- Local CPython 3.14 wheel, sdist, and eight crate archives: structure validation passes; isolated wheel preview/commit smoke passes.
+- Local CPython 3.14 wheel, sdist, metadata-only compatibility pair, and ten crate archives: structure validation passes; isolated wheel preview/commit smoke passes.
 - Paired 100-sample native/PyO3 benchmark plus 30 cold starts: binding overhead and independent-runtime scaling budgets pass; raw JSON and Markdown are retained under `playground/reports/rust-rewrite-python-v0.3.0/`.
 
 ## Remaining gates
@@ -3336,9 +3364,9 @@ surfaces.
 
 | Surface | Package | Reference |
 |---|---|---|
-| Python | PyPI distribution `vbash`, import `vsh` | [Python API](python/api.md) |
-| Rust | Cargo package `vsh-runtime`, library `vsh` | [Rust API](rust/api.md) |
-| MCP | `vbash[mcp]`, stdio tool `vsh_run` | [MCP server](integrations/mcp.md) |
+| Python | PyPI distribution `vsh-python`, import `vsh` | [Python API](python/api.md) |
+| Rust | Cargo package and library `vsh` | [Rust API](rust/api.md) |
+| MCP | `vsh-python[mcp]`, stdio tool `vsh_run` | [MCP server](integrations/mcp.md) |
 
 Python is a thin PyO3 adapter; simulation, policy, transaction state, commit, and
 recovery do not have a parallel Python implementation. See the

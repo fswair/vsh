@@ -63,7 +63,7 @@ cargo llvm-cov \
   --fail-under-functions 70 \
   --fail-under-regions 81
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked --exclude vsh-runtime
 ```
 
 ## Security and release gates

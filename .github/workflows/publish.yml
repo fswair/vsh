@@ -185,6 +185,34 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
+  vbash-compatibility:
+    name: Empty vbash compatibility distributions
+    if: github.event_name != 'workflow_dispatch' || inputs.publish_sdist_only != true
+    needs: metadata
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.1"
+          enable-cache: true
+      - name: Build metadata-only wheel and source distribution
+        run: uv build --clear --out-dir dist compat/vbash
+      - name: Verify empty payload and exact mirrored dependency
+        run: >-
+          python3 release/validate_artifacts.py dist
+          --version "${{ needs.metadata.outputs.version }}"
+          --wheel-count 0 --crate-count 0 --python-surface compat
+      - name: Upload compatibility distributions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-vbash-compat
+          path: |
+            dist/vbash-*.whl
+            dist/vbash-*.tar.gz
+          if-no-files-found: error
+
   crate-archives:
     name: crates.io source archives
     if: github.event_name != 'workflow_dispatch' || inputs.publish_sdist_only != true
@@ -208,7 +236,8 @@ jobs:
   verify-artifacts:
     name: Verify complete release set
     if: github.event_name != 'workflow_dispatch' || inputs.publish_sdist_only != true
-    needs: [metadata, linux-wheels, native-wheels, source-distribution, crate-archives]
+    needs:
+      [metadata, linux-wheels, native-wheels, source-distribution, vbash-compatibility, crate-archives]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -222,7 +251,7 @@ jobs:
         run: >-
           python3 release/validate_artifacts.py release-dist
           --version "${{ needs.metadata.outputs.version }}"
-          --wheel-count 20 --crate-count 8
+          --wheel-count 20 --crate-count 10 --python-surface both --require-full-matrix
       - name: Upload verified manifest
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -277,16 +306,18 @@ jobs:
           publish_and_wait vsh-commit
           publish_and_wait vsh-monty
           publish_and_wait vsh-runtime
+          publish_and_wait vsh
+          publish_and_wait vbash
           publish_and_wait vsh-monty-worker
 
   publish-pypi:
-    name: Attest and publish PyPI matrix
+    name: Attest and publish vsh-python matrix
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [metadata, verify-artifacts, publish-crates]
     runs-on: ubuntu-24.04
     environment:
       name: pypi
-      url: https://pypi.org/project/vbash/
+      url: https://pypi.org/project/vsh-python/
     permissions:
       attestations: write
       contents: read
@@ -312,13 +343,67 @@ jobs:
         run: >-
           python3 release/validate_artifacts.py release-dist
           --version "${{ needs.metadata.outputs.version }}"
-          --wheel-count 20 --crate-count 0
+          --wheel-count 20 --crate-count 0 --require-full-matrix
       - name: Attest Python distributions
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             release-dist/*.whl
             release-dist/*.tar.gz
+      - name: Publish with PyPI trusted publishing
+        run: >-
+          uv publish --trusted-publishing always
+          --check-url https://pypi.org/simple/
+          release-dist/vsh_python-*.whl release-dist/vsh_python-*.tar.gz
+
+  publish-vbash-pypi:
+    name: Publish empty vbash compatibility distributions
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [metadata, vbash-compatibility, publish-pypi]
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/project/vbash/
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.1"
+      - name: Download compatibility distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-vbash-compat
+          path: release-dist
+      - name: Revalidate empty compatibility payload
+        run: >-
+          python3 release/validate_artifacts.py release-dist
+          --version "${{ needs.metadata.outputs.version }}"
+          --wheel-count 0 --crate-count 0 --python-surface compat
+      - name: Wait for exact vsh-python dependency visibility
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          for _ in $(seq 1 30); do
+            if curl --fail --silent --show-error \
+              "https://pypi.org/pypi/vsh-python/${RELEASE_VERSION}/json" >/dev/null; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "timed out waiting for vsh-python ${RELEASE_VERSION}" >&2
+          exit 1
+      - name: Attest compatibility distributions
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            release-dist/vbash-*.whl
+            release-dist/vbash-*.tar.gz
       - name: Publish with PyPI trusted publishing
         run: >-
           uv publish --trusted-publishing always
@@ -332,7 +417,7 @@ jobs:
     runs-on: ubuntu-24.04
     environment:
       name: pypi
-      url: https://pypi.org/project/vbash/
+      url: https://pypi.org/project/vsh-python/
     permissions:
       attestations: write
       contents: read
@@ -361,4 +446,4 @@ jobs:
         run: >-
           uv publish --trusted-publishing always
           --check-url https://pypi.org/simple/
-          release-dist/vbash-*.tar.gz
+          release-dist/vsh_python-*.tar.gz

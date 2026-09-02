@@ -28,13 +28,13 @@ virtual state and binds the resulting artifact to what was actually observed.
 
 - **1.3–16.5 µs:** estimated incremental PyO3 p50 in post-hardening cases.
 - **4.15× / 4.20×:** four-runtime native / Python throughput speedup.
-- **134 + 38 tests:** Rust and shipped-Python tests in the merge record.
+- **135 + 41 tests:** Rust and shipped-Python tests in the merge record.
 
 ## One semantic core, two SDKs
 
-Python does not reimplement simulation or commit semantics. The `vbash` wheel exposes
-the native runtime through PyO3 and bundles the matching supervised Monty worker. Rust
-embedders use the `vsh-runtime` crate directly. Both produce the same transaction,
+Python does not reimplement simulation or commit semantics. The `vsh-python` wheel
+exposes the native runtime through PyO3 and bundles the matching supervised Monty
+worker. Rust embedders use the `vsh` crate. Both produce the same transaction,
 snapshot, diff, decision, state transition, and commit proof.
 
 === "Python"

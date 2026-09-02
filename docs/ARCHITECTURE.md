@@ -1,7 +1,8 @@
 # Architecture
 
-VSH is a transactional filesystem simulator with one Rust semantic core. Native Rust,
-Python/PyO3, CLI, and MCP all enter the same `vsh-runtime` facade.
+VSH is a transactional filesystem simulator with one Rust semantic core. Native Rust
+enters through the `vsh` facade; Python/PyO3, CLI, and MCP reach the same
+`vsh-runtime` implementation.
 
 ## System shape
 
@@ -93,7 +94,9 @@ recoverable. Adapters cannot implement alternate writers.
 | `vsh-monty` | Guest protocol, worker supervision, values, and budgets |
 | `vsh-store` | Immutable blobs, approval grants, and atomic records |
 | `vsh-commit` | Revalidation, host mutation, verification, recovery |
-| `vsh-runtime` | Public orchestration facade and receipts |
+| `vsh` | Primary public SDK facade |
+| `vbash` | Implementation-free compatibility re-export of `vsh` |
+| `vsh-runtime` | Orchestration implementation and receipts |
 | `vsh-python` | Thin PyO3 conversion/error boundary |
 | `vsh-monty-worker` | Exact-version crash-isolated execution binary |
 

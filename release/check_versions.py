@@ -10,6 +10,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RUST_PACKAGES = {
+    "vbash",
+    "vsh",
     "vsh-commit",
     "vsh-monty",
     "vsh-monty-worker",
@@ -20,15 +22,53 @@ RUST_PACKAGES = {
     "vsh-types",
     "vsh-vfs",
 }
+COMPAT_PYPROJECT = ROOT / "compat" / "vbash" / "pyproject.toml"
+MONTY_RESOLUTION_GUARD = {"version": "=0.10.1", "default-features": False}
 
 
 def project_version() -> str:
     with (ROOT / "pyproject.toml").open("rb") as stream:
         document = tomllib.load(stream)
+    if document["project"]["name"] != "vsh-python":
+        raise RuntimeError("the primary Python distribution must be named vsh-python")
     value = document["project"]["version"]
     if not isinstance(value, str):
         raise TypeError("project.version must be a string")
     return value
+
+
+def check_python_compatibility_package(version: str) -> None:
+    """Require the empty vbash installer to mirror this exact VSH release."""
+    with COMPAT_PYPROJECT.open("rb") as stream:
+        document = tomllib.load(stream)
+    project = document["project"]
+    if project["name"] != "vbash":
+        raise RuntimeError("the compatibility Python distribution must be named vbash")
+    if project["version"] != version:
+        raise RuntimeError(
+            f"vbash Python version {project['version']} does not match vsh-python {version}"
+        )
+    expected = f"vsh-python=={version}"
+    if project.get("dependencies") != [expected]:
+        raise RuntimeError(f"vbash must depend on exactly {expected}")
+    expected_mcp = f"vsh-python[mcp]=={version}"
+    if project.get("optional-dependencies", {}).get("mcp") != [expected_mcp]:
+        raise RuntimeError(f"vbash[mcp] must depend on exactly {expected_mcp}")
+
+
+def check_rust_resolution_guard() -> None:
+    """Keep fresh downstream Cargo resolutions on Monty's compatible get-size2."""
+    with (ROOT / "Cargo.toml").open("rb") as stream:
+        workspace = tomllib.load(stream)
+    observed = workspace["workspace"]["dependencies"].get("get-size2")
+    if observed != MONTY_RESOLUTION_GUARD:
+        raise RuntimeError(
+            f"workspace get-size2 guard must be {MONTY_RESOLUTION_GUARD}, got {observed}"
+        )
+    with (ROOT / "crates" / "vsh-monty" / "Cargo.toml").open("rb") as stream:
+        adapter = tomllib.load(stream)
+    if adapter["dependencies"].get("get-size2") != {"workspace": True}:
+        raise RuntimeError("vsh-monty must carry the workspace get-size2 resolution guard")
 
 
 def cargo_versions() -> dict[str, str]:
@@ -50,6 +90,8 @@ def cargo_versions() -> dict[str, str]:
 
 def check(tag: str | None) -> str:
     version = project_version()
+    check_python_compatibility_package(version)
+    check_rust_resolution_guard()
     observed = cargo_versions()
     if set(observed) != RUST_PACKAGES:
         missing = sorted(RUST_PACKAGES - set(observed))

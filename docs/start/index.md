@@ -15,33 +15,37 @@ it executes the whole program and returns evidence, but it never changes host fi
 
 === "Python"
 
-    The distribution is named `vbash`; the import package and CLI are named `vsh`.
+    The distribution is named `vsh-python`; the import package and CLI are named `vsh`.
 
     ```bash
-    uv add vbash==0.3.0
+    uv add vsh-python==0.3.1
     ```
 
     ```bash
-    python -m pip install vbash==0.3.0
+    python -m pip install vsh-python==0.3.1
     ```
 
 === "MCP"
 
     ```bash
-    uv add 'vbash[mcp]==0.3.0'
+    uv add 'vsh-python[mcp]==0.3.1'
     uv run vsh serve
     ```
 
-=== "Rust workspace"
-
-    Until the first crates.io publication, consume the checked-out crate directly:
+=== "Rust"
 
     ```toml
     [dependencies]
-    vsh-runtime = { path = "crates/vbash", version = "=0.3.0" }
+    vsh = "=0.3.1"
     ```
 
-    The Cargo package is `vsh-runtime`; its library target is imported as `vsh`.
+    `vsh-runtime` remains the implementation crate; applications use the `vsh` facade.
+
+!!! note "Legacy installer names"
+
+    `vbash==0.3.1` on PyPI installs exactly `vsh-python==0.3.1` and contains no
+    modules. The crates.io `vbash = "=0.3.1"` crate similarly re-exports exactly
+    `vsh = "=0.3.1"`. New dependency declarations should use the primary names above.
 
 ## First preview
 

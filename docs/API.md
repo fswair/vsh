@@ -7,9 +7,9 @@ surfaces.
 
 | Surface | Package | Reference |
 |---|---|---|
-| Python | PyPI distribution `vbash`, import `vsh` | [Python API](python/api.md) |
-| Rust | Cargo package `vsh-runtime`, library `vsh` | [Rust API](rust/api.md) |
-| MCP | `vbash[mcp]`, stdio tool `vsh_run` | [MCP server](integrations/mcp.md) |
+| Python | PyPI distribution `vsh-python`, import `vsh` | [Python API](python/api.md) |
+| Rust | Cargo package and library `vsh` | [Rust API](rust/api.md) |
+| MCP | `vsh-python[mcp]`, stdio tool `vsh_run` | [MCP server](integrations/mcp.md) |
 
 Python is a thin PyO3 adapter; simulation, policy, transaction state, commit, and
 recovery do not have a parallel Python implementation. See the

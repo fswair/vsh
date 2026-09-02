@@ -24,7 +24,7 @@ assert normalize_path("src/vsh/./core/../lib.rs") == "src/vsh/lib.rs"
 
 ### `__version__: str`
 
-The Python distribution, extension, Rust workspace, and worker share version `0.3.0`.
+The Python distribution, extension, Rust workspace, and worker share version `0.3.1`.
 
 ## `RunMode`
 

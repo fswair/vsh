@@ -1,6 +1,6 @@
 [project]
-name = "vbash"
-version = "0.3.0"
+name = "vsh-python"
+version = "0.3.1"
 description = "VSH is a low-latency transactional filesystem simulator backed by Rust."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -26,6 +26,7 @@ dev = [
     "pytest",
     "pytest-cov",
     "ruff",
+    "setuptools==84.0.0",
     "ty",
     "zensical==0.0.57",
 ]
@@ -37,6 +38,7 @@ dev = [
     "pytest",
     "pytest-cov",
     "ruff",
+    "setuptools==84.0.0",
     "ty",
     "zensical==0.0.57",
 ]

@@ -1,24 +1,20 @@
 # Rust SDK
 
-`vsh-runtime` is the native facade crate. Its library target is named `vsh`, so Rust
-code imports `use vsh::...`. It owns the same runtime called by Python through PyO3.
+`vsh` is the application-facing native crate. It re-exports the implementation from
+`vsh-runtime`, which is also called by Python through PyO3.
 
 ## Add the crate
 
-Before the first registry publication, use the workspace package:
+Keep the exact version pin required by the project supply-chain policy:
 
 ```toml
 [dependencies]
-vsh-runtime = { path = "crates/vbash", version = "=0.3.0" }
+vsh = "=0.3.1"
 ```
 
-After registry publication, keep the exact version pin required by the project supply
-chain policy:
-
-```toml
-[dependencies]
-vsh-runtime = "=0.3.0"
-```
+The compatibility crate `vbash = "=0.3.1"` contains no implementation and re-exports
+the exact matching `vsh` release under the same `use vsh::...` library name. New
+applications should depend on `vsh` directly.
 
 The default production configuration expects a matching trusted
 `vsh-monty-worker` executable. Put it on `PATH` or set an explicit path.

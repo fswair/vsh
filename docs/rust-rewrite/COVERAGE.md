@@ -1,6 +1,6 @@
 # VSH merge coverage contract
 
-Captured: 2026-08-29
+Captured: 2026-09-02
 
 Coverage is a merge gate, not an inferred property of the test count. Python and Rust
 use separate measurements because the CPython extension and supervised worker cross
@@ -19,7 +19,7 @@ uv run pytest \
   --cov=src/vsh --cov-branch --cov-report=term-missing --cov-fail-under=100
 ```
 
-Current result: 38 tests, 179 statements, 40 branches, 100% line and 100% branch
+Current result: 41 tests, 179 statements, 40 branches, 100% line and 100% branch
 coverage.
 
 `pyproject.toml` omits only code that Maturin excludes from the wheel, plus the static
@@ -45,13 +45,13 @@ Current stable-toolchain core result:
 
 | Metric | Measured | Merge floor |
 |---|---:|---:|
-| Lines | 80.52% | 79% |
-| Functions | 71.78% | 70% |
-| Regions | 82.53% | 81% |
+| Lines | 80.54% | 79% |
+| Functions | 71.88% | 70% |
+| Regions | 82.55% | 81% |
 
-The measurement executed 134 Rust tests. The ignore expression affects the threshold
+The measurement executed 135 Rust tests. The ignore expression affects the threshold
 report, not test execution. `vsh-python`
-is loaded and exercised by the 38 Python/PyO3 tests. `vsh-worker` is exercised through
+is loaded and exercised by the 41 Python/PyO3 tests. `vsh-worker` is exercised through
 eight real subprocess protocol/isolation tests. Both report zero when measured only by
 the parent `cargo test` profile because they execute in a CPython runtime or a child
 process; counting those zeros as untested Rust core would misstate both boundaries.

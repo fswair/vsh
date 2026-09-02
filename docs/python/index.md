@@ -1,23 +1,27 @@
 # Python SDK
 
-The `vbash` distribution is a native Python package: its public `vsh` module is backed
+The `vsh-python` distribution is a native Python package: its public `vsh` module is backed
 by a PyO3 extension linked to the same Rust runtime used by native callers. There is no
 Python simulator fallback.
 
 ## Install
 
 ```bash
-uv add vbash==0.3.0
+uv add vsh-python==0.3.1
 ```
 
 For the optional MCP adapter:
 
 ```bash
-uv add 'vbash[mcp]==0.3.0'
+uv add 'vsh-python[mcp]==0.3.1'
 ```
 
 Supported interpreters are CPython 3.11, 3.12, 3.13, and 3.14. Release wheels bundle
 the exact `vsh-monty-worker` that matches the extension.
+
+The legacy `vbash==0.3.1` distribution is a metadata-only compatibility installer.
+It has no import package of its own and exact-pins `vsh-python==0.3.1`; `import vsh`
+therefore remains unchanged.
 
 ## Minimal transaction
 

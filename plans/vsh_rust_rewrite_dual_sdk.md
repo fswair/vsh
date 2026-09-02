@@ -16,7 +16,7 @@ that document remain authoritative unless this document strengthens them.
 |---|---|---|
 | 0–3 | Implemented | The corrected Python baseline candidate, immutable VFS, canonical diff, and supervised Monty 0.0.21 worker are recorded under `docs/rust-rewrite/`; freezing the candidate as a clean tag still requires explicit release authority. |
 | 4–7 | Implemented | Protected-read policy, exact durable approvals, single-use recovery-aware committer, race/fault tests, same-workspace commit coordination, pinned workspace/runtime identities, bounded recovery reads, and fail-closed internal symlink handling are in Rust. |
-| 8 | Implemented | `vsh-runtime` facade and `vsh._native` PyO3 surface share version `0.3.0`; Python result compatibility is checked before persistence/commit, blocking native work releases the GIL, and panics map into one catchable Python exception hierarchy. |
+| 8 | Implemented | The `vsh` public facade, `vsh-runtime` implementation, and `vsh._native` PyO3 surface share one version; Python result compatibility is checked before persistence/commit, blocking native work releases the GIL, and panics map into one catchable Python exception hierarchy. |
 | 9 | Implemented | The optional FastMCP adapter exposes only `vsh_run`; preview promotion reuses the exact native transaction. |
 | 10 | In progress | Paired native-Rust and PyO3 fat-LTO evidence closes preview-fsync and full-path snapshot metadata bottlenecks; the final post-hardening 100-sample rerun keeps distinguishable incremental PyO3 p50 at 1.3–16.5 µs, covers search over 10k files, 100-file rename/delete subtrees, a 5,050-node delete, 30 cold starts, and independent-runtime scaling. Equivalent clean frozen-baseline, supported-platform/worker-tree RSS, and adversarial performance runs remain release gates. |
 | 11 | In progress | Isolated CPython 3.14 wheel and sdist install/import/commit, all eight registry crate archives, Rust advisory/license/source gates, the hash-locked Python CVE scan, 100% shipped-Python line/branch coverage, and Rust core coverage of 80.52% lines / 71.78% functions / 82.53% regions pass locally. A SHA-pinned build-only rehearsal plus gated 20-wheel dual-registry/provenance workflow is implemented; executing the hosted platform matrix and publishing still require CI environments, credentials, and an explicit release tag. |
@@ -90,14 +90,16 @@ The intended release train contains:
 
 | Surface | Registry | Role |
 |---|---|---|
-| `vsh-runtime` package, `vsh` library target | crates.io | Native Rust SDK/facade |
-| `vbash` distribution, `vsh` import package | PyPI | PyO3-backed Python SDK and CLI |
+| `vsh` | crates.io | Primary native Rust SDK/facade |
+| `vsh-python`, `vsh` import package | PyPI | PyO3-backed Python SDK and CLI |
+| `vbash` | both | Implementation-free exact-version compatibility mirrors |
 
-The crates.io name `vsh` is already occupied by an unrelated `0.0.0` package. The
-public package therefore uses the provisional registry name `vsh-runtime` and exports
-the Rust library target as `vsh`. Registry ownership must be verified again before the
-first publish. The Python distribution identity remains `vbash`, while Python imports
-remain `vsh`.
+The historical crates.io `vsh` and `vbash` handles were transferred to the project and
+verified under the `fswair` owner on 2026-09-02. `vsh-runtime` remains the implementation
+crate while `vsh` is the stable application-facing facade. PyPI uses `vsh-python`
+because the `vsh` distribution is unavailable; Python imports remain `vsh`. The old
+`vbash` names exact-pin and mirror the matching primary package version without owning
+another implementation.
 
 Internal workspace crates started with `publish = false`. Packaging evidence selected
 the following release shape before crates.io release:
@@ -136,9 +138,12 @@ vsh/
 │   ├── vsh-monty/       # typed Monty OS-call adapter and worker lifecycle
 │   ├── vsh-policy/      # call policy, transaction policy, judge contract
 │   ├── vsh-commit/      # revalidation, journal, recovery, verification
-│   ├── vbash/           # orchestration + `vsh-runtime` public native facade
+│   ├── vbash/           # orchestration implementation (`vsh-runtime`)
+│   ├── vsh/             # primary public Rust facade
+│   ├── vbash-compat/    # exact-version compatibility re-export of `vsh`
 │   ├── vsh-python/      # PyO3 extension (`vsh._native`), crates.io publish disabled
 │   └── vsh-worker/      # bounded, crash-isolated Monty worker executable
+├── compat/vbash/        # metadata-only PyPI compatibility installer
 ├── src/vsh/             # thin Python package, stubs, CLI, optional MCP adapter
 ├── tests/
 │   ├── adversarial/
@@ -154,8 +159,8 @@ Dependency direction:
 ```text
 vsh-types → vsh-store → vsh-vfs → vsh-policy
      \           \          \          \
-      └────────── vsh-commit + vsh-monty ─→ vbash (`vsh-runtime`)
-                                             └→ vsh-python → Python MCP adapter
+      └────────── vsh-commit + vsh-monty ─→ vsh-runtime ─→ vsh ─→ vbash
+                                                    └─────→ vsh-python → Python MCP adapter
 
 Monty crates → vsh-worker (separate supervised process; no core back-edge)
 ```
@@ -165,7 +170,7 @@ No core crate depends on PyO3, MCP, Click, Pydantic, or another adapter framewor
 The current requirement-by-requirement verification, resolved hardening findings, and
 remaining external release gates are recorded in
 `docs/rust-rewrite/PLAN_VALIDATION.md`.
-`vsh-python` depends inward on the `vbash` facade directory; the facade never depends
+`vsh-python` depends inward on the `vsh` facade; neither facade nor runtime depends
 outward on Python.
 
 ## 5. Native Rust API
@@ -529,7 +534,7 @@ measurement is explicitly marked with a reason and owner.
 Implement:
 
 - pinned Rust 1.95 toolchain and workspace policy,
-- `vsh-types`, `vsh-store` skeleton, `vbash`, and `vsh-python`,
+- `vsh-types`, `vsh-store` skeleton, `vsh-runtime`, `vsh`, and `vsh-python`,
 - VPath, BlobId, SnapshotId, TransactionId, TransactionState, and error model,
 - checksummed, bounded two-slot file store using `std`; a database dependency is
   admitted only if cross-process contention/compaction evidence requires it,

@@ -11,6 +11,10 @@ description = "Typed Monty OS-call adapter for the VSH virtual filesystem"
 publish = ["crates-io"]
 
 [dependencies]
+# Monty 0.0.21's Ruff graph accepts get-size2 0.10.0+, but 0.10.3 switches
+# its compact-str integration to 0.10 while Ruff still uses 0.9. Keep fresh
+# downstream resolutions on the last compatible release until Monty updates.
+get-size2.workspace = true
 monty.workspace = true
 monty-proto.workspace = true
 monty-types.workspace = true

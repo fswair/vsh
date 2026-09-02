@@ -2,8 +2,8 @@
 
 VSH is one low-latency transactional filesystem simulator with two SDK surfaces:
 
-- native Rust through the `vsh-runtime` package (`vsh` library target),
-- Python through the `vbash` PyPI distribution and `vsh` import package.
+- native Rust through the `vsh` crate, backed by `vsh-runtime`,
+- Python through the `vsh-python` PyPI distribution and `vsh` import package.
 
 Both surfaces execute the same Rust pipeline. Python is a thin PyO3 binding; it does
 not contain a fallback simulator or committer.
@@ -21,7 +21,7 @@ network, or ambient environment capability.
 Install the wheel:
 
 ```bash
-uv add vbash
+uv add vsh-python
 ```
 
 Run one complete transaction. `PREVIEW` guarantees that host files are unchanged;
@@ -52,11 +52,9 @@ evaluating policy, revalidating dependencies, and committing.
 
 ## Rust
 
-Until the first registry release, use the workspace package directly:
-
 ```toml
 [dependencies]
-vsh-runtime = { path = "crates/vbash", version = "=0.3.0" }
+vsh = "=0.3.1"
 ```
 
 ```rust,no_run
@@ -85,7 +83,7 @@ wheels bundle it; native embedders configure its trusted path through
 Install the optional adapter and start the stdio server:
 
 ```bash
-uv add "vbash[mcp]"
+uv add "vsh-python[mcp]"
 vsh serve
 ```
 
@@ -121,6 +119,13 @@ details are in the [migration guide](docs/rust-rewrite/MIGRATION.md) and
 are recorded in the [coverage contract](docs/rust-rewrite/COVERAGE.md). The cross-platform build,
 validation, provenance, and dual-registry order are in the
 [release guide](docs/rust-rewrite/RELEASE.md).
+
+## Compatibility handles
+
+Existing declarations may continue to install `vbash==0.3.1` from PyPI or depend on
+`vbash = "=0.3.1"` from crates.io. Both packages are implementation-free mirrors of
+the exact matching VSH release. New projects should use `vsh-python` and `vsh`
+directly; Python code continues to write `import vsh` either way.
 
 ## Documentation
 

@@ -1,6 +1,6 @@
 # Rust API reference
 
-This page documents the application-facing `vsh-runtime` facade. Rustdoc remains the
+This page documents the application-facing `vsh` facade. Rustdoc remains the
 exhaustive source for every re-exported lower-level field and error variant.
 
 ## Constants and diagnostics

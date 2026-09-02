@@ -1,6 +1,6 @@
 # Rust examples
 
-The examples below use the `vsh` library target from the `vsh-runtime` package.
+The examples below use the application-facing `vsh` crate.
 
 ## Preview and inspect
 
@@ -102,7 +102,7 @@ use vsh::{Runtime, RuntimeConfig};
 
 let config = RuntimeConfig::new("/srv/workspaces/job-17")
     .with_data_directory("/srv/vsh-state/job-17")
-    .with_worker_path("/opt/vsh/0.3.0/vsh-monty-worker")
+    .with_worker_path("/opt/vsh/0.3.1/vsh-monty-worker")
     .with_max_idle_workers(8);
 let runtime = Runtime::open(config)?;
 ```

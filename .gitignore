@@ -12,6 +12,8 @@ build/
 # Rust
 /target/
 *.profraw
+/release/rust-consumer-smoke/Cargo.lock
+/release/rust-consumer-smoke/target/
 /python-data/scripts/vsh-monty-worker
 /python-data/scripts/vsh-monty-worker.exe
 
