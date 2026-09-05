@@ -10,7 +10,7 @@ use crate::child::{HandleOutcome, ProtocolChild, Sink, fatal_error_event, protoc
 
 mod child;
 
-const MONTY_VERSION: &str = "0.0.21";
+const MONTY_VERSION: &str = "0.0.22";
 const EX_PROTOCOL: u8 = 76;
 
 #[global_allocator]

@@ -293,6 +293,10 @@ fn search_ten_thousand_program() -> &'static str {
     )
 }
 
+fn glob_ten_thousand_with_vsh_program() -> &'static str {
+    "len(vsh_glob('**/*7.txt', path='/workspace/large-tree', max_results=1000))\n"
+}
+
 fn rename_subtree_program() -> &'static str {
     "import os\nos.rename('/workspace/large-tree/dir-000', '/workspace/moved-tree')\nNone\n"
 }
@@ -306,6 +310,10 @@ fn delete_subtree_program() -> &'static str {
         "os.rmdir(root)\n",
         "None\n",
     )
+}
+
+fn delete_subtree_with_vsh_program() -> &'static str {
+    "vsh_remove('/workspace/large-tree/dir-000', recursive=True)\nNone\n"
 }
 
 fn massive_delete_program() -> &'static str {
@@ -781,6 +789,16 @@ fn benchmark_large(arguments: &Arguments) -> Result<(u64, u64, Vec<NamedCase>), 
             )?,
         ),
         (
+            "vsh_glob_10k",
+            run_case(
+                &large_runtime,
+                glob_ten_thousand_with_vsh_program(),
+                "vsh-glob-10k",
+                arguments.iterations,
+                TransactionState::AutoApproved,
+            )?,
+        ),
+        (
             "rename_subtree_100",
             run_case(
                 &large_runtime,
@@ -796,6 +814,16 @@ fn benchmark_large(arguments: &Arguments) -> Result<(u64, u64, Vec<NamedCase>), 
                 &large_runtime,
                 delete_subtree_program(),
                 "delete-subtree-100",
+                arguments.iterations,
+                TransactionState::PendingApproval,
+            )?,
+        ),
+        (
+            "vsh_remove_subtree_100",
+            run_case(
+                &large_runtime,
+                delete_subtree_with_vsh_program(),
+                "vsh-remove-subtree-100",
                 arguments.iterations,
                 TransactionState::PendingApproval,
             )?,

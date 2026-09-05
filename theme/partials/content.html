@@ -1,0 +1,23 @@
+{# Page controls stay in normal flow; native Zensical owns navigation and search. #}
+{% if page %}
+<div class="vsh-page-toolbar">
+  <nav class="vsh-breadcrumb" aria-label="Breadcrumb">
+    <a href="{{ nav.homepage.url | url }}">Docs</a>
+    <span aria-hidden="true">/</span>
+    <span aria-current="page">{{ page.title }}</span>
+  </nav>
+  <button class="vsh-copy-markdown" type="button" data-state="idle" data-source-key="{{ page.url }}" data-source-url="{{ 'assets/markdown.json' | url }}" hidden>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg>
+    <span>Copy as Markdown</span>
+  </button>
+  <span class="vsh-copy-status" role="status" aria-live="polite"></span>
+</div>
+{% endif %}
+{% if "<h1" not in page.content %}
+  <h1 id="__skip">{{ page.title | d(config.site_name, true) }}</h1>
+{% endif %}
+{{ page.content }}
+{% include "partials/tags.html" %}
+{% include "partials/source-file.html" %}
+{% include "partials/feedback.html" %}
+{% include "partials/comments.html" %}

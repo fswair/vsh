@@ -30,7 +30,7 @@ denials, not approval prompts.
 | Duration | 1 second | runaway bytecode |
 | Recursion | 512 frames | stack growth |
 | Worker heap | 256 MiB | guest allocation |
-| Typed OS calls | 10,000 | call amplification |
+| Typed OS / high-level VSH calls | 10,000 | call amplification |
 | Read bytes | 64 MiB | cumulative materialization |
 | Write bytes | 64 MiB | cumulative virtual output |
 | One I/O call | 4 MiB | single-frame allocation |
@@ -43,6 +43,18 @@ denials, not approval prompts.
 The supervised worker additionally enforces protocol frame and process boundaries.
 Snapshot, artifact, state-log, journal, plan, and commit paths have their own trusted
 host limits.
+
+Duration is cumulative Monty **bytecode** time, not total request wall time. Worker
+heap is not parent-process or process-tree RSS. Parent-side high-level function work,
+snapshot traversal, storage and commit have different bounds. A worker event deadline
+does not interrupt synchronous parent dispatch. Add trusted service-level admission
+and resource controls for a complete deployment budget.
+
+Snapshot defaults are 250,000 nodes, depth 128 and 16 GiB metadata-represented file/link
+bytes. Metadata traverses the whole configured workspace; file contents remain lazy.
+Rust exposes `SnapshotLimits`; the Python convenience constructor does not expose
+these knobs. The default auto-preview cache is separately capped at 64 entries and
+128 MiB encoded artifact bytes.
 
 ## Python configuration
 
@@ -85,6 +97,12 @@ let request = RunRequest::new(code).with_budget(budget);
 
 ## Budget design guidance
 
+`max_os_calls` counts both typed operations produced by `pathlib` and high-level VSH
+function invocations. Recursive high-level work intentionally uses one suspension slot;
+its parent-side scope is independently bounded by cumulative/per-call I/O,
+directory-entry, path, result and snapshot ceilings. Guest bytecode/heap limits have
+the narrower scope described above.
+
 1. Measure a representative successful workload.
 2. Set each independent limit above the measured p99 plus operational headroom.
 3. Keep result and stdout ceilings much smaller than filesystem read ceilings.
@@ -92,5 +110,8 @@ let request = RunRequest::new(code).with_budget(budget);
    unlimited values.
 5. Separate interactive, CI, and bulk-migration profiles in the trusted host.
 
-Budget tuning changes runtime configuration identity. A transaction created under one
-configuration cannot be silently promoted under another.
+Execution budgets contribute to the recorded execution configuration identity. Later
+promotion consumes that stored artifact; passing a different budget does not rewrite
+what was executed. Keep deployment roots, worker and policy configuration consistent
+when reopening. Do not infer that commit compares every property of a newly opened
+`RuntimeConfig` with the original execution configuration.

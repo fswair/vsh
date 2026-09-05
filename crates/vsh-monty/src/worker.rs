@@ -8,21 +8,33 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use monty_proto::{MAX_FRAME_LEN, PROTOCOL_VERSION, decode_frame, pb, write_frame};
-use monty_types::{ExtFunctionResult, MontyException};
+use monty_types::MontyException;
 use vsh_types::RuntimeConfigDigest;
 use vsh_vfs::{EffectOrigin, VirtualFs};
 
 use super::{
-    Budget, CallFailure, DeniedAccess, ExecutionError, ExecutionLimitExceeded, ExecutionOutcome,
-    InProcessConfig, MontyFailurePhase, WorkerFailure, WorkerFailureKind, dispatch_call,
-    encode_string, exception_bytes, limit_error, measure_result, permission_denied,
+    Budget, DeniedAccess, ExecutionError, ExecutionLimitExceeded, ExecutionOutcome,
+    InProcessConfig, MontyFailurePhase, WorkerFailure, WorkerFailureKind, call_result,
+    dispatch_call, encode_string, exception_bytes, limit_error, measure_result, tools,
 };
 
-const EXPECTED_MONTY_VERSION: &str = "0.0.21";
+const EXPECTED_MONTY_VERSION: &str = "0.0.22";
 const MAX_WORKER_DIAGNOSTIC_BYTES: usize = 4 * 1024;
 const VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 const FRAME_OVERHEAD_BYTES: usize = 64 * 1024;
 const MAX_WORKER_EVENTS_PER_EXECUTION: u64 = 16_384;
+
+fn monty_tool_inputs() -> Vec<pb::NamedValue> {
+    let (names, values) = tools::inputs();
+    names
+        .into_iter()
+        .zip(values)
+        .map(|(name, value)| pb::NamedValue {
+            name,
+            value: Some(value.into()),
+        })
+        .collect()
+}
 
 /// Configuration for the crash-isolated, typed Monty subprocess adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -34,7 +46,7 @@ pub struct SubprocessConfig {
 }
 
 impl SubprocessConfig {
-    /// Bind the adapter to an exact `vsh-monty-worker` 0.0.21 executable.
+    /// Bind the adapter to an exact `vsh-monty-worker` 0.0.22 executable.
     #[must_use]
     pub fn new(worker_path: impl Into<PathBuf>, adapter: InProcessConfig) -> Self {
         Self {
@@ -83,7 +95,7 @@ impl SubprocessConfig {
         let mut canonical = Vec::new();
         encode_string("vsh-monty-subprocess-v1", &mut canonical);
         canonical.extend_from_slice(adapter.security_digest().as_bytes());
-        encode_string("monty-runtime-0.0.21", &mut canonical);
+        encode_string("monty-runtime-0.0.22", &mut canonical);
         canonical.extend_from_slice(&self.wall_timeout(adapter).as_nanos().to_le_bytes());
         RuntimeConfigDigest::digest_canonical(&canonical)
     }
@@ -113,7 +125,7 @@ impl SubprocessMonty {
     ///
     /// # Errors
     ///
-    /// Returns a worker spawn error unless the executable reports exact Monty 0.0.21.
+    /// Returns a worker spawn error unless the executable reports exact Monty 0.0.22.
     pub fn new(config: SubprocessConfig) -> Result<Self, ExecutionError> {
         if config
             .wall_timeout_override
@@ -220,6 +232,10 @@ impl SubprocessMonty {
 }
 
 #[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "boxing every decoded worker event would add an allocation to the suspension hot path"
+)]
 enum WorkerMessage {
     Event(pb::ChildEvent),
     Eof,
@@ -317,7 +333,7 @@ impl WorkerFrameLimits {
     fn for_kind(&self, kind: Option<u32>) -> u32 {
         let limit = match kind {
             Some(1) => &self.output,
-            Some(3) => &self.call,
+            Some(2 | 3) => &self.call,
             Some(6) => &self.result,
             Some(7) => &self.exception,
             _ => &self.control,
@@ -421,6 +437,10 @@ impl Worker {
         })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one exhaustive protocol turn loop keeps every terminal worker event fail-closed"
+    )]
     fn execute(
         &mut self,
         code: &str,
@@ -435,7 +455,7 @@ impl Worker {
         self.configure(adapter, deadline)?;
         self.send(pb::parent_request::Kind::Feed(pb::Feed {
             code: code.to_owned(),
-            inputs: Vec::new(),
+            inputs: monty_tool_inputs(),
             skip_type_check: true,
         }))?;
 
@@ -503,10 +523,13 @@ impl Worker {
                     ));
                 }
                 pb::child_event::Kind::FunctionCall(call) => {
-                    return Err(ExecutionError::UnsupportedSuspension {
-                        kind: "external function call",
-                        name: Some(call.function_name),
-                    });
+                    self.resume_tool_call(
+                        call,
+                        filesystem,
+                        adapter,
+                        &mut budget,
+                        &mut denied_accesses,
+                    )?;
                 }
                 pb::child_event::Kind::ResolveFutures(_) => {
                     return Err(ExecutionError::UnsupportedSuspension {
@@ -546,6 +569,7 @@ impl Worker {
                 max_recursion_depth: Some(
                     u64::try_from(adapter.limits.max_recursion_depth).unwrap_or(u64::MAX),
                 ),
+                max_suspensions: Some(adapter.limits.max_os_calls),
             }),
             type_check: false,
             type_check_stubs: None,
@@ -577,20 +601,39 @@ impl Worker {
         let result = filesystem.with_effect_origin(EffectOrigin::MontyOsCall, |filesystem| {
             dispatch_call(&typed_call, filesystem, config, budget)
         });
-        let result = match result {
-            Ok(value) => ExtFunctionResult::Return(value),
-            Err(CallFailure::Python(exception)) => ExtFunctionResult::Error(exception),
-            Err(CallFailure::Policy(denial)) => {
-                budget.stats.denied_accesses = budget.stats.denied_accesses.saturating_add(1);
-                let exception = permission_denied(denial.path.as_str());
-                denied_accesses.push(denial);
-                ExtFunctionResult::Error(exception)
-            }
-            Err(CallFailure::Limit(source)) => return Err(limit_error(source)),
-            Err(CallFailure::InternalVfs(source)) => {
-                return Err(ExecutionError::InternalVfs(Box::new(source)));
-            }
-        };
+        let result = call_result(result, budget, denied_accesses)?;
+        self.send(pb::parent_request::Kind::ResumeCall(pb::ResumeCall {
+            call_id: call.call_id,
+            result: Some(result.into()),
+        }))
+    }
+
+    fn resume_tool_call(
+        &mut self,
+        call: monty_proto::WireFunctionCall,
+        filesystem: &mut VirtualFs,
+        config: &InProcessConfig,
+        budget: &mut Budget,
+        denied_accesses: &mut Vec<DeniedAccess>,
+    ) -> Result<(), ExecutionError> {
+        if call.object_id.is_some() || !tools::is_tool(&call.function_name) {
+            return Err(ExecutionError::UnsupportedSuspension {
+                kind: "external function call",
+                name: Some(call.function_name),
+            });
+        }
+        budget.charge_os_call().map_err(limit_error)?;
+        let result = filesystem.with_effect_origin(EffectOrigin::MontyToolCall, |filesystem| {
+            tools::dispatch(
+                &call.function_name,
+                &call.args,
+                &call.kwargs,
+                filesystem,
+                config,
+                budget,
+            )
+        });
+        let result = call_result(result, budget, denied_accesses)?;
         self.send(pb::parent_request::Kind::ResumeCall(pb::ResumeCall {
             call_id: call.call_id,
             result: Some(result.into()),
@@ -1039,6 +1082,7 @@ mod tests {
         limits.configure(&adapter);
 
         assert_eq!(limits.for_kind(Some(1)), frame_cap(13));
+        assert_eq!(limits.for_kind(Some(2)), frame_cap(29));
         assert_eq!(limits.for_kind(Some(3)), frame_cap(29));
         assert_eq!(limits.for_kind(Some(6)), frame_cap(17));
         assert_eq!(limits.for_kind(Some(7)), frame_cap(19));

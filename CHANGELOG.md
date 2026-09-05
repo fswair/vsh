@@ -4,6 +4,37 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-05
+
+### Changed
+
+- Reduced policy/path allocation churn, specialized common protected-path patterns,
+  fused snapshot indexing, and bounded overlay child lookups without changing
+  transaction identities, authorization order, revalidation or commit durability.
+- Rebuilt the user documentation around native Rust/Python workflows, explicit
+  preview retention and trust boundaries, executable recipes and dated optimization evidence.
+- Upgraded the exact-pinned Monty release train from `0.0.21` to `0.0.22`, including
+  its Ruff `0.0.9`, `compact_str 0.10`, and `get-size2 0.10.3` graph.
+
+### Added
+
+- Dependency-free policy/path microbenchmarks, process-tree RSS sampling and generated
+  release-baseline/final/confirmation comparisons under `benchmarks/results/2026-09-05`.
+- Fixture-owning Python, Rust, MCP and separate-process CLI cookbook acceptance examples.
+- Active-snapshot Monty functions for read, write, list, mkdir, remove, move, copy,
+  glob, literal search, and exact text patch operations
+
+### Fixed
+
+- Documentation CTA hover/focus/pressed contrast in both Venus themes.
+- APFS non-UTF-8 filename test setup now recognizes Darwin's pre-capture EILSEQ rejection.
+- Fresh crates.io consumers retain the Monty-compatible `get-size2 =0.10.3`
+  resolution selected by Monty 0.0.22 and Ruff 0.0.9.
+- Case-insensitive VSH search reports original Unicode columns without using folded
+  byte offsets against the source string.
+
+## [0.3.1] - 2026-09-02
+
 ### Changed
 
 - Promoted `vsh` to the primary crates.io facade while retaining `vsh-runtime` as the
@@ -28,7 +59,7 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
-- Fresh crates.io consumers now retain the Monty-compatible `get-size2 =0.10.1`
+- Fresh crates.io consumers retain the Monty-compatible `get-size2 =0.10.1`
   resolution instead of selecting the incompatible 0.10.3/Ruff combination.
 - `vsh_list` now rejects workspace escapes (`/`, `..`, paths outside the root) during simulation
 - Execution layer enforces workspace boundaries via `ExecutionContext.resolve_within_workspace`

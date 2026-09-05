@@ -1,8 +1,9 @@
-"""Generate the compact and full LLM documentation bundles for VSH."""
+"""Generate LLM bundles and the exact page-source corpus for VSH documentation."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 import tomllib
@@ -16,6 +17,7 @@ DOCS_DIR = ROOT / "docs"
 CONFIG_PATH = ROOT / "zensical.toml"
 COMPACT_PATH = DOCS_DIR / "llms.txt"
 FULL_PATH = DOCS_DIR / "llms-full.txt"
+SOURCES_PATH = DOCS_DIR / "assets" / "markdown.json"
 
 
 @dataclass(frozen=True)
@@ -254,6 +256,19 @@ def main() -> int:
     results = (
         sync_file(COMPACT_PATH, render_compact(site_name, description, pages), check=args.check),
         sync_file(FULL_PATH, render_full(site_name, description, pages), check=args.check),
+        sync_file(
+            SOURCES_PATH,
+            json.dumps(
+                {
+                    page.url.removeprefix(site_url): page.source.read_text(encoding="utf-8")
+                    for page in pages
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            check=args.check,
+        ),
     )
     return 0 if all(results) else 1
 

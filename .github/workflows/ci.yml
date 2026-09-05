@@ -5,14 +5,18 @@ on:
     branches: [main]
     paths-ignore:
       - "docs/**"
+      - "theme/**"
       - "zensical.toml"
       - "scripts/generate_llms_txt.py"
+      - "scripts/check_docs.py"
       - ".github/workflows/docs.yml"
   pull_request:
     paths-ignore:
       - "docs/**"
+      - "theme/**"
       - "zensical.toml"
       - "scripts/generate_llms_txt.py"
+      - "scripts/check_docs.py"
       - ".github/workflows/docs.yml"
   schedule:
     - cron: "17 4 * * 1"
@@ -58,6 +62,9 @@ jobs:
           release/check_versions.py
           release/smoke_wheel.py
           release/validate_artifacts.py
+          examples/native
+          benchmarks/process_tree.py
+          benchmarks/compare.py
       - run: uv run basedpyright
       - name: Verify lockstep registry package identities
         run: python3 release/check_versions.py

@@ -1,5 +1,9 @@
 # Native core and PyO3 performance record
 
+Historical record. For the 2026-09-05 Monty 0.0.22 optimization baseline, final and
+confirmation runs, see [current performance](../performance.md) and
+`benchmarks/results/2026-09-05/`. Do not mix the sample protocols or build profiles.
+
 Captured: 2026-08-29\
 Native artifact: `playground/reports/rust-rewrite-python-v0.3.0/native-rust-release-20260829.json`\
 PyO3 artifact: `playground/reports/rust-rewrite-python-v0.3.0/native-pyo3-release-20260829.json`\

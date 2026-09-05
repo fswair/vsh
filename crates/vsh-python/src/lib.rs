@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use monty_proto::python::{DcRegistry, monty_to_py};
+use monty_proto::python::{InstanceStore, monty_to_py};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -388,7 +388,7 @@ impl PyReceipt {
             .commit
             .as_ref()
             .is_some_and(|commit| commit.cleanup_pending);
-        let result = monty_to_py(py, &receipt.value, &DcRegistry::new(py))?;
+        let result = monty_to_py(py, &receipt.value, &InstanceStore::new(py))?;
         Ok(Self {
             transaction: receipt.transaction.to_string(),
             base_snapshot: receipt.base_snapshot.to_string(),

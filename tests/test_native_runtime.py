@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import re
+import runpy
 import subprocess
 import sys
 import threading
@@ -20,6 +22,19 @@ from vsh import (
     VshStaleError,
 )
 from vsh.mcp import vsh_run
+
+
+@pytest.mark.parametrize("example", ["workflows.py", "mcp_workflow.py", "cli_workflow.py"])
+def test_native_cookbook_examples_execute_their_contracts(example: str) -> None:
+    source = Path(__file__).resolve().parents[1] / "examples" / "native" / example
+    runpy.run_path(str(source), run_name="__main__")
+
+
+def test_first_transaction_documentation_is_executable() -> None:
+    source = Path(__file__).resolve().parents[1] / "docs/start/index.md"
+    programs = re.findall(r"^```python\n(.*?)^```", source.read_text(), re.MULTILINE | re.DOTALL)
+    assert len(programs) == 1
+    exec(compile(programs[0], str(source), "exec"), {"__name__": "__documentation_example__"})
 
 
 def test_pyo3_runtime_auto_commit_uses_the_native_core(tmp_path: Path) -> None:
@@ -59,10 +74,38 @@ len(value)
     }
 
 
+def test_pyo3_vsh_functions_and_pathlib_share_one_preview_overlay(tmp_path: Path) -> None:
+    (tmp_path / "input.txt").write_text("Needle\n")
+    runtime = Runtime.open(tmp_path)
+    receipt = runtime.preview(
+        r"""
+from pathlib import Path
+
+source = vsh_read('/workspace/input.txt')
+vsh_mkdir('/workspace/generated')
+vsh_write('/workspace/generated/result.txt', source.upper())
+assert Path('/workspace/generated/result.txt').read_text() == 'NEEDLE\n'
+changed = vsh_patch('/workspace/generated/result.txt', 'NEEDLE', 'Found')
+paths = vsh_glob('**/*.txt', path='/workspace/generated', max_results=5)
+hits = vsh_search('found', path='/workspace/generated', case_sensitive=False, max_results=5)
+listed = vsh_list('/workspace/generated')
+(source, changed, len(paths), hits[0]['line'], len(listed), vsh_read(paths[0]))
+""",
+        detail=ReceiptDetail.FULL,
+    )
+
+    assert receipt.result == ("Needle\n", 1, 1, 1, 1, "Found\n")
+    assert receipt.os_calls == 9
+    assert receipt.changes == [
+        ("generated", "create"),
+        ("generated/result.txt", "create"),
+    ]
+    assert not (tmp_path / "generated").exists()
+
+
 def test_single_mcp_tool_promotes_one_exact_native_preview(tmp_path: Path) -> None:
     code = """
-from pathlib import Path
-Path('/workspace/from-mcp.txt').write_text('native')
+vsh_write('/workspace/from-mcp.txt', 'native')
 {'engine': 'rust', 'files': 1}
 """
     preview = vsh_run(code, workspace_root=str(tmp_path), mode="preview", detail="full")

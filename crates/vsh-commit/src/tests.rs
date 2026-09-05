@@ -455,6 +455,10 @@ fn snapshot_rejects_nonportable_names_and_special_nodes() {
             ));
         }
         Err(source) if source.kind() == io::ErrorKind::PermissionDenied => {}
+        // APFS rejects this filename before VSH can observe it (Darwin EILSEQ).
+        // Continue to the special-node check; Linux still exercises NonUtf8Name.
+        #[cfg(target_os = "macos")]
+        Err(source) if source.raw_os_error() == Some(92) => {}
         Err(source) => panic!("unexpected non-UTF-8 fixture failure: {source}"),
     }
 

@@ -8,6 +8,9 @@ VSH is one low-latency transactional filesystem simulator with two SDK surfaces:
 Both surfaces execute the same Rust pipeline. Python is a thin PyO3 binding; it does
 not contain a fallback simulator or committer.
 
+Special thanks to [Artyom Pavlov](https://github.com/newpavlov) for generously
+donating the `vsh` crate name to this project.
+
 ```text
 Monty program → immutable snapshot → Rust VirtualFs → canonical diff → policy
               → dependency revalidation → recoverable commit → verified receipt
@@ -24,8 +27,9 @@ Install the wheel:
 uv add vsh-python
 ```
 
-Run one complete transaction. `PREVIEW` guarantees that host files are unchanged;
-`AUTO` commits only a deterministic native auto-approval.
+Run one complete transaction. `PREVIEW` does not apply changes to user workspace files;
+the host runtime may still persist bounded transaction/storage artifacts. `AUTO`
+commits only a deterministic native auto-approval.
 
 ```python
 from vsh import ReceiptDetail, RunMode, RunRequest, Runtime
@@ -54,7 +58,7 @@ evaluating policy, revalidating dependencies, and committing.
 
 ```toml
 [dependencies]
-vsh = "=0.3.1"
+vsh = "=0.4.0"
 ```
 
 ```rust,no_run
@@ -78,6 +82,21 @@ Production execution expects the matching `vsh-monty-worker` executable. Python
 wheels bundle it; native embedders configure its trusted path through
 `RuntimeConfig::with_worker_path`.
 
+## Active-snapshot filesystem functions
+
+VSH 0.4.0 injects ten bounded `vsh_*` functions into each Monty program: read, write,
+list, make directory, remove, move, copy, glob, literal search and exact text patch.
+They share the same copy-on-write snapshot as `pathlib`, so earlier virtual writes are
+visible to later calls without creating a nested runtime or crossing MCP.
+
+```python
+files = vsh_glob('**/*.toml', path='/workspace/services', max_results=101)
+assert len(files) <= 100, 'split this migration into reviewed batches'
+for path in files:
+    assert vsh_patch(path, 'timeout = 5', 'timeout = 15', count=1) == 1
+{'updated': len(files)}
+```
+
 ## MCP
 
 Install the optional adapter and start the stdio server:
@@ -97,6 +116,14 @@ the same live `Runtime` (or MCP server process). The exact artifact is made dura
 before reservation and commit. Transactions that require independent approval are
 durable immediately and survive a runtime restart.
 
+## Performance
+
+On the dated macOS arm64 release-profile matrix, VSH 0.4.0 lowers median latency by
+roughly 25–30% for 10,000-file discovery/glob and 5,050-entry removal workloads. The
+whole benchmark harness reports about 19% less CPU time. Small-call variance remains,
+and sampled process-tree RSS does not establish a repeatable memory reduction. See the
+[protocol, complete results and caveats](https://fswair.github.io/vsh/performance/).
+
 ## Security and dependency policy
 
 - External Rust crates are exact-pinned in the workspace manifest and lockfile.
@@ -111,19 +138,19 @@ durable immediately and survive a runtime restart.
 - Process-local preview retention is fail-closed and bounded by both artifact count and
   encoded bytes; it cannot become an unbounded parent-process cache.
 
-See [the threat model](docs/rust-rewrite/THREAT_MODEL.md),
-[guarantees](docs/rust-rewrite/GUARANTEES.md), and
-[dependency record](docs/rust-rewrite/DEPENDENCY_POLICY.md). Upgrade and benchmark
-details are in the [migration guide](docs/rust-rewrite/MIGRATION.md) and
-[performance record](docs/rust-rewrite/PERFORMANCE.md). Merge coverage scope and floors
-are recorded in the [coverage contract](docs/rust-rewrite/COVERAGE.md). The cross-platform build,
-validation, provenance, and dual-registry order are in the
-[release guide](docs/rust-rewrite/RELEASE.md).
+See the [threat model](https://fswair.github.io/vsh/rust-rewrite/THREAT_MODEL/),
+[guarantees](https://fswair.github.io/vsh/rust-rewrite/GUARANTEES/), and
+[dependency record](https://fswair.github.io/vsh/rust-rewrite/DEPENDENCY_POLICY/).
+Upgrade and benchmark details are in the
+[migration guide](https://fswair.github.io/vsh/rust-rewrite/MIGRATION/) and current
+[performance report](https://fswair.github.io/vsh/performance/). Merge coverage scope
+and floors are recorded in the
+[coverage contract](https://fswair.github.io/vsh/rust-rewrite/COVERAGE/).
 
 ## Compatibility handles
 
-Existing declarations may continue to install `vbash==0.3.1` from PyPI or depend on
-`vbash = "=0.3.1"` from crates.io. Both packages are implementation-free mirrors of
+Existing declarations may continue to install `vbash==0.4.0` from PyPI or depend on
+`vbash = "=0.4.0"` from crates.io. Both packages are implementation-free mirrors of
 the exact matching VSH release. New projects should use `vsh-python` and `vsh`
 directly; Python code continues to write `import vsh` either way.
 
@@ -138,8 +165,8 @@ uv run zensical serve
 uv run zensical build --clean --strict
 ```
 
-Start at [`docs/index.md`](docs/index.md). The site includes a VSH-specific dark-red
-design, automatic light/dark palette selection, and a **Copy as Markdown** action on
+Start at the [VSH documentation](https://fswair.github.io/vsh/). The site includes a
+Venus-inspired palette, automatic light/dark selection, and a **Copy as Markdown** action on
 every page. It also publishes a compact LLM index at `/llms.txt` and the complete
 Markdown source corpus at `/llms-full.txt`, with navigation pages first; CI verifies
 both generated files are current.

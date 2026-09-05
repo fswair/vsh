@@ -1,6 +1,6 @@
 [project]
 name = "vbash"
-version = "0.3.1"
+version = "0.4.0"
 description = "Compatibility installer for VSH"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,10 +16,10 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 keywords = ["agents", "commands", "mcp", "simulation", "workspaces"]
-dependencies = ["vsh-python==0.3.1"]
+dependencies = ["vsh-python==0.4.0"]
 
 [project.optional-dependencies]
-mcp = ["vsh-python[mcp]==0.3.1"]
+mcp = ["vsh-python[mcp]==0.4.0"]
 
 [project.urls]
 Documentation = "https://fswair.github.io/vsh/"

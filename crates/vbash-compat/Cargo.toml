@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+readme.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Compatibility alias that mirrors the matching vsh release"
@@ -17,7 +18,7 @@ name = "vsh"
 doc = false
 
 [dependencies]
-vsh-primary = { package = "vsh", path = "../vsh", version = "=0.3.1" }
+vsh-primary = { package = "vsh", path = "../vsh", version = "=0.4.0" }
 
 [lints]
 workspace = true

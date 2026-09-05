@@ -20,8 +20,8 @@ wildcards = "deny"
 highlight = "all"
 skip = [
     { crate = "getrandom@0.2.17", reason = "Monty/Ruff's Unicode name generator still uses rand 0.8; runtime ahash uses getrandom 0.3" },
-    { crate = "hashbrown@0.16.1", reason = "Monty 0.0.21 directly uses 0.16 while its Ruff/get-size graph uses 0.17" },
-    { crate = "itertools@0.14.0", reason = "Monty 0.0.21 directly pins 0.14 while its Ruff 0.0.3 parser uses 0.15" },
+    { crate = "hashbrown@0.16.1", reason = "Monty 0.0.22 directly uses 0.16 while its Ruff/get-size graph uses 0.17" },
+    { crate = "itertools@0.14.0", reason = "Monty 0.0.22 directly pins 0.14 while its Ruff 0.0.9 parser uses 0.15" },
     { crate = "syn@2.0.119", reason = "Monty/PyO3 proc macros use syn 2 while current serde/ICU derives use syn 3" },
     { crate = "io-lifetimes@2.0.4", reason = "cap-std 4.0.3 pulls io-lifetimes 2 through fs-set-times and 3 through cap-primitives/io-extras" },
     { crate = "windows-sys@0.59.0", reason = "cap-std 4.0.3's fs-set-times target graph retains Windows API generation 0.59 alongside 0.60/0.61" },

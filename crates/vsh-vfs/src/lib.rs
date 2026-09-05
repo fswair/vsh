@@ -3,9 +3,10 @@
 //! This crate has no host commit capability. Every mutation lands in an in-memory
 //! overlay, and the only durable writes it can perform are immutable blob-store puts.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::error::Error;
 use std::fmt;
+use std::ops::Bound::{Included, Unbounded};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use vsh_store::{BlobStore, BlobStoreError};
@@ -370,6 +371,7 @@ impl SnapshotBuilder {
     ///
     /// Returns an error when a parent is absent or not a directory.
     pub fn build(self) -> Result<BaseSnapshot, SnapshotError> {
+        let mut children: BTreeMap<VPath, BTreeSet<VPath>> = BTreeMap::new();
         for path in self.nodes.keys().filter(|path| !path.is_root()) {
             let parent = path.parent().unwrap_or_else(VPath::root);
             let Some(parent_node) = self.nodes.get(&parent) else {
@@ -384,11 +386,6 @@ impl SnapshotBuilder {
                     parent,
                 });
             }
-        }
-
-        let mut children: BTreeMap<VPath, BTreeSet<VPath>> = BTreeMap::new();
-        for path in self.nodes.keys().filter(|path| !path.is_root()) {
-            let parent = path.parent().unwrap_or_else(VPath::root);
             children.entry(parent).or_default().insert(path.clone());
         }
         let id = snapshot_id(&self.nodes);
@@ -403,11 +400,15 @@ impl SnapshotBuilder {
     }
 
     fn insert(&mut self, path: VPath, node: SnapshotNode) -> Result<(), SnapshotError> {
-        if self.nodes.contains_key(&path) {
-            return Err(SnapshotError::DuplicatePath { path });
+        match self.nodes.entry(path) {
+            Entry::Occupied(entry) => Err(SnapshotError::DuplicatePath {
+                path: entry.key().clone(),
+            }),
+            Entry::Vacant(entry) => {
+                entry.insert(Arc::new(node));
+                Ok(())
+            }
         }
-        self.nodes.insert(path, Arc::new(node));
-        Ok(())
     }
 }
 
@@ -713,6 +714,8 @@ pub enum EffectOrigin {
     VirtualFs,
     /// A typed Monty OS call; populated by the Monty adapter in Phase 3.
     MontyOsCall,
+    /// A high-level VSH function called from inside a Monty program.
+    MontyToolCall,
 }
 
 /// Semantic event emitted by the operation that actually observed or changed state.
@@ -1316,7 +1319,7 @@ impl VirtualFs {
             .filter(|path| !path.is_root())
             .collect();
         let candidate_paths = candidates.len();
-        let mut after_states = BTreeMap::new();
+        let mut after_states = Vec::with_capacity(candidate_paths);
         let mut materialized_after_bytes = 0_u64;
         for path in &candidates {
             let after = match self.resolve(path) {
@@ -1325,13 +1328,14 @@ impl VirtualFs {
             };
             materialized_after_bytes =
                 materialized_after_bytes.saturating_add(after.map_or(0, NodeState::size));
-            after_states.insert(path.clone(), after);
+            after_states.push(after);
         }
 
         let mut entries = Vec::new();
-        for path in candidates {
+        // Finish every lazy after-state capture before reading any before-state:
+        // rename destinations may share their lazy node with a base source.
+        for (path, after) in candidates.into_iter().zip(after_states) {
             let before = self.base.node(&path).map(|node| node.state());
-            let after = after_states[&path];
             if before == after {
                 continue;
             }
@@ -1420,9 +1424,17 @@ impl VirtualFs {
     }
 
     fn resolve(&self, path: &VPath) -> Option<ResolvedNode> {
-        let mut ancestor = path.parent();
+        // Read-only transactions have no ancestors to shadow. Do not allocate
+        // and probe every parent when the overlay is provably empty.
+        if self.overlay.is_empty() {
+            return self.base.node(path).map(|node| ResolvedNode {
+                node,
+                base_origin: Some(path.clone()),
+            });
+        }
+        let mut ancestor = (!path.is_root()).then(|| parent_str(path.as_str()));
         while let Some(current) = ancestor {
-            match self.overlay.get(&current) {
+            match self.overlay.get(current) {
                 Some(OverlayEntry::Tombstone) => return None,
                 Some(OverlayEntry::Present(resolved))
                     if resolved.node.state.kind() != NodeKind::Directory =>
@@ -1431,7 +1443,7 @@ impl VirtualFs {
                 }
                 Some(OverlayEntry::Present(_)) | None => {}
             }
-            ancestor = current.parent();
+            ancestor = (current != ".").then(|| parent_str(current));
         }
         if let Some(entry) = self.overlay.get(path) {
             return match entry {
@@ -1446,12 +1458,23 @@ impl VirtualFs {
     }
 
     fn visible_direct_children(&self, path: &VPath) -> Vec<VPath> {
+        if self.overlay.is_empty() {
+            return self.base.direct_children(path).collect();
+        }
         let mut candidates: BTreeSet<VPath> = self.base.direct_children(path).collect();
+        // The slash is part of the lexical lower bound: a/ must not include
+        // a-, a., a0 or other prefix siblings. No additional index is retained.
+        let prefix = if path.is_root() {
+            String::new()
+        } else {
+            format!("{path}/")
+        };
         candidates.extend(
             self.overlay
-                .keys()
-                .filter(|candidate| candidate.parent().as_ref() == Some(path))
-                .cloned(),
+                .range::<str, _>((Included(prefix.as_str()), Unbounded))
+                .take_while(|(candidate, _)| candidate.as_str().starts_with(&prefix))
+                .filter(|(candidate, _)| !candidate.as_str()[prefix.len()..].contains('/'))
+                .map(|(candidate, _)| candidate.clone()),
         );
         candidates
             .into_iter()
@@ -1543,6 +1566,10 @@ impl VirtualFs {
             effect,
         });
     }
+}
+
+fn parent_str(path: &str) -> &str {
+    path.rsplit_once('/').map_or(".", |(parent, _)| parent)
 }
 
 fn classify_diff(before: Option<NodeState>, after: Option<NodeState>) -> DiffKind {
@@ -2209,6 +2236,48 @@ mod tests {
         assert_eq!(base_model, vfs.materialized_final_state().unwrap());
         assert!(!base_model.contains_key(&path("src/a.txt")));
         assert!(!base_model.contains_key(&path("src/overlay.txt")));
+    }
+
+    #[test]
+    fn overlay_child_ranges_match_full_scan_with_prefix_siblings() {
+        let (_guard, store) = test_store("overlay-child-ranges");
+        let mut vfs = VirtualFs::new(SnapshotBuilder::new(store).build().unwrap());
+        for directory in ["a", "a!", "a-", "a.", "a0", "á", "a/nested"] {
+            vfs.mkdir(&path(directory), 0o755).unwrap();
+            vfs.write(&path(&format!("{directory}/file")), b"x")
+                .unwrap();
+        }
+        vfs.unlink(&path("a!/file")).unwrap();
+        for directory in [".", "a", "a!", "a-", "a.", "a0", "á", "a/nested"] {
+            let directory = path(directory);
+            let expected: Vec<VPath> = vfs
+                .overlay
+                .keys()
+                .filter(|candidate| candidate.parent().as_ref() == Some(&directory))
+                .filter(|candidate| vfs.resolve(candidate).is_some())
+                .cloned()
+                .collect();
+            assert_eq!(
+                vfs.visible_direct_children(&directory),
+                expected,
+                "{directory}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_overlay_resolution_and_later_whiteouts_preserve_visibility() {
+        let (_guard, store) = test_store("empty-overlay-resolve");
+        let mut vfs = VirtualFs::new(fixture_snapshot(store));
+        assert!(vfs.overlay.is_empty());
+        assert!(vfs.resolve(&VPath::root()).is_some());
+        assert!(vfs.resolve(&path("src/nested/b.txt")).is_some());
+        assert!(vfs.resolve(&path("missing/child")).is_none());
+        vfs.remove_tree(&path("src")).unwrap();
+        assert!(vfs.resolve(&path("src/nested/b.txt")).is_none());
+        vfs.write(&path("src"), b"now a file").unwrap();
+        assert!(vfs.resolve(&path("src")).is_some());
+        assert!(vfs.resolve(&path("src/nested/b.txt")).is_none());
     }
 
     #[test]

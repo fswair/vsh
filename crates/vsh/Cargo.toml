@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+readme.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Low-latency transactional filesystem simulation and execution for agents"
@@ -13,7 +14,7 @@ categories = ["development-tools"]
 publish = ["crates-io"]
 
 [dependencies]
-vsh-runtime-core = { package = "vsh-runtime", path = "../vbash", version = "=0.3.1" }
+vsh-runtime-core = { package = "vsh-runtime", path = "../vbash", version = "=0.4.0" }
 
 [lints]
 workspace = true

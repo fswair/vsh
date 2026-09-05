@@ -17,14 +17,18 @@ vsh CodeMode MCP server.
 
 The server exposes exactly one normal tool: `vsh_run`. Its `code` argument is one Monty
 Python program executed against an immutable workspace snapshot and copy-on-write Rust
-VirtualFs. Use pathlib-style filesystem operations under `/workspace`.
+VirtualFs. Inside that program, use `pathlib` or the built-in `vsh_read`, `vsh_write`,
+`vsh_list`, `vsh_mkdir`, `vsh_remove`, `vsh_move`, `vsh_copy`, `vsh_glob`,
+`vsh_search`, and `vsh_patch` functions. These are sandbox functions, not extra MCP
+tools, and both surfaces observe the same active overlay under `/workspace`.
 
 `mode="preview"` guarantees no host mutation. `mode="auto"` asks the native policy to
 commit the exact canonical diff; denied and escalated transactions remain virtual. Put
 the complete multi-file operation in one program so it stays one transaction, one policy
 decision, and one Python-to-Rust boundary call. To promote an auto-approved preview, pass
 its returned `transaction` with no code and `mode="auto"`; VSH revalidates dependencies
-before commit. Never emulate a shell or use a second simulation path.
+before commit. Bound discovery with `max_results`. Never emulate a shell or use a second
+simulation path.
 """
 
 _CUSTOM_SECTION_HEADER = "Project-specific instructions:"

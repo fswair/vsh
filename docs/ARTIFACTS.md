@@ -28,7 +28,11 @@ Changing any bound input produces another transaction identity.
 | Committed/recovery-required | Durable state, plan, journal, marker as needed | Verification and crash recovery |
 
 Process-local retention is bounded by both artifact count and aggregate encoded bytes.
-Call `discard_preview` for abandoned handles.
+Defaults are 64 auto-approved artifacts or 128 MiB encoded bytes. Call
+`discard_preview` for abandoned handles and completed read-only previews. It releases
+process-local retention, not a general blob-store garbage collection or durable
+pending-artifact cancellation. Restart or MCP runtime-LRU eviction loses auto-approved
+handles; approval-required artifacts are durable.
 
 ## Integrity and recovery
 

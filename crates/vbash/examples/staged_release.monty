@@ -1,0 +1,11 @@
+# Shared by the Rust and Python cookbook hosts; shipped with the runtime crate.
+from pathlib import Path
+
+vsh_mkdir('/workspace/release')
+vsh_copy('/workspace/templates/service.toml', '/workspace/release/service.toml')
+assert vsh_patch('/workspace/release/service.toml', 'channel = "dev"', 'channel = "stable"') == 1
+vsh_move('/workspace/release/service.toml', '/workspace/release/app.toml')
+config = Path('/workspace/release/app.toml').read_text()
+assert config == 'channel = "stable"\n'
+vsh_write('/workspace/release/README.txt', 'channel=stable\n')
+{'config': config, 'files': len(vsh_list('/workspace/release'))}

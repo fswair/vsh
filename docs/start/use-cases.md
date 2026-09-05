@@ -1,74 +1,68 @@
-# Use cases
+# Where VSH fits
 
-VSH is most valuable when a program needs broad workspace visibility but its final
-filesystem effects must remain bounded, explainable, and atomic enough to recover.
+Use VSH when you need to compute a filesystem change, understand its consequences,
+and apply exactly that reviewed result despite possible input drift.
 
-## Coding-agent edits
+## Multi-service configuration migrations
 
-Let an agent produce one Monty program for a multi-file refactor. VSH returns a compact
-receipt or a full canonical change list before any host mutation.
+Discover a bounded set of service manifests, verify each expected old value, patch
+them, and return a small before/after bundle. Commit only after checking both scope
+and content. If a developer edits one of the observed inputs before application, the
+old preview must not silently overwrite it.
 
-**Useful when:** the agent may touch an uncertain set of files, approvals must bind to
-exact output, or the workspace can change between planning and application.
+The [Python migration recipe](../python/examples.md#bulk-configuration-migration)
+demonstrates cap+1 discovery, occurrence checks, exact path assertions and promotion.
+VSH does not parse arbitrary TOML schemas for you; choose transformations whose
+semantics your program explicitly verifies.
 
-**Recommended flow:** MCP `preview` → inspect `decision`, `changes`, and `risk_flags` →
-promote the returned `transaction` with `mode="auto"` only when it is auto-approved.
+## Staged generation and release manifests
 
-## Repository migrations
+Copy templates, patch generated content, rename staged files and write an index in one
+program. Every step can read the previous step's virtual output. The host sees none
+of those user-file changes until commit.
 
-Encode deterministic moves, rewrites, generated files, and cleanup as one program.
-Reads influence transaction identity, so a concurrent edit invalidates stale output
-instead of being silently overwritten.
+The same [staged release recipe](../python/examples.md#staged-release-generation)
+runs through [Rust](../rust/examples.md). It also shows why a rename may need approval
+even when final changes are only creations. Running compilers, package managers or
+network deployment commands remains outside the guest.
 
-Use `ReceiptDetail.FULL` during development and review. Switch to `COMPACT` in high-rate
-automation when a diff digest and counts are enough.
+## Coding agents and editor assistants
 
-## Build and code generation
+An agent can express a complete bounded edit as one Monty program. This reduces
+tool-schema breadth and tool round trips; loops, search and validation stay within
+one transaction. It does not guarantee a particular token-price reduction or make
+agent output trustworthy.
 
-Generate manifests, configuration, or source files without exposing a real output tree
-to the generator. Preview makes output reviewable; auto mode avoids a separate round
-trip for small changes that balanced policy deterministically approves.
+Use [MCP](../integrations/mcp.md) for protocol integration or a
+[trusted SDK wrapper](../integrations/agents.md) for fixed roots, enforced budgets,
+preview cleanup and independent approval. Review returned content as untrusted data,
+not as instructions to the reviewer.
 
-## Governed local automation
+## Reviewed automation that survives restart
 
-Strict and paranoid profiles turn every mutation into an approval boundary and reduce
-hard-denial ceilings. The trusted host can implement its own identity check before
-calling the explicit SDK `approve` method.
+Strict policy persists mutation previews as pending artifacts. An authenticated
+review service can bind a short approval window, reopen the same runtime configuration,
+and commit the exact transaction. The runtime provides binding and revalidation; your
+service supplies authentication and reviewer authorization.
 
-## IDE and MCP integrations
+See [approval and lifecycle](../guides/transactions.md). Auto-approved previews are
+process-local and are not the right durable review queue.
 
-The stdio server exposes one normal tool, `vsh_run`. A small tool schema reduces agent
-context cost while still supporting multi-file programs, policy selection, budgets,
-preview promotion, and structured receipts.
+## Bounded workspace analysis
 
-## Batch analysis with typed results
+Read files and return a typed summary without proposing changes: inventory, literal
+search, config consistency or migration readiness. Keep result objects small and
+discard auto-approved analysis previews. For large codebases, narrow the configured
+workspace; a narrow guest glob alone does not avoid full snapshot metadata traversal.
 
-Monty code may read many files and return lists, dictionaries, strings, numbers, bytes,
-or nested values. Python receives native Python objects through Monty's typed PyO3
-converter; Rust receives `MontyObject`. No JSON serialization is required at the SDK
-boundary.
+## Choose something else for
 
-## When not to use VSH
+- A general POSIX shell, subprocess execution, network calls or unrestricted CPython packages.
+- Long-running scientific computation or unbounded data processing.
+- A container/VM security boundary, tenant isolation or arbitrary host code execution.
+- Transactions spanning unrelated roots, databases and external services.
+- Transparent live views of concurrent host edits; each request uses a captured base.
 
-Choose another tool when the job requires:
-
-- arbitrary subprocess execution or a POSIX shell;
-- network access inside the guest program;
-- unrestricted CPython packages or native extensions;
-- full container, VM, kernel, or tenant isolation;
-- mutation outside one explicitly rooted workspace;
-- long-running compute rather than bounded filesystem automation.
-
-VSH also does not decide human intent. Its built-in policy is deterministic; an
-organization that needs human or model judgement should place that decision outside
-the runtime, then approve the exact pending transaction through a trusted SDK surface.
-
-## Selection checklist
-
-| Question | If yes |
-|---|---|
-| Do you need to inspect effects before mutation? | Use preview-first transactions |
-| Can inputs drift before apply? | Promote the exact transaction; rely on revalidation |
-| Do Python and Rust hosts need identical behavior? | Use the shared native runtime |
-| Is agent tool-schema size important? | Use the single-tool MCP server |
-| Does code need shell/network/ambient environment? | VSH is intentionally not the right boundary |
+VSH does not infer human intent. Deterministic policy can enforce scope and risk
+thresholds, but only a trusted reviewer or application can decide whether an otherwise
+valid change is the right one.

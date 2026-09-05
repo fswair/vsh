@@ -118,6 +118,66 @@ len(source)
 }
 
 #[test]
+fn subprocess_vsh_tools_share_the_active_overlay_with_pathlib() {
+    let engine = engine(InProcessConfig::default());
+    let (_directory, mut filesystem) = make_filesystem(&[("input.txt", b"hello\n")]);
+    let outcome = engine
+        .execute(
+            r"
+from pathlib import Path
+source = vsh_read('/workspace/input.txt')
+vsh_mkdir('/workspace/out')
+vsh_write('/workspace/out/value.txt', source.upper())
+Path('/workspace/out/value.txt').read_text()
+",
+            &mut filesystem,
+        )
+        .expect("worker should dispatch VSH functions against its caller's overlay");
+
+    assert_eq!(outcome.value, MontyObject::String("HELLO\n".to_owned()));
+    assert_eq!(outcome.stats.os_calls, 4);
+    assert_eq!(
+        filesystem
+            .read(&VPath::parse("out/value.txt").unwrap())
+            .unwrap(),
+        b"HELLO\n"
+    );
+    assert_eq!(engine.idle_workers().unwrap(), 1);
+}
+
+#[test]
+fn subprocess_vsh_tool_payload_uses_the_typed_call_frame_budget() {
+    const PAYLOAD_BYTES: usize = 1_100_000;
+    let limits = ExecutionLimits {
+        max_io_call_bytes: 2 * 1024 * 1024,
+        max_write_bytes: 2 * 1024 * 1024,
+        ..ExecutionLimits::default()
+    };
+    let engine = engine(InProcessConfig::default().with_limits(limits));
+    let (_directory, mut filesystem) = make_filesystem(&[]);
+    let outcome = engine
+        .execute(
+            format!("vsh_write('/workspace/large.txt', 'x' * {PAYLOAD_BYTES})"),
+            &mut filesystem,
+        )
+        .expect("a valid VSH function payload may exceed the program frame budget");
+
+    assert_eq!(
+        outcome.value,
+        MontyObject::Int(i64::try_from(PAYLOAD_BYTES).unwrap())
+    );
+    let payload_bytes = u64::try_from(PAYLOAD_BYTES).unwrap();
+    assert_eq!(outcome.stats.write_bytes, payload_bytes);
+    assert_eq!(
+        filesystem
+            .metadata(&VPath::parse("large.txt").unwrap())
+            .unwrap()
+            .size(),
+        payload_bytes
+    );
+}
+
+#[test]
 fn native_runtime_uses_worker_for_an_exact_auto_commit() {
     let directory = TestDirectory::new("runtime");
     fs::write(directory.path().join("input.txt"), b"hello\n").unwrap();

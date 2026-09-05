@@ -1,9 +1,9 @@
 # Third-party notices
 
-VSH links and adapts the public typed execution/protocol seams of Monty 0.0.21,
+VSH links and adapts the public typed execution/protocol seams of Monty 0.0.22,
 including the `monty`, `monty-types`, `monty-proto`, and `monty-alloc` crates.
 Monty is maintained by Pydantic and distributed under the MIT License:
-https://github.com/pydantic/monty/tree/v0.0.21
+https://github.com/pydantic/monty/tree/v0.0.22
 
 The MIT License (MIT)
 

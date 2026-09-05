@@ -1,5 +1,6 @@
 //! Security-sensitive value types shared by the VSH Rust core.
 
+use std::borrow::{Borrow, Cow};
 use std::error::Error;
 use std::fmt;
 use std::str::FromStr;
@@ -7,6 +8,14 @@ use std::str::FromStr;
 /// A normalized, workspace-relative virtual path.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct VPath(String);
+
+// Canonical string ordering is exactly VPath ordering. Borrowed lookups let
+// internal indexes inspect ancestors/prefix ranges without constructing paths.
+impl Borrow<str> for VPath {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
 
 impl VPath {
     /// Return the canonical virtual workspace root.
@@ -33,7 +42,11 @@ impl VPath {
             return Err(VPathError::NulByte);
         }
 
-        let portable = input.replace('\\', "/");
+        let portable = if input.contains('\\') {
+            Cow::Owned(input.replace('\\', "/"))
+        } else {
+            Cow::Borrowed(input)
+        };
         if portable.starts_with('/') {
             return Err(VPathError::Absolute);
         }
@@ -41,6 +54,16 @@ impl VPath {
         let first = portable.split('/').next().unwrap_or_default();
         if is_windows_prefix(first) {
             return Err(VPathError::PlatformPrefix);
+        }
+
+        // Snapshot traversal and guest calls predominantly use canonical paths.
+        // Keep the same validation, but avoid a component vector and re-join.
+        if portable == "."
+            || portable
+                .split('/')
+                .all(|component| !matches!(component, "" | "." | ".."))
+        {
+            return Ok(Self(portable.into_owned()));
         }
 
         let mut components = Vec::new();
@@ -867,6 +890,66 @@ impl Error for TransitionError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_fast_path_matches_normalization_oracle() {
+        fn oracle(input: &str) -> Result<VPath, VPathError> {
+            if input.is_empty() {
+                return Err(VPathError::Empty);
+            }
+            if input.contains('\0') {
+                return Err(VPathError::NulByte);
+            }
+            let portable = input.replace('\\', "/");
+            if portable.starts_with('/') {
+                return Err(VPathError::Absolute);
+            }
+            if is_windows_prefix(portable.split('/').next().unwrap_or_default()) {
+                return Err(VPathError::PlatformPrefix);
+            }
+            let mut components = Vec::new();
+            for component in portable.split('/') {
+                match component {
+                    "" | "." => {}
+                    ".." => {
+                        if components.pop().is_none() {
+                            return Err(VPathError::EscapesRoot);
+                        }
+                    }
+                    value => components.push(value),
+                }
+            }
+            Ok(VPath(if components.is_empty() {
+                ".".to_owned()
+            } else {
+                components.join("/")
+            }))
+        }
+        let components = ["", ".", "..", "a", "é", "C:", "x:y", "a\0b", "a\\b"];
+        for first in components {
+            assert_eq!(VPath::parse(first), oracle(first));
+            for second in components {
+                for third in components {
+                    for separator in ["/", "\\"] {
+                        let candidate = [first, second, third].join(separator);
+                        assert_eq!(
+                            VPath::parse(&candidate),
+                            oracle(&candidate),
+                            "{candidate:?}"
+                        );
+                        // Joining is defined by normalizing the combined path,
+                        // not by parsing the child independently.
+                        let combined = format!("parent/{candidate}");
+                        assert_eq!(
+                            VPath::parse("parent").unwrap().join(&candidate),
+                            oracle(&combined),
+                            "joined {candidate:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn vpath_normalizes_portable_components() {

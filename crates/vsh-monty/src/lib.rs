@@ -1,10 +1,11 @@
 //! Typed Monty-to-VSH execution adapter.
 //!
 //! The adapter gives Monty no host filesystem mount and answers every typed
-//! [`OsFunctionCall`] from a caller-owned [`VirtualFs`]. [`InProcessMonty`] is a
-//! correctness and embedding harness, not the production isolation boundary: hostile
-//! programs must ultimately run in the separately supervised Monty worker described by
-//! the VSH architecture.
+//! [`OsFunctionCall`] plus the stable high-level [`MONTY_VSH_TOOL_NAMES`] from a
+//! caller-owned [`VirtualFs`]. Both surfaces share one active overlay, policy, budget,
+//! and effect ledger. [`InProcessMonty`] is a correctness and embedding harness, not the
+//! production isolation boundary: hostile programs must ultimately run in the
+//! separately supervised Monty worker described by the VSH architecture.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -23,8 +24,10 @@ use vsh_policy::{AccessKind, CallPolicy, DeniedAccess};
 use vsh_types::{ContentVersion, NodeKind, NodeState, RuntimeConfigDigest, VPath, VPathError};
 use vsh_vfs::{EffectOrigin, VfsError, VirtualFs};
 
+mod tools;
 mod worker;
 
+pub use tools::MONTY_VSH_TOOL_NAMES;
 pub use worker::{SubprocessConfig, SubprocessMonty};
 
 /// Canonical absolute path exposed to sandboxed code for the workspace root.
@@ -123,8 +126,8 @@ pub fn validate_result_compatibility(
                     pending.push((value, child_depth));
                 }
             }
-            MontyObject::Dataclass { attrs, .. } => {
-                for (key, value) in attrs {
+            MontyObject::ClassInstance(instance) => {
+                for (key, value) in instance.attrs.iter().chain(&instance.class_type.attrs) {
                     pending.push((key, child_depth));
                     pending.push((value, child_depth));
                 }
@@ -199,7 +202,7 @@ pub struct ExecutionLimits {
     /// Maximum interpreter heap bytes enforced by the supervised worker allocator.
     /// The process-local correctness harness cannot install a per-call global allocator.
     pub max_memory_bytes: usize,
-    /// Maximum typed OS calls serviced by the host adapter.
+    /// Maximum typed OS calls and high-level VSH tool calls serviced by the host adapter.
     pub max_os_calls: u64,
     /// Maximum cumulative bytes materialized by read and append operations.
     pub max_read_bytes: u64,
@@ -492,7 +495,7 @@ impl InProcessConfig {
         let mut canonical = Vec::new();
         encode_string("vsh-monty-config-v3", &mut canonical);
         encode_string(env!("CARGO_PKG_VERSION"), &mut canonical);
-        encode_string("monty-0.0.21", &mut canonical);
+        encode_string("monty-0.0.22", &mut canonical);
         encode_string(self.virtual_root.as_str(), &mut canonical);
         encode_string(&self.script_name, &mut canonical);
         encode_u64(self.limits.max_program_bytes, &mut canonical);
@@ -738,7 +741,7 @@ impl Error for ExecutionError {
 /// Host-side counters from one execution.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ExecutionStats {
-    /// Typed OS calls serviced.
+    /// Typed OS calls and high-level VSH tool calls serviced.
     pub os_calls: u64,
     /// File bytes materialized for reads or copy-on-write append.
     pub read_bytes: u64,
@@ -805,23 +808,27 @@ impl InProcessMonty {
                 attempted: program_bytes,
             }));
         }
+        let (input_names, input_values) = tools::inputs();
         let run = MontyRun::new(
             code,
             &self.config.script_name,
-            Vec::new(),
+            input_names,
             CompileOptions::default(),
         )
         .map_err(|source| self.monty_error(MontyFailurePhase::Compile, source))?;
 
         let resource_limits = ResourceLimits::default()
             .max_duration(self.config.limits.max_duration)
-            .max_recursion_depth(self.config.limits.max_recursion_depth);
+            .max_recursion_depth(self.config.limits.max_recursion_depth)
+            .max_suspensions(
+                usize::try_from(self.config.limits.max_os_calls).unwrap_or(usize::MAX),
+            );
         let tracker = ResourceTracker::new(resource_limits);
         let mut stdout = String::new();
         let mut budget = Budget::new(self.config.limits);
         let mut denied_accesses = Vec::new();
         let mut progress = run
-            .start(Vec::new(), tracker, self.print_writer(&mut stdout))
+            .start(input_values, tracker, self.print_writer(&mut stdout))
             .map_err(|source| self.monty_error(MontyFailurePhase::Runtime, source))?;
 
         loop {
@@ -850,21 +857,7 @@ impl InProcessMonty {
                                 &mut budget,
                             )
                         });
-                    let result = match result {
-                        Ok(value) => ExtFunctionResult::Return(value),
-                        Err(CallFailure::Python(exception)) => ExtFunctionResult::Error(exception),
-                        Err(CallFailure::Policy(denial)) => {
-                            budget.stats.denied_accesses =
-                                budget.stats.denied_accesses.saturating_add(1);
-                            let exception = permission_denied(denial.path.as_str());
-                            denied_accesses.push(denial);
-                            ExtFunctionResult::Error(exception)
-                        }
-                        Err(CallFailure::Limit(source)) => return Err(limit_error(source)),
-                        Err(CallFailure::InternalVfs(source)) => {
-                            return Err(ExecutionError::InternalVfs(Box::new(source)));
-                        }
-                    };
+                    let result = call_result(result, &mut budget, &mut denied_accesses)?;
                     call.resume(result, self.print_writer(&mut stdout))
                         .map_err(|source| self.monty_error(MontyFailurePhase::Runtime, source))?
                 }
@@ -872,10 +865,27 @@ impl InProcessMonty {
                     .resume(NameLookupResult::Undefined, self.print_writer(&mut stdout))
                     .map_err(|source| self.monty_error(MontyFailurePhase::Runtime, source))?,
                 RunProgress::FunctionCall(call) => {
-                    return Err(ExecutionError::UnsupportedSuspension {
-                        kind: "external function call",
-                        name: Some(call.function_name),
-                    });
+                    if call.object_id.is_some() || !tools::is_tool(&call.function_name) {
+                        return Err(ExecutionError::UnsupportedSuspension {
+                            kind: "external function call",
+                            name: Some(call.function_name),
+                        });
+                    }
+                    budget.charge_os_call().map_err(limit_error)?;
+                    let result =
+                        filesystem.with_effect_origin(EffectOrigin::MontyToolCall, |filesystem| {
+                            tools::dispatch(
+                                &call.function_name,
+                                &call.args,
+                                &call.kwargs,
+                                filesystem,
+                                &self.config,
+                                &mut budget,
+                            )
+                        });
+                    let result = call_result(result, &mut budget, &mut denied_accesses)?;
+                    call.resume(result, self.print_writer(&mut stdout))
+                        .map_err(|source| self.monty_error(MontyFailurePhase::Runtime, source))?
                 }
                 RunProgress::ResolveFutures(_) => {
                     return Err(ExecutionError::UnsupportedSuspension {
@@ -907,6 +917,25 @@ impl InProcessMonty {
 
 fn limit_error(source: ExecutionLimitExceeded) -> ExecutionError {
     ExecutionError::Limit(Box::new(source))
+}
+
+fn call_result(
+    result: Result<MontyObject, CallFailure>,
+    budget: &mut Budget,
+    denied_accesses: &mut Vec<DeniedAccess>,
+) -> Result<ExtFunctionResult, ExecutionError> {
+    match result {
+        Ok(value) => Ok(ExtFunctionResult::Return(value)),
+        Err(CallFailure::Python(exception)) => Ok(ExtFunctionResult::Error(exception)),
+        Err(CallFailure::Policy(denial)) => {
+            budget.stats.denied_accesses = budget.stats.denied_accesses.saturating_add(1);
+            let exception = permission_denied(denial.path.as_str());
+            denied_accesses.push(denial);
+            Ok(ExtFunctionResult::Error(exception))
+        }
+        Err(CallFailure::Limit(source)) => Err(limit_error(source)),
+        Err(CallFailure::InternalVfs(source)) => Err(ExecutionError::InternalVfs(Box::new(source))),
+    }
 }
 
 struct Budget {
@@ -1024,8 +1053,8 @@ fn measure_result(value: &MontyObject, limit: usize) -> Result<u64, ExecutionLim
                     pending.push(value);
                 }
             }
-            MontyObject::Dataclass { attrs, .. } => {
-                for (key, value) in attrs {
+            MontyObject::ClassInstance(instance) => {
+                for (key, value) in instance.attrs.iter().chain(&instance.class_type.attrs) {
                     pending.push(key);
                     pending.push(value);
                 }
@@ -1831,6 +1860,140 @@ len(source)
     }
 
     #[test]
+    fn monty_tools_and_pathlib_share_one_active_virtual_filesystem() {
+        let (_directory, mut filesystem) = filesystem(&[]);
+        let outcome = InProcessMonty::default()
+            .execute(
+                r"
+from pathlib import Path
+vsh_mkdir('/workspace/out')
+vsh_write('/workspace/out/tool.txt', 'hello')
+seen_by_pathlib = Path('/workspace/out/tool.txt').read_text()
+Path('/workspace/out/pathlib.txt').write_text(seen_by_pathlib.upper())
+seen_by_tool = vsh_read('/workspace/out/pathlib.txt')
+(seen_by_pathlib, seen_by_tool, len(vsh_list('/workspace/out')))
+",
+                &mut filesystem,
+            )
+            .expect("VSH functions and pathlib should interoperate");
+
+        assert_eq!(
+            outcome.value,
+            MontyObject::Tuple(vec![
+                MontyObject::String("hello".to_owned()),
+                MontyObject::String("HELLO".to_owned()),
+                MontyObject::Int(2),
+            ])
+        );
+        assert_eq!(
+            filesystem
+                .read(&VPath::parse("out/pathlib.txt").unwrap())
+                .unwrap(),
+            b"HELLO"
+        );
+        assert!(
+            filesystem
+                .effects()
+                .iter()
+                .any(|event| event.origin == EffectOrigin::MontyToolCall)
+        );
+        assert!(
+            filesystem
+                .effects()
+                .iter()
+                .any(|event| event.origin == EffectOrigin::MontyOsCall)
+        );
+    }
+
+    #[test]
+    fn monty_tools_copy_glob_search_patch_move_and_remove_virtual_state() {
+        let (_directory, mut filesystem) = filesystem(&[]);
+        let outcome = InProcessMonty::default()
+            .execute(
+                r"
+vsh_mkdir('/workspace/src/nested')
+vsh_write('/workspace/src/a.txt', 'Needle one\n')
+vsh_write('/workspace/src/nested/b.txt', 'needle two\n')
+vsh_copy('/workspace/src', '/workspace/copied', recursive=True)
+paths = vsh_glob('**/*.txt', path='/workspace/copied')
+hits = vsh_search('needle', path='/workspace/copied', case_sensitive=False)
+changed = vsh_patch('/workspace/copied/a.txt', 'Needle', 'Found')
+vsh_move('/workspace/copied/a.txt', '/workspace/copied/renamed.txt')
+vsh_remove('/workspace/copied/nested', recursive=True)
+(len(paths), len(hits), changed, vsh_read('/workspace/copied/renamed.txt'), len(vsh_list('/workspace/copied')))
+",
+                &mut filesystem,
+            )
+            .expect("high-level VSH functions should compose on one overlay");
+
+        assert_eq!(
+            outcome.value,
+            MontyObject::Tuple(vec![
+                MontyObject::Int(2),
+                MontyObject::Int(2),
+                MontyObject::Int(1),
+                MontyObject::String("Found one\n".to_owned()),
+                MontyObject::Int(1),
+            ])
+        );
+        assert_eq!(
+            filesystem
+                .read(&VPath::parse("copied/renamed.txt").unwrap())
+                .unwrap(),
+            b"Found one\n"
+        );
+        assert!(!filesystem.exists(&VPath::parse("copied/nested").unwrap()));
+    }
+
+    #[test]
+    fn bounded_glob_and_search_stop_walking_after_enough_results() {
+        let (_directory, mut filesystem) = filesystem(&[
+            ("a.txt", b"needle"),
+            ("b.txt", b"needle"),
+            ("c.txt", b"needle"),
+        ]);
+        let outcome = InProcessMonty::default()
+            .execute(
+                r"
+paths = vsh_glob('*.txt', max_results=1)
+hits = vsh_search('needle', max_results=1)
+(paths, hits[0]['path'])
+",
+                &mut filesystem,
+            )
+            .expect("bounded discovery should complete");
+
+        assert_eq!(
+            outcome.value,
+            MontyObject::Tuple(vec![
+                MontyObject::List(vec![MontyObject::Path("/workspace/a.txt".to_owned(),)]),
+                MontyObject::Path("/workspace/a.txt".to_owned()),
+            ])
+        );
+        assert_eq!(outcome.stats.read_bytes, 6);
+    }
+
+    #[test]
+    fn zero_result_discovery_validates_the_root_without_walking_it() {
+        let (_directory, mut filesystem) = filesystem(&[("a.txt", b"needle")]);
+        let outcome = InProcessMonty::default()
+            .execute(
+                r"
+(vsh_glob('*.txt', max_results=0), vsh_search('needle', max_results=0))
+",
+                &mut filesystem,
+            )
+            .expect("zero-result discovery should remain valid and bounded");
+
+        assert_eq!(
+            outcome.value,
+            MontyObject::Tuple(vec![MontyObject::List(vec![]), MontyObject::List(vec![])])
+        );
+        assert_eq!(outcome.stats.directory_entries, 0);
+        assert_eq!(outcome.stats.read_bytes, 0);
+    }
+
+    #[test]
     fn absolute_host_path_never_falls_back_to_host() {
         let (directory, mut filesystem) = filesystem(&[]);
         let host_file = directory.path().join("host-secret.txt");
@@ -1880,6 +2043,31 @@ Path('/workspace/c').exists()
                 &mut filesystem,
             )
             .expect_err("third call must be rejected");
+        assert!(matches!(
+            error,
+            ExecutionError::Limit(source)
+                if *source == ExecutionLimitExceeded::OsCalls { limit: 2, attempted: 3 }
+        ));
+    }
+
+    #[test]
+    fn high_level_vsh_tools_share_the_hard_os_call_budget() {
+        let (_directory, mut filesystem) = filesystem(&[]);
+        let limits = ExecutionLimits {
+            max_os_calls: 2,
+            ..ExecutionLimits::default()
+        };
+        let engine = InProcessMonty::new(InProcessConfig::default().with_limits(limits));
+        let error = engine
+            .execute(
+                r"
+vsh_write('/workspace/a.txt', 'a')
+vsh_read('/workspace/a.txt')
+vsh_list('/workspace')
+",
+                &mut filesystem,
+            )
+            .expect_err("the third high-level VSH call must be rejected");
         assert!(matches!(
             error,
             ExecutionError::Limit(source)
@@ -2132,14 +2320,125 @@ except PermissionError:
     }
 
     #[test]
+    fn caught_vsh_tool_denial_is_retained_for_the_final_policy() {
+        let (_directory, mut filesystem) = filesystem(&[]);
+        let policy = CallPolicy::new(vec![
+            vsh_policy::ProtectedRule::new("blocked", vsh_policy::AccessSet::ALL).unwrap(),
+        ]);
+        let config = InProcessConfig::default().with_call_policy(policy);
+        let outcome = InProcessMonty::new(config)
+            .execute(
+                r"
+try:
+    vsh_write('/workspace/blocked', 'secret')
+except PermissionError:
+    pass
+'contained'
+",
+                &mut filesystem,
+            )
+            .expect("sandboxed code may catch a VSH tool policy exception");
+
+        assert_eq!(outcome.value, MontyObject::String("contained".to_owned()));
+        assert_eq!(outcome.stats.denied_accesses, 1);
+        assert_eq!(outcome.denied_accesses[0].path.as_str(), "blocked");
+        assert!(filesystem.canonical_diff().unwrap().is_empty());
+
+        let diff = filesystem.canonical_diff().unwrap();
+        let decision = TransactionPolicy::default().evaluate(PolicyInput {
+            diff: &diff,
+            effects: filesystem.effects(),
+            denied_accesses: &outcome.denied_accesses,
+            base_node_count: 1,
+        });
+        assert!(matches!(
+            decision,
+            PolicyDecision::Deny(manifest)
+                if matches!(manifest.reason, DenyReason::ProtectedAccessAttempt(_))
+        ));
+    }
+
+    #[test]
+    fn direct_vsh_search_retains_a_content_only_policy_denial() {
+        let (_directory, mut filesystem) = filesystem(&[("secret.txt", b"needle")]);
+        let policy = CallPolicy::new(vec![
+            vsh_policy::ProtectedRule::new("secret.txt", vsh_policy::AccessSet::CONTENT_READ)
+                .unwrap(),
+        ]);
+        let config = InProcessConfig::default().with_call_policy(policy);
+        let outcome = InProcessMonty::new(config)
+            .execute(
+                r"
+try:
+    vsh_search('needle', path='/workspace/secret.txt')
+except PermissionError:
+    pass
+'contained'
+",
+                &mut filesystem,
+            )
+            .expect("sandboxed code may catch a direct search policy exception");
+
+        assert_eq!(outcome.value, MontyObject::String("contained".to_owned()));
+        assert_eq!(outcome.stats.denied_accesses, 1);
+        assert_eq!(outcome.stats.read_bytes, 0);
+        assert_eq!(outcome.denied_accesses[0].path.as_str(), "secret.txt");
+    }
+
+    #[test]
+    fn recursive_vsh_remove_preflights_the_entire_tree_before_mutation() {
+        let directory = TestDirectory::new();
+        let store = BlobStore::open(directory.path()).expect("blob store should open");
+        let mut builder = SnapshotBuilder::new(store);
+        builder
+            .add_directory(VPath::parse("tree").unwrap(), 0o755)
+            .unwrap();
+        builder
+            .add_directory(VPath::parse("tree/blocked").unwrap(), 0o755)
+            .unwrap();
+        builder
+            .add_file(
+                VPath::parse("tree/blocked/secret.txt").unwrap(),
+                b"secret",
+                0o600,
+            )
+            .unwrap();
+        builder
+            .add_file(VPath::parse("tree/safe.txt").unwrap(), b"safe", 0o644)
+            .unwrap();
+        let mut filesystem = VirtualFs::new(builder.build().unwrap());
+        let policy = CallPolicy::new(vec![
+            vsh_policy::ProtectedRule::new("tree/blocked", vsh_policy::AccessSet::ALL).unwrap(),
+        ]);
+        let config = InProcessConfig::default().with_call_policy(policy);
+        let outcome = InProcessMonty::new(config)
+            .execute(
+                r"
+try:
+    vsh_remove('/workspace/tree', recursive=True)
+except PermissionError:
+    pass
+'contained'
+",
+                &mut filesystem,
+            )
+            .expect("sandboxed code may catch a recursive-delete policy exception");
+
+        assert_eq!(outcome.value, MontyObject::String("contained".to_owned()));
+        assert_eq!(outcome.stats.denied_accesses, 1);
+        assert_eq!(outcome.denied_accesses[0].path.as_str(), "tree/blocked");
+        assert!(filesystem.canonical_diff().unwrap().is_empty());
+        assert!(filesystem.exists(&VPath::parse("tree/safe.txt").unwrap()));
+        assert!(filesystem.exists(&VPath::parse("tree/blocked/secret.txt").unwrap()));
+    }
+
+    #[test]
     fn python_result_validation_rejects_unprojectable_types_and_depth() {
-        let nested_type = MontyObject::List(vec![MontyObject::Type(MontyType::Instance(
-            "SandboxClass".to_owned(),
-        ))]);
+        let nested_type = MontyObject::List(vec![MontyObject::Type(MontyType::Function)]);
         assert_eq!(
             validate_result_compatibility(&nested_type, ResultCompatibility::Python),
             Err(ResultCompatibilityError::TypeObject {
-                name: "SandboxClass".to_owned(),
+                name: "function".to_owned(),
             })
         );
         assert!(validate_result_compatibility(&nested_type, ResultCompatibility::Native).is_ok());

@@ -1,8 +1,9 @@
 # Performance baseline
 
-The active VSH 0.3 baseline is the paired native Rust and PyO3 release matrix captured
-on 2026-08-29. It replaces legacy Python command-engine comparisons as the merge
-baseline for the rewrite.
+The current optimization evidence is the paired release Rust/PyO3 matrix captured on
+2026-09-05, with before, final and confirmation runs in
+`benchmarks/results/2026-09-05/`. It covers the Monty 0.0.22 integration in VSH 0.4.0.
+The 2026-08-29 matrix remains historical rewrite evidence, not the current benchmark.
 
 Read:
 

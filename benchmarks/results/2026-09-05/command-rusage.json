@@ -1,0 +1,9 @@
+{
+  "schema": "vsh-command-rusage-v1",
+  "source": "macOS /usr/bin/time -l terminal output, separate uninstrumented full matrix runs",
+  "unit_notes": "user/system are command-reported seconds; max_rss_bytes is not summed simultaneous worker-tree RSS",
+  "baseline-rust": {"elapsed_s": 22.63, "user_s": 9.97, "system_s": 8.85, "max_rss_bytes": 39714816},
+  "baseline-release-python": {"elapsed_s": 23.28, "user_s": 9.99, "system_s": 8.94, "max_rss_bytes": 60620800},
+  "final-rust": {"elapsed_s": 19.49, "user_s": 6.55, "system_s": 8.72, "max_rss_bytes": 37650432},
+  "final-python": {"elapsed_s": 18.87, "user_s": 6.59, "system_s": 8.66, "max_rss_bytes": 59228160}
+}

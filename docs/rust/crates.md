@@ -11,7 +11,7 @@ on `vsh`; the other crates make boundaries auditable and publishable.
 | `vsh-types` | `vsh_types` | Paths, digests, node state, transaction IDs and lifecycle |
 | `vsh-vfs` | `vsh_vfs` | Immutable snapshots and copy-on-write virtual effects |
 | `vsh-policy` | `vsh_policy` | Protected capabilities, deterministic decision and risk manifests |
-| `vsh-monty` | `vsh_monty` | Typed Monty calls, limits, supervision, and result contract |
+| `vsh-monty` | `vsh_monty` | Typed Monty OS/high-level calls, limits, supervision, and result contract |
 | `vsh-store` | `vsh_store` | Immutable blobs, approvals, and atomic transaction state |
 | `vsh-commit` | `vsh_commit` | Revalidation, journaled mutation, verification, and recovery |
 | `vsh-monty-worker` | binary | Exact-version crash-isolated guest execution process |
@@ -52,7 +52,7 @@ host mutation.
 
 ## Version and supply-chain contract
 
-All workspace packages share version `0.3.1`, Rust 1.95.0, edition 2024, and Apache-2.0.
+All workspace packages share version `0.4.0`, Rust 1.95.0, edition 2024, and Apache-2.0.
 Direct external crates are exact-pinned, the lockfile is committed, workspace crates
 forbid unsafe code, and CI runs RustSec plus license/source/duplicate policy checks.
 

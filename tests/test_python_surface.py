@@ -175,13 +175,14 @@ def test_vsh_run_uses_default_workspace_and_budget_overrides(
     assert payload["result_repr"] == "42"
 
 
-def test_vsh_run_bounds_large_inline_result_and_stdout(tmp_path: Path) -> None:
+@pytest.mark.parametrize("character", ["x", "é", "🙂"])
+def test_vsh_run_bounds_large_inline_result_and_stdout(tmp_path: Path, character: str) -> None:
     payload = vsh_run(
-        "text = 'x' * 70000\nprint(text)\ntext",
+        f"text = {character!r} * 70000\nprint(text)\ntext",
         workspace_root=str(tmp_path),
         budget={
-            "max_output_bytes": 100_000,
-            "max_result_bytes": 100_000,
+            "max_output_bytes": 400_000,
+            "max_result_bytes": 400_000,
         },
     )
 
@@ -189,6 +190,9 @@ def test_vsh_run_bounds_large_inline_result_and_stdout(tmp_path: Path) -> None:
     assert payload["stdout_truncated"] is True
     assert str(payload["result_repr"]).endswith("…")
     assert str(payload["stdout"]).endswith("…")
+    assert len(str(payload["result_repr"])) == 65_537
+    assert len(str(payload["stdout"])) == 65_537
+    assert str(payload["stdout"]) == character * 65_536 + "…"
 
 
 def test_codemode_instruction_composition() -> None:
@@ -197,6 +201,20 @@ def test_codemode_instruction_composition() -> None:
         codemode_server.build_codemode_instructions(custom_instructions="  \n")
         == codemode_server.CODEMODE_INSTRUCTIONS
     )
+    for name in (
+        "vsh_read",
+        "vsh_write",
+        "vsh_list",
+        "vsh_mkdir",
+        "vsh_remove",
+        "vsh_move",
+        "vsh_copy",
+        "vsh_glob",
+        "vsh_search",
+        "vsh_patch",
+    ):
+        assert f"`{name}`" in codemode_server.CODEMODE_INSTRUCTIONS
+    assert "same active overlay" in codemode_server.CODEMODE_INSTRUCTIONS
 
     merged = codemode_server.build_codemode_instructions(
         custom_instructions="  Keep receipts compact.  "
@@ -241,6 +259,7 @@ async def _assert_codemode_server_contracts() -> None:
     assert [tool.name for tool in tools] == ["vsh_run"]
     assert [item.name for item in prompts] == ["vsh_run_transaction"]
     assert "single `vsh_run` tool" in str(rendered.messages[0].content)
+    assert "`vsh_search`" in str(rendered.messages[0].content)
 
     agent_server = codemode_server.create_agent_codemode_server()
     assert [tool.name for tool in await agent_server.list_tools()] == ["vsh_run"]

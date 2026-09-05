@@ -1,59 +1,39 @@
 ---
+title: Overview
 hide:
   - toc
 ---
 
-<section class="vsh-hero">
-  <span class="vsh-kicker">Transactional filesystem simulation</span>
-  <h1>Low-latency simulation for Rust and Python.</h1>
-  <p class="vsh-lead">
-    VSH runs untrusted workspace automation against an immutable snapshot, produces a
-    canonical diff, applies deterministic policy, and commits only after revalidation.
-    One Rust core powers native Rust, Python, MCP, and coding-agent workflows.
+<div class="vsh-home" markdown="1">
+
+<section class="vsh-intro">
+  <p class="vsh-eyebrow">Transactional filesystem simulation</p>
+  <h1 id="__skip">Make the change.<br><span>Before you make it real.</span></h1>
+  <p class="vsh-intro-lead">
+    Run workspace automation in a virtual snapshot. Review the proposed changes.
+    Commit when you're ready. One fast Rust engine, at home in Rust and Python.
   </p>
   <div class="vsh-actions">
-    <a class="vsh-button vsh-button--primary" href="start/">Get started</a>
-    <a class="vsh-button" href="start/how-it-works/">How it works</a>
+    <a class="vsh-button" href="start/">Start building <span aria-hidden="true">↗</span></a>
+    <a class="vsh-text-link" href="start/how-it-works/">How VSH works <span aria-hidden="true">→</span></a>
   </div>
 </section>
 
-## What VSH solves
-
-Agent-written filesystem code is useful precisely because it can change many files.
-That same power makes a wrong path, stale read, replayed approval, or partial crash
-expensive. A conventional dry run predicts; VSH executes the real program against
-virtual state and binds the resulting artifact to what was actually observed.
-
-## Validated locally
-
-- **1.3–16.5 µs:** estimated incremental PyO3 p50 in post-hardening cases.
-- **4.15× / 4.20×:** four-runtime native / Python throughput speedup.
-- **135 + 41 tests:** Rust and shipped-Python tests in the merge record.
-
-## One semantic core, two SDKs
-
-Python does not reimplement simulation or commit semantics. The `vsh-python` wheel
-exposes the native runtime through PyO3 and bundles the matching supervised Monty
-worker. Rust embedders use the `vsh` crate. Both produce the same transaction,
-snapshot, diff, decision, state transition, and commit proof.
+<section class="vsh-example" markdown="1">
+<div class="vsh-example-heading"><span>Your first preview</span><span class="vsh-caption">Changes stay virtual</span></div>
 
 === "Python"
 
     ```python
     from vsh import ReceiptDetail, Runtime
 
-    runtime = Runtime.open("/workspace/project")
+    runtime = Runtime.open("./project")
     receipt = runtime.preview(
-        """
-    from pathlib import Path
-    source = Path('/workspace/input.txt').read_text()
-    Path('/workspace/output.txt').write_text(source.upper())
-    {'bytes': len(source)}
-    """,
-        intent="Generate an uppercase preview",
+        "vsh_write('/workspace/hello.txt', 'Hello, VSH!')",
         detail=ReceiptDetail.FULL,
     )
-    print(receipt.decision, receipt.changes)
+
+    print(receipt.changes)  # Inspect before committing
     ```
 
 === "Rust"
@@ -61,46 +41,53 @@ snapshot, diff, decision, state transition, and commit proof.
     ```rust
     use vsh::{ReceiptDetail, RunRequest, Runtime, RuntimeConfig};
 
-    # fn main() -> Result<(), vsh::VshError> {
-    let runtime = Runtime::open(RuntimeConfig::new("/workspace/project"))?;
-    let receipt = runtime.preview(
-        RunRequest::new(
-            "from pathlib import Path\n\
-             Path('/workspace/output.txt').write_text('ready')",
-        )
-        .with_detail(ReceiptDetail::Full),
-    )?;
-    println!("{} {:?}", receipt.transaction, receipt.decision);
-    # Ok(())
-    # }
+    fn main() -> Result<(), vsh::VshError> {
+        let config = RuntimeConfig::new("./project");
+        let runtime = Runtime::open(config)?;
+        let code = "vsh_write('/workspace/hello.txt', 'Hello, VSH!')";
+        let request = RunRequest::new(code)
+            .with_detail(ReceiptDetail::Full);
+        let receipt = runtime.preview(request)?;
+        println!("{:?}", receipt.changes);
+        Ok(())
+    }
     ```
 
-## Why it is different
+<div class="vsh-example-footer"><span class="vsh-status-dot" aria-hidden="true"></span><span>One virtual file. No user-file changes applied.</span><a href="guides/transactions/">Understand the receipt <span aria-hidden="true">→</span></a></div>
+</section>
 
-- **Simulation is executable state.** Reads and writes occur through a typed `VirtualFs`,
-  not a shell-string heuristic.
-- **Approval is exact.** Program, intent, snapshot, dependencies, policy, configuration,
-  and canonical diff contribute to transaction identity.
-- **Commit distrusts elapsed time.** Dependencies and capability roots are revalidated
-  immediately before mutation.
-- **Failure is recoverable.** Durable intent, journals, markers, and verification make
-  interrupted commits resolvable without guessing ownership.
-- **The boundary stays thin.** Python crosses PyO3 once per transaction and receives
-  native typed values rather than a JSON round trip.
+These `vsh_*` functions are included in VSH 0.4.0. Start with the
+[self-contained installation tutorial](start/index.md) for worker setup and a complete
+preview → review → commit example.
 
-## Choose an entry point
+<section class="vsh-paths" aria-labelledby="choose-your-path">
+  <div class="vsh-section-heading"><h2 id="choose-your-path">Find your way in.</h2><p>Same engine. Your workflow.</p></div>
+  <div class="vsh-path-grid">
+    <a class="vsh-path" href="python/"><span class="vsh-path-number" aria-hidden="true">01</span><span><strong>Python SDK</strong><span>A native engine with a familiar Python API.</span></span><span aria-hidden="true">↗</span></a>
+    <a class="vsh-path" href="rust/"><span class="vsh-path-number" aria-hidden="true">02</span><span><strong>Rust SDK</strong><span>Typed control, straight from the crate.</span></span><span aria-hidden="true">↗</span></a>
+    <a class="vsh-path" href="integrations/mcp/"><span class="vsh-path-number" aria-hidden="true">03</span><span><strong>MCP &amp; agents</strong><span>One tool for a complete workspace transaction.</span></span><span aria-hidden="true">↗</span></a>
+    <a class="vsh-path" href="integrations/monty-tools/"><span class="vsh-path-number" aria-hidden="true">04</span><span><strong>Monty functions</strong><span>Read, search, patch, and compose in one snapshot.</span></span><span aria-hidden="true">↗</span></a>
+  </div>
+</section>
 
-| You are building | Start with | Why |
-|---|---|---|
-| A Python automation service | [Python SDK](python/) | Native safety with Python ergonomics and typed exceptions |
-| A Rust host or agent runtime | [Rust SDK](rust/) | Direct access to configuration, policy, storage, and receipts |
-| A local coding-agent integration | [MCP server](integrations/mcp/) | One compact `vsh_run` tool over stdio |
-| A governed agent workflow | [Agent environments](integrations/agents/) | Preview-first protocol, bounded output, exact promotion |
-| A performance-sensitive deployment | [Benchmarks](performance/) | Reproducible native/PyO3 latency, scaling, and RSS records |
+<section class="vsh-principles" aria-labelledby="every-change-accounted-for">
+  <div class="vsh-section-heading"><h2 id="every-change-accounted-for">Every change, accounted for.</h2><p>From an idea to a verified result.</p></div>
+  <ol class="vsh-sequence">
+    <li><span class="vsh-step">01 / Simulate</span><h3>A real virtual workspace</h3><p>Monty functions and <code>pathlib</code> share one copy-on-write snapshot. Reads see earlier writes.</p></li>
+    <li><span class="vsh-step">02 / Inspect</span><h3>Evidence you can review</h3><p>Inspect changed paths and bounded content. Policy and approval bind to the exact transaction.</p></li>
+    <li><span class="vsh-step">03 / Commit</span><h3>Revalidated, then applied</h3><p>VSH checks for drift, applies the approved changes, and verifies the result with recovery support.</p></li>
+  </ol>
+  <a class="vsh-text-link" href="security/">Read the security model <span aria-hidden="true">→</span></a>
+</section>
 
-!!! note "What VSH is not"
+<aside class="vsh-engineering-note">
+  <span class="vsh-eyebrow">Built to be measured</span>
+  <p>Explore the latency measurements, coverage contract, and architectural decisions behind VSH.</p>
+  <div><a href="performance/">Benchmarks <span aria-hidden="true">↗</span></a><a href="rust-rewrite/COVERAGE/">Test coverage <span aria-hidden="true">↗</span></a><a href="ARCHITECTURE/">Architecture <span aria-hidden="true">↗</span></a></div>
+</aside>
 
-    VSH is not a POSIX shell, container, general Python sandbox, or network sandbox.
-    Monty receives no host mount, subprocess capability, network capability, or ambient
-    environment. Use VSH for bounded workspace transformations whose filesystem effects
-    must be inspected, approved, and committed safely.
+VSH is for bounded workspace transformations. Monty has no host mount, subprocess,
+network capability, or ambient environment. See the [guarantees](rust-rewrite/GUARANTEES.md)
+for the precise execution and commit contract.
+
+</div>

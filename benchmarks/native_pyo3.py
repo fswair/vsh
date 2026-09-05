@@ -150,6 +150,10 @@ matches
 """
 
 
+def _glob_ten_thousand_with_vsh_program() -> str:
+    return "len(vsh_glob('**/*7.txt', path='/workspace/large-tree', max_results=1000))\n"
+
+
 def _rename_subtree_program() -> str:
     return "import os\nos.rename('/workspace/large-tree/dir-000', '/workspace/moved-tree')\nNone\n"
 
@@ -162,6 +166,10 @@ for name in os.listdir(root):
 os.rmdir(root)
 None
 """
+
+
+def _delete_subtree_with_vsh_program() -> str:
+    return "vsh_remove('/workspace/large-tree/dir-000', recursive=True)\nNone\n"
 
 
 def _massive_delete_program() -> str:
@@ -288,6 +296,13 @@ def run(iterations: int, cold_iterations: int, parallel_workers: int) -> dict[st
             iterations,
             "auto_approved",
         )
+        cases["vsh_glob_10k"] = _run_case(
+            large_runtime,
+            _glob_ten_thousand_with_vsh_program(),
+            "vsh-glob-10k",
+            iterations,
+            "auto_approved",
+        )
         cases["rename_subtree_100"] = _run_case(
             large_runtime,
             _rename_subtree_program(),
@@ -299,6 +314,13 @@ def run(iterations: int, cold_iterations: int, parallel_workers: int) -> dict[st
             large_runtime,
             _delete_subtree_program(),
             "delete-subtree-100",
+            iterations,
+            "pending_approval",
+        )
+        cases["vsh_remove_subtree_100"] = _run_case(
+            large_runtime,
+            _delete_subtree_with_vsh_program(),
+            "vsh-remove-subtree-100",
             iterations,
             "pending_approval",
         )

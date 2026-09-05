@@ -130,7 +130,7 @@ def validate_primary_sdist(path: Path, version: str) -> None:
         required_members = (b'"crates/vbash"', b'"crates/vsh"', b'"crates/vsh-worker"')
         if any(member not in workspace_manifest for member in required_members):
             raise RuntimeError(f"{path.name} does not retain the required workspace members")
-        if b'get-size2 = { version = "=0.10.1"' not in workspace_manifest:
+        if b'get-size2 = { version = "=0.10.3"' not in workspace_manifest:
             raise RuntimeError(f"{path.name} is missing the downstream resolution guard")
     forbidden = (
         f"{prefix}src/vsh/agent/",
@@ -217,7 +217,7 @@ def validate_crate(path: Path, package: str, version: str) -> None:
         if reexport not in source_payload:
             raise RuntimeError(f"{path.name} does not contain its compatibility re-export")
     if package == "vsh-monty" and (
-        "get-size2" not in manifest_payload or 'version = "=0.10.1"' not in manifest_payload
+        "get-size2" not in manifest_payload or 'version = "=0.10.3"' not in manifest_payload
     ):
         raise RuntimeError(f"{path.name} is missing the downstream get-size2 resolution guard")
 

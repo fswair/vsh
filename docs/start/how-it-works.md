@@ -1,96 +1,97 @@
 # How VSH works
 
-VSH turns a filesystem program into an inspectable, identity-bound transaction. The
-runtime performs the same stages for Rust and Python callers.
+Think of VSH as a transaction engine for workspace transformations, not a shell with
+a dry-run flag. The guest executes real supported operations. Their effects are
+recorded in a copy-on-write virtual filesystem and only a trusted committer can apply
+the final change set to the host.
 
 ```mermaid
-flowchart LR
-  A[Monty source + intent] --> B[Capability-rooted snapshot]
-  B --> C[Supervised Monty worker]
-  C --> D[Copy-on-write VirtualFs]
-  D --> E[Canonical diff]
-  E --> F{Deterministic policy}
-  F -->|deny| G[Non-mutating receipt]
-  F -->|auto approve| H[Exact transaction]
-  F -->|approval required| I[Durable pending artifact]
-  H --> J[Dependency revalidation]
-  I --> J
-  J --> K[Journaled commit]
-  K --> L[Verified receipt]
+flowchart TD
+  A[Source + intent + budgets] --> B[Fresh workspace snapshot]
+  B --> C[Monty program and active VirtualFs overlay]
+  C --> D[Canonical diff + dependencies + policy]
+  D --> E{Decision}
+  E -->|Denied| F[Return evidence; do not apply]
+  E -->|Auto-approved preview| G[Retain in live runtime]
+  E -->|Needs review| H[Persist pending artifact]
+  H --> I[Trusted approval of exact transaction]
+  I --> J[Reserve and revalidate]
+  G --> J
+  J --> K[Journal, apply, verify]
 ```
 
-## 1. Establish authority
+## The runtime owns capabilities
 
-`Runtime.open` resolves a real workspace capability and a separate protected data
-directory. It rejects overlap through lexical paths, canonical aliases, prospective
-paths, and symlink redirection. Runtime data lives under `.vsh-runtime/data` by default,
-is excluded from snapshots, and is denied to Monty.
+`Runtime.open` opens the configured workspace and protected durable storage. The
+default data directory is `.vsh-runtime/data`. It rejects unsafe overlap and aliasing,
+establishes worker supervision, and runs startup recovery. It does not merely save a
+path string for later unrestricted filesystem operations.
 
-The runtime also performs startup recovery before it accepts new work. Ambiguous
-ownership is reported and left untouched rather than guessed.
+Reuse a runtime for repeated work. This reuses capabilities and clean worker processes;
+it does **not** reuse a stale snapshot or carry an earlier preview's overlay forward.
 
-## 2. Capture an immutable base
+## Every request captures a new base
 
-The snapshot records workspace-relative paths, node kinds, metadata identity, and
-content versions under explicit limits. It does not grant the worker a host directory.
-The snapshot ID becomes part of the transaction binding.
+Snapshot capture eagerly traverses metadata for the entire configured workspace.
+Contents are lazy: a read materializes bytes only when needed, verifies their identity
+against the captured stamp, and stores immutable content. The snapshot is not an
+eager full-byte copy and is not a retained operating-system snapshot.
 
-## 3. Execute through typed calls
+Only the root `.vsh-runtime` directory is excluded by this capture path. `.gitignore`
+does not automatically exclude `.venv`, `target`, `node_modules` or other large trees.
+Choose the smallest workspace root that contains all required inputs and outputs.
 
-Monty executes a constrained Python subset in a supervised worker. Filesystem-facing
-operations become typed protocol calls into `VirtualFs`. The virtual filesystem reads
-from the snapshot and records copy-on-write effects; it does not mutate the host.
+## The guest sees one active overlay
 
-The worker has no ambient subprocess, network, environment, or host-mount capability.
-Protected absolute paths are rejected before their names or bytes enter the worker.
+Monty runs a constrained Python subset in a supervised subprocess. Supported `pathlib`
+operations suspend into typed calls answered by Rust. In VSH 0.4.0,
+the [ten VSH functions](../integrations/monty-tools.md) use the same mechanism and the
+same `VirtualFs` instance.
 
-## 4. Freeze the result
+```python
+vsh_write('/workspace/result.txt', 'first')
+from pathlib import Path
+assert Path('/workspace/result.txt').read_text() == 'first'
+Path('/workspace/result.txt').write_text('second')
+assert vsh_read('/workspace/result.txt') == 'second'
+```
 
-After execution, VSH canonicalizes the effect stream into one diff and records:
+There is no inner runtime, nested MCP request or second simulation. Intermediate
+generated files are visible within this program. A separate `preview()` starts from
+the host again, so dependent staging steps belong in one program.
 
-- the program and optional out-of-band intent;
-- snapshot and runtime-configuration identities;
-- read and write dependency digests;
-- canonical diff and policy digest;
-- bounded result, stdout, statistics, and timings.
+## Effects and final changes are different evidence
 
-These values determine the transaction identity. Approval applies to this artifact,
-not to a mutable command string or a future rerun.
+The effect ledger records attempted operations and observed dependencies. The canonical
+diff compares final virtual state to the base. Creating and then deleting a temporary
+file can yield no final change, while still recording effects. A semantic rename can
+escalate policy even when it only rearranged newly generated files.
 
-## 5. Decide deterministically
+The transaction identity binds source, intent, snapshot, policy/configuration,
+dependencies and canonical diff. Approvals refer to this exact artifact. Changing
+source and rerunning creates another execution, not an update to an existing approval.
 
-Policy first denies protected access and catastrophic bounds. Remaining work is either
-auto-approved or marked pending approval according to profile and risk flags. Policy
-does not perform a model call, so the same inputs always yield the same decision.
+## Only commit changes user files
 
-## 6. Revalidate and commit
+Preview always stops before application. Auto mode proceeds only for deterministic
+auto-approval. A pending transaction needs an independent trusted-host approval;
+hard policy denial cannot be overridden with approval.
 
-The committer is the only component allowed to change the workspace. It serializes the
-short revalidation/mutation window for a single workspace, then verifies capability
-identity, read dependencies, write preconditions, and the host result. Independent
-runtimes do not share a process-global lock.
+Commit reserves the transaction once, serializes the same-workspace mutation window,
+revalidates recorded reads/writes and capabilities, applies a journaled plan, and verifies
+the result. Input drift produces a stale failure. Interrupted commit may require
+recovery; do not equate this with database-wide isolation from arbitrary external
+processes or instantaneous multi-file visibility.
 
-Commit uses durable intent, a checksummed journal, markers, and verification. Recovery
-can finish, roll back, clean, or report a conflict without following replaced internal
-symlinks.
+## One engine, separate adapters
 
-## Rust owns semantics
-
-| Concern | Owner |
+| Layer | Responsibility |
 |---|---|
-| Snapshot, VirtualFs, canonical diff | Rust crates |
-| Monty supervision and typed OS-call protocol | Rust crates + pinned worker |
-| Policy, transaction identity, state machine | Rust crates |
-| Durable artifact storage, commit, recovery | Rust crates |
-| Python object conversion and exception mapping | Thin PyO3 module |
-| MCP JSON-safe envelope | Small Python adapter over PyO3 |
+| Rust runtime and component crates | Snapshot, execution dispatch, diff, policy, state, commit, recovery |
+| Python PyO3 binding | One native call per request; typed result and exception conversion |
+| CLI / MCP adapter | Request construction and JSON-safe receipt projection |
+| Your trusted application | Authentication, workspace selection, budget ceilings, reviewer decisions |
 
-There is no Python simulator or Python committer fallback. This is what keeps behavior
-and performance aligned across both SDKs.
-
-## Guarantees and boundaries
-
-Read the exact [guarantee contract](../rust-rewrite/GUARANTEES.md) and
-[threat model](../rust-rewrite/THREAT_MODEL.md) before treating VSH as a security
-boundary. In particular, VSH governs filesystem effects exposed through its typed
-surface; it is not a general-purpose operating-system sandbox.
+The guest has no exposed shell, network, environment or host-mount capability. This is
+not a general-purpose VM or kernel isolation boundary. Read [security](../security.md)
+before embedding VSH around untrusted users or agent-produced code.

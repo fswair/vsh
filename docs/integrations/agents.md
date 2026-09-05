@@ -1,136 +1,112 @@
-# Agent environments
+# VSH in an agent environment
 
-VSH gives a coding agent a wide but structured workspace capability: the agent may
-author one program, while the trusted host retains control over policy, budgets,
-approval, revalidation, and commit.
+Give the agent a language for proposing changes, while the trusted application retains
+workspace authority and the decision to apply them. VSH supplies virtual execution,
+deterministic policy, exact transaction binding and commit revalidation. It does not
+authenticate users or determine whether an agent understood the task.
 
-Use `vsh-codemode` when the MCP client consumes server instructions or prompts. Use
-`vsh serve` when the host supplies its own agent protocol. Both expose exactly one
-normal tool.
+## Choose an integration boundary
 
-## Recommended protocol
+| Integration | Good fit | Host responsibility |
+|---|---|---|
+| Python/Rust SDK wrapper | Managed services and high-rate workflows | Own runtime lifecycle, fixed roots/budgets, review and discard |
+| `vsh serve` | An MCP host with its own workflow guidance | Restrict raw arguments and manage server lifetime |
+| `vsh-codemode` | MCP clients consuming server instructions/prompts | Same controls; instructions are not policy enforcement |
 
-Give the agent this behavioral contract alongside the MCP tool:
+The raw MCP tool exposes workspace, policy and budget choices. Do not assume its
+working directory confines an untrusted caller. Run with appropriate operating-system
+permissions and place an authorization layer around those arguments.
 
-```text
-Use vsh_run for every filesystem transformation.
-Start with mode="preview" and detail="full".
-Never treat a returned result as proof that host files changed.
-Inspect decision, changed_paths, changes, risk_flags, and deny_reason.
-Promote only the exact returned transaction, through the same server process,
-and only when decision is auto_approved and the changes match the stated intent.
-Never bypass denied, stale, pending-approval, or recovery failures with another
-filesystem tool. Ask the trusted host for review instead.
-```
+## Keep trusted choices out of the model schema
 
-This is workflow guidance, not the security boundary. The Rust core still denies
-protected access, enforces budgets, binds identity, and revalidates before commit.
-
-## Agent loop
-
-```text
-task
-  → write one bounded Monty program
-  → vsh_run(preview, full detail)
-  → inspect receipt
-      denied            → revise scope or stop
-      pending_approval  → request trusted review
-      auto_approved     → present exact changes
-  → vsh_run(transaction, auto)
-  → require committed=true and retain receipt
-```
-
-## One program beats many tool calls
-
-For related reads and writes, prefer one program:
+For example, construct this once in your application; expose only source submission
+through your agent tool framework:
 
 ```python
-from pathlib import Path
+from vsh import ExecutionBudget, ReceiptDetail, Runtime
 
-names = []
-for path in Path('/workspace/config').glob('*.txt'):
-    value = path.read_text().strip()
-    names.append(value)
+runtime = Runtime.open("/srv/workspaces/project-17", policy="strict")
+budget = ExecutionBudget(
+    max_duration_ms=250,
+    max_memory_bytes=64 * 1024 * 1024,
+    max_os_calls=1_000,
+    max_read_bytes=8 * 1024 * 1024,
+    max_write_bytes=4 * 1024 * 1024,
+    max_output_bytes=16 * 1024,
+    max_result_bytes=64 * 1024,
+)
 
-Path('/workspace/generated/names.txt').parent.mkdir(parents=True, exist_ok=True)
-Path('/workspace/generated/names.txt').write_text('\n'.join(sorted(names)) + '\n')
-{'inputs': len(names), 'output': 'generated/names.txt'}
+def propose(code: str):
+    return runtime.preview(code, detail=ReceiptDetail.FULL, budget=budget)
 ```
 
-This keeps intermediate data in the worker, produces one canonical diff, and crosses
-the MCP/PyO3 boundary once. Replacing it with dozens of read/write tool calls increases
-latency, context volume, and race opportunities.
+This illustrates ownership, not a complete authenticated server. The application must
+serialize a bounded receipt, enforce admission/rate limits, correlate user sessions,
+clean up read-only auto-approved previews and protect review/commit endpoints. Do not
+hand a `Runtime` object or an unrestricted `approve` method to the model.
 
-## Context-efficient receipts
+## A reliable agent loop
 
-Use `detail="full"` when a human or model will review individual paths. Use
-`detail="compact"` for high-rate read-only work or after a workflow has another trusted
-diff renderer. Compact receipts still include transaction, snapshot, diff identity,
-counts, policy decision, counters, and timings.
+1. Establish a trusted task and allowed workspace scope.
+2. Ask for one bounded Monty program containing dependent discovery, edits and validation.
+3. Preview it and distinguish execution errors from returned policy decisions.
+4. Review exact paths, intended content, risks and output truncation.
+5. Stop on denial; send pending work to an independent authenticated reviewer.
+6. Commit only the exact accepted transaction, using the correct retained runtime.
+7. Require verified commit evidence before claiming completion.
 
-Returned result and stdout are independently bounded. Ask the program to return only
-the information needed for the next decision—counts, selected paths, or a small summary
-rather than entire file contents.
+If input drift makes the artifact stale, re-plan and review against a fresh snapshot.
+Never route a denied operation through a shell or another filesystem tool to bypass
+VSH's result.
 
-## Trusted host responsibilities
+## Compose inside the active snapshot
 
-The host, not the agent, should own:
+In VSH 0.4.0, the [VSH functions](monty-tools.md) make bounded
+compound operations concise. `pathlib` and `vsh_*` see each other's writes. A second
+`vsh_run` gets a fresh host snapshot, so do not spread dependent staging steps across
+multiple previews expecting a persistent virtual session.
 
-- real workspace selection;
-- worker executable and durable-data directory;
-- policy profile and maximum allowed budget overrides;
-- approval principal and expiry;
-- MCP server process lifetime;
-- audit receipt retention;
-- operator handling for recovery conflicts.
+Use cap+1 discovery and expected-content assertions for migrations. Prefer one coherent
+program over many external read/write calls, but split independently reviewable batches
+when their combined evidence exceeds practical limits. The [cookbook](../python/examples.md)
+demonstrates these patterns with actual fixture outcomes.
 
-Do not interpolate agent-controlled paths into `workspace_root`, `worker_path`, or
-external state roots without an authorization layer.
+## Treat review evidence as untrusted data
 
-## Human approval design
+`diff` is a digest, not a text diff. Full Python/MCP changes identify paths and kinds;
+Rust additionally exposes node-state before/after identities. A review UI needs bounded
+content evidence as well as scope. Do not accept `{'safe': True}` returned by the same
+program as proof of safety.
 
-When policy returns pending approval, show the reviewer:
+File text, returned objects, stdout and source can contain prompt injection. Present
+them as quoted data, separate them from trusted instructions, and bind the final review
+to the transaction ID. The trusted service authenticates the reviewer before creating
+a principal-bound, expiring grant.
 
-- transaction and base snapshot identities;
-- stated intent;
-- full canonical changes or a trusted diff renderer keyed by the diff digest;
-- risk flags and changed/deleted byte/path metrics;
-- program source and bounded output;
-- approval expiry and principal.
+## Manage runtime and process resources
 
-The reviewer service then calls the Python or Rust SDK. Keep approval outside the same
-MCP tool surface used by the model.
+Reuse one runtime per authorized workspace/configuration. Complete every auto-approved
+preview lifecycle; read-only requests must be discarded after consumption. Use strict
+durable artifacts for asynchronous human review, not process-local auto-preview caches.
 
-## Parallel agent workers
+The raw MCP LRU retains 16 runtimes and can lose handles on eviction. Its one-tool
+surface has no discard action. SDK wrappers are better suited to continuous analysis
+and long-lived services. Bound concurrent active requests independently of idle worker
+pool capacity, and expect stale conflicts for concurrent work on one workspace.
 
-Give each independent workspace its own runtime. Native calls release the Python GIL,
-and the runtime has no global execution lock. Avoid multiple agent processes sharing a
-process-local preview: the handle must be promoted by the runtime instance that created
-it.
+Guest bytecode/heap limits are not whole-service deadlines or memory quotas. Monitor
+parent plus worker processes and apply deployment-level limits. Separate external
+network/build tasks into explicit trusted tools; VSH itself does not gain those
+capabilities by being connected to an agent.
 
-For shared workspaces, expect commit-time stale failures. The correct response is a new
-preview and review, not force application.
+## Measure context and cost honestly
 
-## Failure policy for agents
+One external tool schema and a small result can reduce prompt/context volume. High-level
+calls can reduce worker suspensions. These are different costs from snapshot I/O,
+native allocations, MCP serialization and model billing. The local
+[benchmarks](../performance.md) measure execution and resource behavior, not token prices
+or model quality. Profile your own agent loop before claiming monetary savings.
 
-| Signal | Agent action |
-|---|---|
-| `denied` | Stop or reduce scope; do not route around VSH |
-| `pending_approval` | Ask the trusted reviewer; do not auto-promote |
-| `VshStaleError` / stale tool error | Re-read task context and create a new preview |
-| Budget exceeded | Simplify/chunk deliberately; never request unlimited budget |
-| Recovery conflict | Stop the workspace and notify an operator |
-| `committed=false` | Never claim the requested host change completed |
-
-## Good agent tasks
-
-- update generated configuration from multiple checked-in inputs;
-- apply a consistent refactor across a bounded subtree;
-- normalize manifests and metadata;
-- inspect workspace state and return a typed summary;
-- stage a migration for human review;
-- apply a reviewed exact transaction after dependency revalidation.
-
-Tasks that require network calls, subprocesses, arbitrary package imports, or host paths
-outside the workspace should be split: perform those operations in a separate trusted
-tool, pass bounded data into VSH, and keep filesystem mutation inside the transaction.
+The MCP cookbook is credential-free and tests protocol behavior. It is not an LLM
+integration evaluation. Older repository examples importing `vsh.agent`, `vsh.schemas`
+or `vsh.simulate` belong to the legacy engine and are not examples of the current wheel.

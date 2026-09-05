@@ -13,7 +13,7 @@ extra_css = ["assets/stylesheets/vsh.css"]
 extra_javascript = [{ path = "assets/javascripts/copy-markdown.js", defer = true }]
 
 nav = [
-  { "VSH" = "index.md" },
+  { "Overview" = "index.md" },
   { "Start here" = [
     "start/index.md",
     { "How VSH works" = "start/how-it-works.md" },
@@ -22,20 +22,24 @@ nav = [
   { "Guides" = [
     { "Transactions" = "guides/transactions.md" },
     { "Policies and budgets" = "guides/policies-and-budgets.md" },
+    { "Efficient usage" = "guides/efficient-usage.md" },
+    { "Troubleshooting" = "guides/troubleshooting.md" },
+    { "Command line" = "guides/cli.md" },
   ] },
   { "Python SDK" = [
     "python/index.md",
     { "API reference" = "python/api.md" },
-    { "Examples" = "python/examples.md" },
+    { "Cookbook" = "python/examples.md" },
   ] },
   { "Rust SDK" = [
     "rust/index.md",
     { "API reference" = "rust/api.md" },
     { "Crate map" = "rust/crates.md" },
-    { "Examples" = "rust/examples.md" },
+    { "Cookbook" = "rust/examples.md" },
   ] },
   { "MCP and agents" = [
     { "MCP server" = "integrations/mcp.md" },
+    { "Monty VSH functions" = "integrations/monty-tools.md" },
     { "Agent environments" = "integrations/agents.md" },
   ] },
   { "Engineering" = [
@@ -56,6 +60,7 @@ nav = [
 
 [project.theme]
 language = "en"
+custom_dir = "theme"
 favicon = "assets/mark.svg"
 logo = "assets/mark.svg"
 features = [
@@ -75,7 +80,7 @@ features = [
 ]
 
 [project.theme.font]
-text = "IBM Plex Sans"
+text = "DM Sans"
 code = "IBM Plex Mono"
 
 [[project.theme.palette]]

@@ -13,18 +13,43 @@ rustup show active-toolchain
 Rust is pinned in `rust-toolchain.toml`; Python and documentation dependencies are
 locked in `uv.lock`. Zensical is exactly pinned to `0.0.57`.
 
+## Build the current native surface
+
+This development tree identifies as `0.4.0` and includes the Monty 0.0.22 functions
+and September 5 optimizations. From a checkout with the environment bootstrapped,
+build matching optimized artifacts:
+
+```bash
+cargo build --release --locked -p vsh-monty-worker
+uv run --no-sync maturin develop --release --locked --skip-install
+export VSH_MONTY_WORKER="$PWD/target/release/vsh-monty-worker"
+uv run --no-sync python examples/native/workflows.py
+uv run --no-sync python examples/native/mcp_workflow.py
+uv run --no-sync python examples/native/cli_workflow.py
+cargo run --release --locked -p vsh-runtime --example staged_release
+```
+
+For this mixed Python layout, Maturin's `--skip-install` builds the extension in place
+without reinstalling dependency groups. It does not build/deploy the separate worker;
+the first command and explicit worker path are required. Do not mix a debug extension
+with a release native harness when evaluating optimizations. A frozen environment
+already containing build requirements can add `--offline` to the Maturin command.
+
 ## Documentation
 
 Preview locally:
 
 ```bash
-uv run zensical serve
+python scripts/generate_llms_txt.py
+uvx --from zensical==0.0.57 zensical serve
 ```
 
 Build with CI-equivalent validation:
 
 ```bash
-uv run zensical build --clean --strict
+python scripts/generate_llms_txt.py --check
+uvx --from zensical==0.0.57 zensical build --clean --strict
+python scripts/check_docs.py
 ```
 
 Page source lives under `docs/`, navigation and theme configuration in
@@ -32,18 +57,40 @@ Page source lives under `docs/`, navigation and theme configuration in
 
 - `docs/assets/stylesheets/vsh.css`;
 - `docs/assets/javascripts/copy-markdown.js`;
-- `docs/assets/mark.svg`.
+- `docs/assets/mark.svg`;
+- `theme/partials/header.html`, `theme/partials/content.html` and `theme/404.html`.
 
-Every page receives a **Copy as Markdown** action. It fetches the exact page source from
-the configured repository action, so keep `repo_url`, `edit_uri`, and deployed branch
-aligned.
+The Venus palette pairs warm paper and copper accents with a charcoal dark theme.
+The vertical navigation, search, theme switching, and instant navigation remain owned
+by Zensical; the two template overrides provide a compact header and an in-flow page
+toolbar. Keep both overrides compatible with the pinned Zensical version when upgrading.
+
+Every documentation page receives a **Copy as Markdown** action. Its exact source is
+bundled in `docs/assets/markdown.json`, generated alongside `llms.txt` and
+`llms-full.txt`. The corpus is fetched only on the first copy, from the same site,
+so local previews and deployed pages copy their own version without contacting GitHub.
+Regenerate these three artifacts after changing Markdown or navigation. Clipboard
+errors offer a retry and are announced to assistive technology.
+
+The commands above build only documentation, without installing the project or
+compiling Rust. The Pages workflow also watches `theme/` changes. When changing the
+layout, check desktop and mobile navigation, both themes, search, content tabs, and
+Markdown copying after instant navigation.
+
+The dependency-free `check_docs.py` gate validates local links and fragments, deployed
+LLM/source bundles, one copy-source mapping per document and Python snippet syntax.
+It runs in the docs-only Pages workflow without installing VSH or compiling Rust.
 
 ## Python gates
 
 ```bash
 uv run ruff check
 uv run ruff format --check
-uv run ty check
+uv run ty check \
+  src/vsh/__init__.py src/vsh/_version.py src/vsh/cli.py src/vsh/mcp \
+  tests/test_native_binding.py tests/test_native_runtime.py tests/test_python_surface.py \
+  release/check_versions.py release/smoke_wheel.py release/validate_artifacts.py \
+  examples/native benchmarks/native_pyo3.py benchmarks/process_tree.py benchmarks/compare.py
 uv run basedpyright
 uv run pytest \
   tests/test_native_binding.py \
@@ -56,6 +103,7 @@ uv run pytest \
 
 ```bash
 cargo fmt --all -- --check
+cargo test --workspace --all-features --all-targets --locked
 cargo llvm-cov \
   --workspace --all-features --all-targets --locked --summary-only \
   --ignore-filename-regex '(vsh-python|vsh-worker)' \
@@ -86,3 +134,10 @@ versions, and publishes only through protected tag-triggered environments.
 - Keep Python and Rust signatures separate even when behavior is shared.
 - Use `preview` in first examples; explain exact transaction promotion before auto mode.
 - Link deep security claims to the threat model or guarantee record.
+- Keep published-release and later checkout-only capabilities visibly distinct.
+- Test fixture-owning examples; do not present legacy Python modules as current wheel APIs.
+- Report RSS scope, sampling gaps, confirmation runs and unfavorable benchmark outcomes.
+
+The bare `ty check` command also discovers historical legacy tests that target the
+removed Python engine. The explicit native release-surface command above follows CI;
+it does not silently reclassify those legacy contracts as current SDK failures.

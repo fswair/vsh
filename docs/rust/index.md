@@ -9,10 +9,10 @@ Keep the exact version pin required by the project supply-chain policy:
 
 ```toml
 [dependencies]
-vsh = "=0.3.1"
+vsh = "=0.4.0"
 ```
 
-The compatibility crate `vbash = "=0.3.1"` contains no implementation and re-exports
+The compatibility crate `vbash = "=0.4.0"` contains no implementation and re-exports
 the exact matching `vsh` release under the same `use vsh::...` library name. New
 applications should depend on `vsh` directly.
 

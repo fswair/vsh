@@ -23,7 +23,7 @@ RUST_PACKAGES = {
     "vsh-vfs",
 }
 COMPAT_PYPROJECT = ROOT / "compat" / "vbash" / "pyproject.toml"
-MONTY_RESOLUTION_GUARD = {"version": "=0.10.1", "default-features": False}
+MONTY_RESOLUTION_GUARD = {"version": "=0.10.3", "default-features": False}
 
 
 def project_version() -> str:

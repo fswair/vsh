@@ -5,15 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+readme.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Typed Monty OS-call adapter for the VSH virtual filesystem"
+description = "Typed Monty OS-call and high-level tool adapter for the VSH virtual filesystem"
 publish = ["crates-io"]
 
 [dependencies]
-# Monty 0.0.21's Ruff graph accepts get-size2 0.10.0+, but 0.10.3 switches
-# its compact-str integration to 0.10 while Ruff still uses 0.9. Keep fresh
-# downstream resolutions on the last compatible release until Monty updates.
+# Keep the direct accounting edge on the exact patch used by Monty 0.0.22's
+# Ruff 0.0.9 graph so workspace resolution cannot silently drift.
 get-size2.workspace = true
 monty.workspace = true
 monty-proto.workspace = true

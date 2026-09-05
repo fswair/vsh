@@ -1,6 +1,6 @@
 [project]
 name = "vsh-python"
-version = "0.3.1"
+version = "0.4.0"
 description = "VSH is a low-latency transactional filesystem simulator backed by Rust."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -209,6 +209,10 @@ include = [
     "release/check_versions.py",
     "release/smoke_wheel.py",
     "release/validate_artifacts.py",
+    "examples/native",
+    "benchmarks/native_pyo3.py",
+    "benchmarks/process_tree.py",
+    "benchmarks/compare.py",
 ]
 extraPaths = ["src", "playground", "examples"]
 exclude = ["references/**", "target/**"]

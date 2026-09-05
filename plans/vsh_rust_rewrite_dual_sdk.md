@@ -10,16 +10,16 @@ phase-order portions of the original “VSH Rust Rewrite — Full System Design 
 Implementation Plan”. Security invariants and the virtual-filesystem architecture from
 that document remain authoritative unless this document strengthens them.
 
-## Implementation status — 2026-08-29
+## Implementation status — 2026-09-05
 
 | Phase | State | Evidence / remaining release work |
 |---|---|---|
-| 0–3 | Implemented | The corrected Python baseline candidate, immutable VFS, canonical diff, and supervised Monty 0.0.21 worker are recorded under `docs/rust-rewrite/`; freezing the candidate as a clean tag still requires explicit release authority. |
+| 0–3 | Implemented | The corrected Python baseline candidate, immutable VFS, canonical diff, and supervised Monty 0.0.22 worker are recorded under `docs/rust-rewrite/`; freezing the candidate as a clean tag still requires explicit release authority. |
 | 4–7 | Implemented | Protected-read policy, exact durable approvals, single-use recovery-aware committer, race/fault tests, same-workspace commit coordination, pinned workspace/runtime identities, bounded recovery reads, and fail-closed internal symlink handling are in Rust. |
 | 8 | Implemented | The `vsh` public facade, `vsh-runtime` implementation, and `vsh._native` PyO3 surface share one version; Python result compatibility is checked before persistence/commit, blocking native work releases the GIL, and panics map into one catchable Python exception hierarchy. |
-| 9 | Implemented | The optional FastMCP adapter exposes only `vsh_run`; preview promotion reuses the exact native transaction. |
+| 9 | Implemented | The optional FastMCP adapter exposes only `vsh_run`; its Monty program receives bounded high-level `vsh_*` functions that operate directly on the same active `VirtualFs` overlay as `pathlib`, and preview promotion reuses the exact native transaction. |
 | 10 | In progress | Paired native-Rust and PyO3 fat-LTO evidence closes preview-fsync and full-path snapshot metadata bottlenecks; the final post-hardening 100-sample rerun keeps distinguishable incremental PyO3 p50 at 1.3–16.5 µs, covers search over 10k files, 100-file rename/delete subtrees, a 5,050-node delete, 30 cold starts, and independent-runtime scaling. Equivalent clean frozen-baseline, supported-platform/worker-tree RSS, and adversarial performance runs remain release gates. |
-| 11 | In progress | Isolated CPython 3.14 wheel and sdist install/import/commit, all eight registry crate archives, Rust advisory/license/source gates, the hash-locked Python CVE scan, 100% shipped-Python line/branch coverage, and Rust core coverage of 80.52% lines / 71.78% functions / 82.53% regions pass locally. A SHA-pinned build-only rehearsal plus gated 20-wheel dual-registry/provenance workflow is implemented; executing the hosted platform matrix and publishing still require CI environments, credentials, and an explicit release tag. |
+| 11 | In progress | Isolated CPython 3.14 wheel and sdist install/import/commit, all ten registry crate archives, Rust advisory/license/source gates, the hash-locked Python CVE scan, 100% shipped-Python line/branch coverage, and Rust core coverage of 80.86% lines / 72.86% functions / 82.69% regions pass locally. A SHA-pinned build-only rehearsal plus gated 20-wheel dual-registry/provenance workflow is implemented; executing the hosted platform matrix and publishing still require CI environments, credentials, and an explicit release tag. |
 | 12 | Deferred | No deferred optimization is admitted without new benchmark evidence. |
 
 ## 1. Product north star
@@ -355,18 +355,19 @@ Required policy:
 “No CVE” means no known published advisory in the checked sources at that timestamp; it
 does not claim that undiscovered vulnerabilities cannot exist.
 
-### 9.1 Initial verified pins
+### 9.1 Current verified pins
 
-Verified on 2026-08-29 against official registry/source metadata and refreshed advisory
+Verified on 2026-09-05 against official registry/source metadata and refreshed advisory
 databases:
 
 | Dependency/tool | Exact version | Scope | Status |
 |---|---:|---|---|
 | Rust toolchain | `1.95.0` | build/MSRV initially aligned with Monty | active stable toolchain |
-| `monty` | `=0.0.21` | interpreter core | Pydantic-maintained, stable, non-yanked |
-| `monty-types` | `=0.0.21` | typed calls/resource contracts | same release train |
-| `monty-proto` | `=0.0.21` | typed worker protocol and lossless Monty value → native Python conversion | same release train; worker feature disabled |
-| `monty-alloc` | `=0.0.21` | worker-wide memory ceiling | same release train; only `exit-code` enabled |
+| `monty` | `=0.0.22` | interpreter core | Pydantic-maintained, stable, non-yanked |
+| `monty-types` | `=0.0.22` | typed calls/resource contracts | same release train |
+| `monty-proto` | `=0.0.22` | typed worker protocol and lossless Monty value → native Python conversion | same release train; worker feature disabled |
+| `monty-alloc` | `=0.0.22` | worker-wide memory ceiling | same release train; only `exit-code` enabled |
+| `get-size2` | `=0.10.3` | Monty/Ruff memory accounting | exact compatible release selected by Ruff 0.0.9 |
 | `pyo3` | `=0.29.2` | Python binding | PyO3-maintained, stable |
 | `blake3` | `=1.8.7` | blob/snapshot/diff identity | official active BLAKE3 implementation; `std` only |
 | `cap-std` | `=4.0.3` | capability-rooted host filesystem access | Bytecode Alliance-maintained, stable, non-yanked; no default features |
@@ -555,27 +556,32 @@ canonical diff to an independent model produces the same final state.
 Performance gate: operation cost scales with touched state; snapshot/content metrics
 match the budgets.
 
-### Phase 3 — Monty typed OS-call integration
+### Phase 3 — Monty typed call integration
 
-- Depend only on exact admitted Monty 0.0.21 crates.
+- Depend only on exact admitted Monty 0.0.22 crates.
 - Use the public typed OS-call seam; do not fork or add VSH-specific code to Monty.
 - Provide zero host mounts, synthetic environment, bounded output, and resource limits.
 - Map every V0 filesystem call to VirtualFs.
+- Inject VSH high-level functions as typed Monty inputs and service their suspensions
+  directly against the caller-owned active `VirtualFs`; never create a nested runtime,
+  snapshot, transaction, MCP callback, or host filesystem path.
 - Measure worker cold start, checkout, reset, and discard.
 
 Gate: arbitrary supported Monty filesystem programs produce an exact virtual final
 state and zero host effects.
 
-Current status (2026-08-29): delivered. The complete 0.0.21 typed filesystem enum maps
+Current status (2026-09-05): delivered. The complete 0.0.22 typed filesystem enum maps
 into `VirtualFs`; production `Runtime` execution crosses a supervised, exact-versioned
 worker boundary. The parent retains typed call dispatch, applies independent memory,
 wall-time, event, frame, result, output, path, and I/O limits, and reuses only cleanly
-reset workers. The official worker feature was rejected because its graph includes a
-yanked crate; the replacement uses Monty's public typed run API without a fork or new
-runtime dependency. Adversarial isolation tests pass. Release-mode warm/cold latency
-is recorded as warm distributions plus 30 independent cold samples; peak RSS and
-cross-platform baselines remain measurement tasks, not isolation blockers. See
-`docs/rust-rewrite/PHASE_3_MONTY.md`.
+reset workers. Ten stable `vsh_*` functions are passed in the initial feed, so each
+function uses one existing suspension round trip and the same overlay/effect ledger as
+`pathlib`; no second simulation boundary is introduced. The official worker feature was
+rejected because its graph includes a yanked crate; the replacement uses Monty's public
+typed run API without a fork or new runtime dependency. Adversarial isolation tests
+pass. Release-mode warm/cold latency is recorded as warm distributions plus 30
+independent cold samples; peak RSS and cross-platform baselines remain measurement
+tasks, not isolation blockers. See `docs/rust-rewrite/PHASE_3_MONTY.md`.
 
 ### Phase 4 — Read capability and deterministic policy
 
@@ -613,7 +619,10 @@ and Python quick starts.
 ### Phase 9 — MCP/model surface
 
 Expose one normal tool, `vsh_run`, backed by the same runtime. Keep compact receipts,
-preview mode, and artifact handles. Do not expose internal lifecycle steps to the model.
+preview mode, and artifact handles. Give the submitted Monty program a small stable set
+of high-level VSH filesystem functions for efficient multi-file work, while retaining
+`pathlib` on the identical active overlay. Do not expose internal lifecycle steps to the
+model or multiply the MCP discovery surface.
 
 ### Phase 10 — Performance closure
 
@@ -705,11 +714,13 @@ Source: user direction, 2026-08-28.\
 Invalidates if: correctness/security requires a measured tradeoff; document the cost and
 obtain explicit approval.
 
-Decision: Maturin/PyO3 initial verified versions are 1.15.0/0.29.2 and Monty is 0.0.21.\
-Reason: latest stable official releases observed on the decision date.\
-Source: official PyPI/crates.io metadata and Pydantic/PyO3 repositories.\
-Invalidates if: a newer stable release passes the full admission and compatibility gate
-before the dependency is first committed.
+Decision: Maturin/PyO3 verified versions are 1.15.0/0.29.2 and Monty is 0.0.22.\
+Reason: exact current releases preserve a reproducible, reviewed native binding and
+interpreter graph.\
+Source: official PyPI/crates.io metadata and the Pydantic/PyO3 repositories; Monty was
+updated on 2026-09-05 after the official 0.0.22 release.\
+Invalidates if: a newer stable release passes the full admission, compatibility,
+security, coverage, and performance gates.
 
 Decision: the baseline durable transaction store is dependency-free.\
 Reason: the checksummed append log provides bounded recovery and atomic CAS; its

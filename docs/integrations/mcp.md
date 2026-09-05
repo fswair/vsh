@@ -1,73 +1,50 @@
 # MCP server
 
-VSH's MCP adapter exposes exactly one normal tool: `vsh_run`. One multi-file Monty
-program becomes one Rust transaction, one policy decision, and one Python/Rust boundary
-crossing.
+VSH exposes one normal MCP tool, `vsh_run`. Its `code` argument is a complete Monty
+program: one snapshot, one active overlay, one canonical change set and one policy
+decision. The Python adapter constructs a native request and projects the receipt;
+it does not implement a separate filesystem simulator.
 
-## Install and start
-
-```bash
-uv add 'vsh-python[mcp]==0.3.1'
-uv run vsh serve
-```
-
-The transport is stdio. The server process working directory is the default workspace
-for calls that omit `workspace_root`.
-
-For coding agents, `vsh-codemode` exposes the same one-tool surface and additionally
-publishes workflow instructions plus the `vsh_run_transaction` MCP prompt:
+## Install and launch
 
 ```bash
-uv run vsh-codemode
+python -m pip install 'vsh-python[mcp]==0.4.0'
+vsh serve
 ```
 
-From a source checkout:
+Transport is stdio. `vsh-codemode` exposes the same one-tool surface with built-in
+workflow instructions and the `vsh_run_transaction` prompt:
 
 ```bash
-uv sync --frozen --all-groups --extra mcp
-uv run vsh serve
+vsh-codemode
 ```
 
-## Generic MCP client configuration
+The ten in-program VSH functions and the existing `pathlib` surface are included in
+VSH 0.4.0. See [source installation](../development.md) when developing from a checkout.
 
-Clients that accept the common `mcpServers` launch shape can run the project-local
-binary:
+## Connect a client
+
+For a client supporting this common launch configuration, point at the executable
+inside the environment where VSH is installed:
 
 ```json
 {
   "mcpServers": {
     "vsh": {
-      "command": "uv",
-      "args": ["run", "vsh", "serve"],
-      "cwd": "/absolute/path/to/project"
+      "command": "/absolute/path/to/.venv/bin/vsh",
+      "args": ["serve"],
+      "cwd": "/absolute/path/to/workspace"
     }
   }
 }
 ```
 
-Replace the final two arguments with `vsh-codemode` when the client consumes MCP server
-instructions/prompts:
+Use the environment's `vsh-codemode` executable with empty `args` for CodeMode guidance.
+Client configuration formats vary; `cwd` selects the default workspace, **not an
+authorization allowlist**. The raw tool still accepts `workspace_root`, policy and
+budget arguments. Constrain those in a trusted wrapper for an untrusted client.
 
-```json
-{
-  "mcpServers": {
-    "vsh": {
-      "command": "uv",
-      "args": ["run", "vsh-codemode"],
-      "cwd": "/absolute/path/to/project",
-      "env": {
-        "VSH_CODEMODE_INSTRUCTIONS_FILE": ".vsh/agent-rules.md"
-      }
-    }
-  }
-}
-```
-
-For an installed wheel, point `command` at the environment's `vsh` executable and keep
-the workspace as `cwd`. Never let an untrusted agent choose the worker executable or
-durable state directory.
-
-## `vsh_run`
+## Request contract
 
 ```text
 vsh_run(
@@ -76,119 +53,104 @@ vsh_run(
     transaction: str | None = None,
     workspace_root: str | None = None,
     intent: str | None = None,
-    mode: Literal["preview", "auto"] = "preview",
-    policy: Literal["balanced", "strict", "paranoid"] = "balanced",
-    detail: Literal["compact", "full"] = "compact",
+    mode: "preview" | "auto" = "preview",
+    policy: "balanced" | "strict" | "paranoid" = "balanced",
+    detail: "compact" | "full" = "compact",
     budget: BudgetOverrides | None = None,
 ) -> dict[str, object]
 ```
 
-### Inputs
+For new work pass `code`. For promotion pass `transaction`, no code, and `mode="auto"`.
+Resolve the same workspace/profile/worker identity as the preview. Promotion does not
+rerun source or create a different detail/budget configuration for the existing artifact.
+The budget keys match the [Python execution budget](../python/api.md#executionbudget).
 
-| Field | Rule |
-|---|---|
-| `code` | Required for a new transaction; exact Monty source |
-| `transaction` | Used instead of code to promote one preview |
-| `workspace_root` | Existing directory; defaults to server `cwd` |
-| `intent` | Trusted context bound into transaction identity |
-| `mode` | Preview or deterministic auto mode |
-| `policy` | Built-in deterministic profile |
-| `detail` | Compact receipt or full canonical path list |
-| `budget` | Optional overrides for the 13 native execution ceilings |
+## Preview, review, promote
 
-Passing both `code` and `transaction` is rejected. A transaction handle may only be
-resumed with `mode="auto"`.
-
-### Output envelope
-
-| Group | Fields |
-|---|---|
-| Identity | `transaction`, `base_snapshot`, `diff` |
-| Decision | `state`, `decision`, `risk_flags`, `deny_reason` |
-| Effects | `changed_paths`, `changes` |
-| Guest output | `result_repr`, `result_truncated`, `stdout`, `stdout_truncated` |
-| Counters | `os_calls`, `read_bytes`, `write_bytes`, `directory_entries`, `output_bytes`, `denied_accesses`, `result_bytes` |
-| Commit | `committed`, `operations`, `verified_paths`, `cleanup_pending` |
-| Profiling | `timings_ns` |
-
-The MCP adapter deliberately projects the native typed result as bounded `result_repr`
-rather than an arbitrary JSON value. `result_repr` and `stdout` are capped to a 64 KiB
-inline representation even when the native request budget is larger. The response marks
-truncation rather than silently growing agent context. Python SDK callers still receive
-the native typed value through `Receipt.result`.
-
-## Preview, inspect, promote
-
-First tool call:
+This fixture program creates one known status file:
 
 ```json
 {
-  "code": "from pathlib import Path\nPath('/workspace/generated.txt').write_text('ready\\n')\n{'files': 1}",
-  "intent": "Generate reviewed status file",
+  "code": "from pathlib import Path\nPath('/workspace/status.txt').write_text('ready\\n')\n'ready'",
   "mode": "preview",
-  "policy": "balanced",
   "detail": "full",
-  "budget": {
-    "max_duration_ms": 300,
-    "max_os_calls": 1000,
-    "max_write_bytes": 1048576
-  }
+  "intent": "Create the reviewed status fixture"
 }
 ```
 
-If the result is `auto_approved` and the exact change list is acceptable, make a second
-call through the same live server process:
+Check that the decision is `auto_approved`, the exact path/kind list is expected,
+content evidence matches the task, and no output truncation obscures review. Only
+then promote through the same retained runtime:
 
 ```json
 {
-  "transaction": "<transaction from preview>",
+  "transaction": "<exact transaction from preview>",
   "mode": "auto"
 }
 ```
 
-VSH persists the exact process-local artifact, consumes its reservation, revalidates
-dependencies, commits, and verifies. It does not rerun the Monty program.
+Require `commit.committed == true` before reporting that host files changed. A returned
+value or `auto_approved` decision alone is insufficient. A stale failure needs a new
+proposal and review, not a forced replay.
 
-## Pending approval over MCP
+## Receipt envelope
 
-The compact MCP surface intentionally does not expose an approval-minting tool. A
-`pending_approval` receipt remains non-mutating. If an organization needs independent
-approval, a trusted host should call the Python or Rust SDK `approve` method after its
-own reviewer/identity check, or expose a separately governed service boundary.
-
-This prevents a tool-using model from both requesting and granting its own approval.
-
-## Agent-specific instructions
-
-The CodeMode entry point accepts trusted project guidance through:
-
-| Variable | Purpose |
+| Location | Contents |
 |---|---|
-| `VSH_CODEMODE_INSTRUCTIONS_FILE` | UTF-8 project rules file |
-| `VSH_CODEMODE_INSTRUCTIONS` | Short inline rules appended after file content |
+| Top-level identity | `transaction`, `base_snapshot`, `diff` digest |
+| Top-level decision | `state`, `decision`, `risk_flags`, `deny_reason` |
+| Top-level changes | `changed_paths`, `changes: [{path, kind}]` in full detail |
+| Top-level guest output | `result_repr`, `result_truncated`, `stdout`, `stdout_truncated` |
+| `execution` | `os_calls`, `read_bytes`, `write_bytes`, `directory_entries`, `output_bytes`, `denied_accesses`, `result_bytes` |
+| `commit` | `committed`, `operations`, `verified_paths`, `cleanup_pending` |
+| `timings_ns` | `snapshot`, `execute`, `diff`, `policy`, `bind_and_store`, `commit`, `total` |
 
-The built-in instructions always remain first and describe preview, exact promotion,
-non-mutating denial/escalation, and the one-program/one-transaction rule. Custom text
-does not alter Rust policy or grant filesystem authority.
+MCP returns `result_repr`, not the Python SDK's arbitrary typed `result`. Do not `eval`
+that representation. `diff` is not a textual diff; request bounded before/after content
+when reviewing a transformation.
 
-## Runtime reuse and process lifetime
+The adapter retains **65,536 Python characters plus an ellipsis** independently for
+result representation and stdout. This is not 64 KiB of UTF-8, a whole-envelope cap or
+a token limit. JSON escaping and full change lists add transport bytes. Truncation
+happens after constructing the representation; return small results in the first place.
 
-The adapter caches runtimes by resolved workspace, policy, and worker identity. This
-reuses supervised clean workers and preserves bounded auto-approved preview handles.
+## Lifetime and retention limits
 
-- Restarting the MCP process loses process-local auto-approved previews.
-- Pending-approval artifacts are durable and survive restart.
-- Changing workspace, policy, or `VSH_MONTY_WORKER` selects another runtime identity.
-- The cache is bounded; it is not an unbounded workspace registry.
+The adapter's process-local LRU holds 16 runtimes, keyed by resolved workspace, profile
+and worker identity. Each runtime caps auto-approved previews at 64 entries or 128 MiB
+encoded artifacts. Capacity fails closed; previews are not silently evicted within a
+runtime to make room. The **runtime LRU can evict a whole runtime**, losing its
+auto-approved handles even while the server process remains alive.
 
-## Operational errors
+Restart also loses those handles. Read-only previews consume capacity too, and the raw
+MCP surface has no discard tool. For high-rate analysis, use an SDK-owned service that
+can discard completed previews; do not treat the raw cache as a durable queue.
 
-MCP clients should treat tool errors as terminal for that transaction. In particular:
+Pending approval artifacts are durable. MCP does not expose approval minting: a trusted
+Python/Rust service must authenticate the reviewer and call `approve`. Model-authored
+output must not authorize itself. Denied work cannot be approved.
 
-- budget/execution errors require a new reviewed request;
-- stale commit requires a new preview against current workspace state;
-- state/replay errors must not be retried with the same transaction;
-- recovery/internal errors require host/operator attention.
+## VSH functions and CodeMode
 
-Do not fall back to direct filesystem tools after a VSH denial. That would bypass the
-policy and evidence boundary the agent was configured to use.
+In the current checkout, programs receive `vsh_read`, `vsh_write`, `vsh_list`,
+`vsh_mkdir`, `vsh_remove`, `vsh_move`, `vsh_copy`, `vsh_glob`, `vsh_search` and
+`vsh_patch`. They are guest callables, not extra MCP tools, host SDK methods, nested
+transactions or access to the host filesystem. They share the overlay with `pathlib`.
+
+CodeMode can append trusted project guidance from `VSH_CODEMODE_INSTRUCTIONS_FILE`
+and `VSH_CODEMODE_INSTRUCTIONS`. File content precedes inline content; built-in guidance
+remains first. Instructions are advice, not enforcement of roots, profiles or budgets.
+
+## Run the protocol example
+
+```bash
+uv run --no-sync python examples/native/mcp_workflow.py
+```
+
+The source-checkout recipe uses FastMCP's real client and in-process MCP transport,
+lists exactly one tool and performs preview/review/promotion in one server lifetime.
+It verifies the resulting fixture file and needs no model credentials. It does not
+claim to benchmark external MCP transports or agent token cost.
+
+Continue with [agent deployment](agents.md), the [function reference](monty-tools.md)
+and [efficient lifecycle management](../guides/efficient-usage.md).

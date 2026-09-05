@@ -1,7 +1,12 @@
 # Python API reference
 
-All public names below are exported from `vsh`. Static signatures are shipped in
-`vsh._native.pyi`; runtime behavior is implemented by the PyO3 extension.
+Import these names from `vsh`, supplied by the `vsh-python` distribution. This reference
+describes the native boundary: values are typed Python projections, requests are
+immutable, and all execution/commit semantics live in Rust. For complete programs,
+start with the [cookbook](examples.md), not isolated API fragments.
+
+The shipped `vsh._native.pyi` is the static signature contract. Guest `vsh_*` functions
+are a separate [Monty program surface](../integrations/monty-tools.md), not module exports.
 
 ## Module functions
 
@@ -24,13 +29,16 @@ assert normalize_path("src/vsh/./core/../lib.rs") == "src/vsh/lib.rs"
 
 ### `__version__: str`
 
-The Python distribution, extension, Rust workspace, and worker share version `0.3.1`.
+The Python distribution, extension, Rust workspace, and worker share version `0.4.0`.
+
+This is the package version exported by `vsh`; development changes can share that
+version string, so record the checkout revision for reproducible evidence.
 
 ## `RunMode`
 
 | Member | Behavior |
 |---|---|
-| `RunMode.PREVIEW` | Execute, diff, and decide without changing host files |
+| `RunMode.PREVIEW` | Execute, diff, and decide without applying user-workspace changes |
 | `RunMode.AUTO` | Commit only if deterministic policy auto-approves; otherwise remain non-mutating |
 
 ## `ReceiptDetail`
@@ -64,6 +72,9 @@ ExecutionBudget(
 Every argument is keyword-only. `None` selects the native default. Each value is
 available as a read-only property with the same name. See
 [Policies and budgets](../guides/policies-and-budgets.md) for defaults and tuning.
+`max_os_calls` counts both `pathlib`/typed OS suspensions and high-level VSH function
+calls. The functions available in every `code` program are documented in
+[VSH functions inside Monty](../integrations/monty-tools.md).
 
 ## `RunRequest`
 
@@ -117,7 +128,7 @@ may proceed to commit.
 preview(request: RunRequest) -> Receipt
 
 preview(
-    code: str,
+    request: str,
     *,
     intent: str | None = ...,
     detail: ReceiptDetail | None = ...,
@@ -137,8 +148,10 @@ receipt = runtime.preview(
 )
 ```
 
-Both forms cross PyO3 exactly once and force preview semantics. `mode` is intentionally
-absent from the source-code overload because this method can never mutate the host.
+Both forms cross PyO3 exactly once and force preview semantics. Each creates a fresh
+snapshot and overlay. `mode` is intentionally
+absent from the source-code overload because it never applies the program's proposed
+user-file changes.
 When the first argument is a `RunRequest`, configuration must remain on that request;
 passing `intent`, `detail`, or `budget` again raises `TypeError` instead of merging two
 sources of truth.
@@ -147,6 +160,12 @@ sources of truth.
 
 Removes one process-local auto-approved preview. Returns `False` when no matching
 preview exists.
+
+Use this for abandoned mutations and completed read-only analysis. The default cache
+fails closed at 64 entries or 128 MiB encoded artifact bytes and rejects duplicate
+exact pending identities. This method is not a general durable-artifact cancellation
+or blob-store garbage-collection API. Auto-approved handles belong to the same live
+runtime; approval-required artifacts are durable.
 
 ### `approve(...) -> str`
 
@@ -159,7 +178,9 @@ runtime.approve(
 ) -> str
 ```
 
-Creates an exact approval grant for a pending transaction. Returns the new lifecycle
+Creates an exact approval grant for a pending transaction. The caller must authenticate
+and authorize the reviewer; the principal string itself is not authentication.
+Returns the new lifecycle
 state (`"approved"`). The validity interval must be coherent and commit time must fall
 inside it.
 
@@ -186,7 +207,7 @@ orphaned, or reported as conflict.
 | `decision` | `str` | `denied`, `auto_approved`, or `pending_approval` |
 | `diff` | `str` | Canonical diff digest |
 | `risk_flags` | `list[str]` | Deterministic escalation reasons |
-| `deny_reason` | `str | None` | Stable denial description |
+| `deny_reason` | `str \| None` | Stable denial description |
 
 ### Output and effects
 
@@ -195,24 +216,33 @@ orphaned, or reported as conflict.
 | `changed_paths` | `int` | Canonical change count |
 | `changes` | `list[tuple[str, str]]` | Full path/kind list when requested |
 | `result` | `object` | Native Python projection of Monty's returned value |
-| `result_repr` | `str` | Bounded diagnostic representation |
+| `result_repr` | `str` | Full `repr()` of the projected value, constructed on access |
 | `stdout` | `str` | Bounded captured `print()` output |
 
 Change kinds are `create`, `delete`, `modify`, and `metadata_change`. Rename effects are
 represented by the canonical before/after entries produced by the native diff.
+
+`diff` is a digest and `changes` does not contain text. Full detail does not produce
+a unified diff. Return bounded content evidence from the guest when review needs it.
+`result_repr` has no independent native truncation; avoid it for structured processing
+or large results. MCP/CLI apply their own text caps after this representation is made.
+The decision remains the original policy decision even when state becomes `committed`.
 
 ### Resource counters
 
 `os_calls`, `read_bytes`, `write_bytes`, `directory_entries`, `output_bytes`,
 `denied_accesses`, and `result_bytes` describe work performed by the worker adapter.
 
+Read/write counts describe cumulative work, not just final diff size. `result_bytes`
+tracks Monty's bounded host-footprint estimate, not network JSON bytes or token count.
+
 ### Commit evidence
 
 | Property | Type | Meaning |
 |---|---|---|
 | `committed` | `bool` | Whether host effects were applied and verified |
-| `commit_operations` | `int | None` | Number of trusted commit operations |
-| `verified_paths` | `int | None` | Paths verified after application |
+| `commit_operations` | `int \| None` | Number of trusted commit operations |
+| `verified_paths` | `int \| None` | Paths verified after application |
 | `cleanup_pending` | `bool` | Durable cleanup remains for recovery |
 
 ### Timings
@@ -220,6 +250,11 @@ represented by the canonical before/after entries produced by the native diff.
 `timings_ns() -> Mapping[str, int]` returns `snapshot`, `execute`, `diff`, `policy`,
 `bind_and_store`, `commit`, and `total`. They are monotonic stage measurements intended
 for profiling and receipts, not an authorization signal.
+
+For a separate `commit()`, `total` is the retained preview total plus the measured
+committer interval, not current API-call latency or reviewer wait time. The `commit`
+interval excludes preceding artifact persistence, plan construction and reservation.
+Measure outer wall time separately when you need complete promotion latency.
 
 ## `RecoveryReport`
 
@@ -229,7 +264,7 @@ for profiling and receipts, not an authorization signal.
 | `rolled_back` | Partial work was safely returned to the original state |
 | `cleaned` | Obsolete trusted artifacts were removed |
 | `orphaned` | Ownership could not be proven; item was left untouched |
-| `conflicts` | `(transaction, path | None, reason)` operator records |
+| `conflicts` | `(transaction, path \| None, reason)` operator records |
 
 ## Exceptions
 
@@ -254,3 +289,6 @@ RuntimeError
 Catch `VshRuntimeError` at application boundaries, then log the concrete subclass and
 receipt/transaction context. Do not convert stale or recovery failures into blind
 retries.
+
+Invalid Python arguments can also raise `TypeError` or `ValueError`. An internal
+error is not a guarantee of successful rollback after commit began; inspect recovery.

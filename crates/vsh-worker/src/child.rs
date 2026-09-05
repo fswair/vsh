@@ -65,6 +65,9 @@ impl ProtocolChild {
             pb::parent_request::Kind::ResumeFutures(resume) => {
                 self.resume_futures(resume, sink)?;
             }
+            pb::parent_request::Kind::AbortFeed(abort) => {
+                self.abort_feed(abort, sink)?;
+            }
             pb::parent_request::Kind::Reset(_) => self.reset(sink)?,
             pb::parent_request::Kind::Shutdown(_) => {
                 sink.send(&event(pb::child_event::Kind::Shutdown(pb::ShutdownDump {
@@ -122,9 +125,28 @@ impl ProtocolChild {
     }
 
     fn feed(&mut self, feed: pb::Feed, sink: &mut dyn Sink) -> Result<(), FrameError> {
-        if !feed.inputs.is_empty() {
-            sink.send(&protocol_violation("named Feed inputs are unsupported"))?;
-            return Ok(());
+        let mut input_names = Vec::with_capacity(feed.inputs.len());
+        let mut input_values = Vec::with_capacity(feed.inputs.len());
+        for input in feed.inputs {
+            let Some(value) = input.value else {
+                sink.send(&protocol_violation(&format!(
+                    "Feed input {:?} has no value",
+                    input.name
+                )))?;
+                return Ok(());
+            };
+            let value = match value.into_object() {
+                Ok(value) => value,
+                Err(error) => {
+                    sink.send(&protocol_violation(&format!(
+                        "Feed input {:?} is invalid: {error}",
+                        input.name
+                    )))?;
+                    return Ok(());
+                }
+            };
+            input_names.push(input.name);
+            input_values.push(value);
         }
         let SessionState::Configured(config) = mem::take(&mut self.state) else {
             sink.send(&protocol_violation("Feed requires a configured worker"))?;
@@ -133,7 +155,7 @@ impl ProtocolChild {
         let run = match MontyRun::new(
             feed.code,
             &config.script_name,
-            Vec::new(),
+            input_names,
             CompileOptions::default(),
         ) {
             Ok(run) => run,
@@ -143,7 +165,7 @@ impl ProtocolChild {
             }
         };
         let tracker = ResourceTracker::new(config.limits);
-        let progress = with_print(sink, |print| run.start(Vec::new(), tracker, print));
+        let progress = with_print(sink, |print| run.start(input_values, tracker, print));
         self.accept_progress(progress, sink)
     }
 
@@ -193,17 +215,12 @@ impl ProtocolChild {
         resume: pb::ResumeNameLookup,
         sink: &mut dyn Sink,
     ) -> Result<(), FrameError> {
-        let result = match resume.kind {
-            Some(pb::resume_name_lookup::Kind::Value(value)) => {
-                let Ok(value) = value.into_object() else {
-                    sink.send(&protocol_violation("name lookup value is invalid"))?;
-                    return Ok(());
-                };
-                NameLookupResult::Value(value)
-            }
-            Some(pb::resume_name_lookup::Kind::Undefined(_)) => NameLookupResult::Undefined,
-            None => {
-                sink.send(&protocol_violation("name lookup result has no kind"))?;
+        let result = match NameLookupResult::try_from(resume) {
+            Ok(result) => result,
+            Err(error) => {
+                sink.send(&protocol_violation(&format!(
+                    "name lookup result is invalid: {error}"
+                )))?;
                 return Ok(());
             }
         };
@@ -253,6 +270,34 @@ impl ProtocolChild {
         self.accept_progress(next, sink)
     }
 
+    fn abort_feed(&mut self, abort: pb::AbortFeed, sink: &mut dyn Sink) -> Result<(), FrameError> {
+        let Some(exception) = abort.exception else {
+            sink.send(&protocol_violation("AbortFeed has no exception"))?;
+            return Ok(());
+        };
+        let exception = match MontyException::try_from(exception) {
+            Ok(exception) => exception,
+            Err(error) => {
+                sink.send(&protocol_violation(&format!(
+                    "AbortFeed exception is invalid: {error}"
+                )))?;
+                return Ok(());
+            }
+        };
+        let SessionState::Suspended(progress) = mem::take(&mut self.state) else {
+            sink.send(&protocol_violation("AbortFeed requires a suspended worker"))?;
+            return Ok(());
+        };
+        let next = with_print(sink, |print| match *progress {
+            RunProgress::OsCall(call) => call.abort(exception, print),
+            RunProgress::FunctionCall(call) => call.abort(exception, print),
+            RunProgress::NameLookup(lookup) => lookup.abort(exception, print),
+            RunProgress::ResolveFutures(futures) => futures.abort(exception, print),
+            RunProgress::Complete(_) => unreachable!("completed runs are never suspended"),
+        });
+        self.accept_progress(next, sink)
+    }
+
     fn reset(&mut self, sink: &mut dyn Sink) -> Result<(), FrameError> {
         self.state = SessionState::Empty;
         if let Err(message) = monty_alloc::set_limit(None, false) {
@@ -295,7 +340,7 @@ impl ProtocolChild {
                     args: call.args.clone(),
                     kwargs: call.kwargs.clone(),
                     call_id: call.call_id,
-                    method_call: call.method_call,
+                    object_id: call.object_id,
                 }));
                 self.state = SessionState::Suspended(Box::new(RunProgress::FunctionCall(call)));
                 sink.send(&event)
@@ -303,6 +348,9 @@ impl ProtocolChild {
             RunProgress::NameLookup(lookup) => {
                 let event = event(pb::child_event::Kind::NameLookup(pb::NameLookup {
                     name: lookup.name.clone(),
+                    object_id: lookup.object_id().map(|id| pb::Uuid {
+                        data: id.as_bytes().to_vec(),
+                    }),
                 }));
                 self.state = SessionState::Suspended(Box::new(RunProgress::NameLookup(lookup)));
                 sink.send(&event)
@@ -339,11 +387,18 @@ fn decode_limits(encoded: Option<pb::ResourceLimits>) -> Result<ResourceLimits, 
         .transpose()
         .map_err(|_| "recursion limit does not fit this worker")?
         .unwrap_or(monty_types::DEFAULT_MAX_RECURSION_DEPTH);
+    let max_suspensions = encoded
+        .max_suspensions
+        .map(usize::try_from)
+        .transpose()
+        .map_err(|_| "suspension limit does not fit this worker")?
+        .unwrap_or(monty_types::DEFAULT_MAX_SUSPENSIONS);
     Ok(ResourceLimits {
         max_duration: encoded.max_duration_micros.map(Duration::from_micros),
         max_memory,
         gc_interval,
         max_recursion_depth,
+        max_suspensions,
     })
 }
 
@@ -439,6 +494,7 @@ fn event(kind: pb::child_event::Kind) -> pb::ChildEvent {
     pb::ChildEvent {
         total_execution_micros: 0,
         max_duration_micros: None,
+        max_suspensions: None,
         restored_script_name: None,
         kind: Some(kind),
     }

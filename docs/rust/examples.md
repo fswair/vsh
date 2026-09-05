@@ -1,128 +1,93 @@
-# Rust examples
+# Rust cookbook
 
-The examples below use the application-facing `vsh` crate.
+Rust uses the native `vsh` facade directly. The application owns capabilities,
+configuration and review; Monty owns only the bounded virtual program. No Python host
+interpreter or PyO3 crossing is required.
 
-## Preview and inspect
+## Run an end-to-end staged release
 
-```rust
-use vsh::{MontyObject, ReceiptDetail, RunRequest, Runtime, RuntimeConfig};
+From the current source checkout:
 
-fn main() -> Result<(), vsh::VshError> {
-    let runtime = Runtime::open(RuntimeConfig::new("project"))?;
-    let receipt = runtime.preview(
-        RunRequest::new(
-            "from pathlib import Path\n\
-             value = Path('/workspace/input.txt').read_text()\n\
-             Path('/workspace/output.txt').write_text(value.upper())\n\
-             len(value)",
-        )
-        .with_intent("Generate uppercase output")
-        .with_detail(ReceiptDetail::Full),
-    )?;
-
-    if let MontyObject::Int(length) = receipt.value {
-        println!("input length: {length}");
-    }
-    for change in &receipt.changes {
-        println!("{:?} {}", change.kind, change.path);
-    }
-    Ok(())
-}
+```bash
+cargo build --release --locked -p vsh-monty-worker
+VSH_MONTY_WORKER="$PWD/target/release/vsh-monty-worker" \
+  cargo run --release --locked -p vsh-runtime --example staged_release
 ```
 
-## Promote only auto-approved work
+This repository example belongs to the `vsh-runtime` implementation package in
+`crates/vbash`; external applications still depend on `vsh`. It uses a unique temporary
+workspace, not the repository. No extra dependency or model credential is required.
+
+The [Rust host source](https://github.com/fswair/vsh/blob/main/crates/vbash/examples/staged_release.rs)
+embeds the same [guest program](https://github.com/fswair/vsh/blob/main/crates/vbash/examples/staged_release.monty)
+as the [Python recipe](../python/examples.md#staged-release-generation). Both are
+included with the VSH 0.4.0 source release.
+
+The workflow creates a template, virtually copies and patches it, renames the generated
+config and writes a README. It checks the exact three final paths and that no host
+release directory exists. The rename produces pending approval. A clearly labeled
+trusted fixture reviewer approves, then the host commits the exact transaction and
+checks both output contents and absence of the intermediate file.
+
+## Understand the native calls
+
+These fragments come from that complete example:
 
 ```rust
-use vsh::RuntimeDecision;
-
-match receipt.decision {
-    RuntimeDecision::AutoApproved => {
-        let committed = runtime.commit(receipt.transaction, now_unix_ms())?;
-        assert!(committed.commit.is_some());
-    }
-    RuntimeDecision::PendingApproval(manifest) => {
-        eprintln!("review required: {:?}", manifest.flags);
-    }
-    RuntimeDecision::Denied(manifest) => {
-        eprintln!("denied: {:?}", manifest.reason);
-    }
-}
+let runtime = Runtime::open(RuntimeConfig::new(&workspace.0))?;
+let code = include_str!("staged_release.monty");
+let preview = runtime.preview(
+    RunRequest::new(code).with_detail(ReceiptDetail::Full),
+)?;
 ```
 
-`now_unix_ms()` is a trusted-host clock helper. A preview transaction is single-use;
-do not rerun source as a substitute for promotion.
-
-## Strict approval
+`RunRequest` borrows source; `Runtime::preview` returns owned evidence. Match the
+decision enum rather than parsing text:
 
 ```rust
-use vsh::{PolicyProfile, PrincipalId, RunRequest, Runtime, RuntimeConfig};
-
-fn reviewed_change(now_ms: u64) -> Result<(), vsh::VshError> {
-    let runtime = Runtime::open(
-        RuntimeConfig::new("project").with_policy_profile(PolicyProfile::Strict),
-    )?;
-    let preview = runtime.preview(RunRequest::new(
-        "from pathlib import Path\n\
-         Path('/workspace/reviewed.txt').write_text('yes')",
-    ))?;
-
-    let principal = PrincipalId::digest_label("reviewer:alice/change:1842");
-    runtime.approve(preview.transaction, principal, now_ms, now_ms + 30_000)?;
-    runtime.commit(preview.transaction, now_ms + 1)?;
-    Ok(())
-}
+assert!(matches!(preview.decision, RuntimeDecision::PendingApproval(_)));
+assert!(!workspace.0.join("release").exists());
 ```
 
-## Custom limits
+After authenticating a reviewer in a real application, use a principal digest and
+Unix-millisecond approval interval:
 
 ```rust
-use std::time::Duration;
-use vsh::{ExecutionBudget, RunRequest};
-
-let budget = ExecutionBudget {
-    max_program_bytes: 64 * 1024,
-    max_duration: Duration::from_millis(300),
-    max_memory_bytes: 64 * 1024 * 1024,
-    max_os_calls: 1_500,
-    max_read_bytes: 8 * 1024 * 1024,
-    max_write_bytes: 2 * 1024 * 1024,
-    max_output_bytes: 32 * 1024,
-    max_result_bytes: 64 * 1024,
-    ..ExecutionBudget::default()
-};
-
-let request = RunRequest::new(source).with_budget(budget);
-let preview = runtime.preview(request)?;
+runtime.approve(
+    preview.transaction,
+    PrincipalId::digest_label("fixture-reviewer"),
+    now,
+    now + 30_000,
+)?;
+let committed = runtime.commit(preview.transaction, now)?;
+assert!(committed.commit.is_some());
 ```
 
-## External data directory and worker
+A label digest is identity binding, not authentication. Denied transactions cannot be
+approved, and approval does not waive stale checks or grant permission to rerun source.
+
+## Analysis without application
+
+For a read-only request, return a small `MontyObject` result and discard its
+auto-approved artifact after consuming it:
 
 ```rust
-use vsh::{Runtime, RuntimeConfig};
-
-let config = RuntimeConfig::new("/srv/workspaces/job-17")
-    .with_data_directory("/srv/vsh-state/job-17")
-    .with_worker_path("/opt/vsh/0.3.1/vsh-monty-worker")
-    .with_max_idle_workers(8);
-let runtime = Runtime::open(config)?;
+let receipt = runtime.preview(RunRequest::new("{'answer': 42}"))?;
+println!("{:?}", receipt.value);
+runtime.discard_preview(receipt.transaction)?;
 ```
 
-The data directory must remain separate from the workspace. Treat the worker path and
-state root as trusted deployment configuration, not agent input.
+Native `ReceiptDetail::Full` includes `DiffEntry` before/after `NodeState` values.
+These are typed content identities and metadata, not a ready-made unified text diff.
+Keep content evidence bounded and explicit.
 
-## Recovery reporting
+## Budgets and deployment
 
-```rust
-let startup = runtime.startup_recovery();
-if !startup.conflicts.is_empty() || startup.orphaned > 0 {
-    return Err("operator review required".into());
-}
+Use struct-update syntax with `ExecutionBudget::default()` to change only owned limits.
+`RuntimeConfig` additionally exposes snapshot, artifact, store and commit limits that
+the Python convenience constructor does not. An idle-worker pool size is not a cap
+on all concurrent application requests; add admission control at the service boundary.
 
-let report = runtime.recover()?;
-for conflict in report.conflicts {
-    eprintln!("recovery conflict: {conflict:?}");
-}
-```
-
-Recovery conflicts are an operational signal. VSH leaves ambiguous ownership untouched
-instead of turning recovery into an unsafe cleanup routine.
+Always use the supervised worker for agent-authored source. The in-process harness
+removes crash isolation and worker heap enforcement and is not a production speed trick.
+See [Rust setup](index.md), [API reference](api.md) and [performance](../performance.md).

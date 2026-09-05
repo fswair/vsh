@@ -237,24 +237,30 @@ impl PathPattern {
             return Err(PatternError::Empty);
         }
         Ok(Self {
-            basename_only: components.len() == 1 && components[0] != "**",
+            // Any leading globstars can absorb the entire parent path, so
+            // **/*.key has exactly the same basename semantics as *.key.
+            basename_only: components.last().is_some_and(|part| part != "**")
+                && components[..components.len() - 1]
+                    .iter()
+                    .all(|part| part == "**"),
             source,
             components,
         })
     }
 
     fn matches(&self, path: &VPath) -> bool {
-        let path_components = if path.is_root() {
-            Vec::new()
-        } else {
-            path.as_str().split('/').collect::<Vec<_>>()
-        };
         if self.basename_only {
-            return path_components
-                .last()
-                .is_some_and(|name| component_matches(&self.components[0], name));
+            return path.file_name().is_some_and(|name| {
+                component_matches(
+                    self.components.last().expect("compiled non-empty pattern"),
+                    name,
+                )
+            });
         }
-        path_components_match(&self.components, &path_components)
+        path_components_match(
+            &self.components,
+            if path.is_root() { "" } else { path.as_str() },
+        )
     }
 }
 
@@ -286,27 +292,36 @@ fn component_matches(pattern: &str, value: &str) -> bool {
     pattern_index == pattern.len()
 }
 
-fn path_components_match(pattern: &[String], path: &[&str]) -> bool {
-    let columns = path.len() + 1;
-    let mut previous = vec![false; columns];
-    previous[0] = true;
-
-    for component in pattern {
-        let mut current = vec![false; columns];
-        if component == "**" {
-            current[0] = previous[0];
-            for path_index in 1..columns {
-                current[path_index] = previous[path_index] || current[path_index - 1];
+fn path_components_match(pattern: &[String], path: &str) -> bool {
+    // A globstar consumes zero or more whole components. Only the most recent
+    // globstar needs a retry point: an earlier one cannot help once a later one
+    // has matched. Cloneable string cursors avoid per-rule heap allocations and
+    // recursion, with O(pattern components * path components) component matches.
+    let mut remaining = path.split('/').filter(|component| !component.is_empty());
+    let mut pattern_index = 0;
+    let mut retry = None;
+    while let Some(value) = remaining.clone().next() {
+        if pattern.get(pattern_index).is_some_and(|part| part == "**") {
+            pattern_index += 1;
+            if pattern_index == pattern.len() {
+                return true;
             }
+            retry = Some((pattern_index, remaining.clone()));
+        } else if pattern
+            .get(pattern_index)
+            .is_some_and(|part| component_matches(part, value))
+        {
+            pattern_index += 1;
+            remaining.next();
+        } else if let Some((restart, cursor)) = &mut retry {
+            cursor.next();
+            remaining = cursor.clone();
+            pattern_index = *restart;
         } else {
-            for path_index in 1..columns {
-                current[path_index] =
-                    previous[path_index - 1] && component_matches(component, path[path_index - 1]);
-            }
+            return false;
         }
-        previous = current;
     }
-    previous[path.len()]
+    pattern[pattern_index..].iter().all(|part| part == "**")
 }
 
 /// One canonical protected-path rule.
@@ -1109,6 +1124,110 @@ mod tests {
         }
         let snapshot = builder.build().unwrap();
         (directory, VirtualFs::new(snapshot))
+    }
+
+    #[test]
+    fn cursor_globstar_matches_dynamic_programming_oracle() {
+        fn sequences<'a>(alphabet: &[&'a str], depth: usize) -> Vec<Vec<&'a str>> {
+            let mut sequences = vec![Vec::new()];
+            let mut frontier = vec![Vec::new()];
+            for _ in 0..depth {
+                frontier = frontier
+                    .iter()
+                    .flat_map(|prefix| {
+                        alphabet.iter().map(move |component| {
+                            let mut next = prefix.clone();
+                            next.push(*component);
+                            next
+                        })
+                    })
+                    .collect();
+                sequences.extend(frontier.iter().cloned());
+            }
+            sequences
+        }
+
+        // The original matcher is deliberately retained as an independent
+        // oracle. Include empty paths, consecutive and separated globstars,
+        // failed suffix retries, basename wildcards and UTF-8 components.
+        fn oracle(pattern: &[String], path: &[&str]) -> bool {
+            let mut previous = vec![false; path.len() + 1];
+            previous[0] = true;
+            for component in pattern {
+                let mut current = vec![false; path.len() + 1];
+                if component == "**" {
+                    current[0] = previous[0];
+                    for index in 1..current.len() {
+                        current[index] = previous[index] || current[index - 1];
+                    }
+                } else {
+                    for index in 1..current.len() {
+                        current[index] =
+                            previous[index - 1] && component_matches(component, path[index - 1]);
+                    }
+                }
+                previous = current;
+            }
+            previous[path.len()]
+        }
+
+        let paths = sequences(&["a", "b", "é"], 4);
+        for components in sequences(&["a", "b", "*", "a*", "**"], 4) {
+            let pattern: Vec<String> = components.iter().map(ToString::to_string).collect();
+            let compiled = (!components.is_empty())
+                .then(|| PathPattern::compile(components.join("/")).unwrap());
+            for path in &paths {
+                assert_eq!(
+                    path_components_match(&pattern, &path.join("/")),
+                    oracle(&pattern, path),
+                    "pattern {pattern:?}, path {path:?}"
+                );
+                if let Some(compiled) = &compiled {
+                    let expected = if pattern.len() == 1 && pattern[0] != "**" {
+                        path.last()
+                            .is_some_and(|name| component_matches(&pattern[0], name))
+                    } else {
+                        oracle(&pattern, path)
+                    };
+                    let virtual_path =
+                        VPath::parse(&path.join("/")).unwrap_or_else(|_| VPath::root());
+                    assert_eq!(
+                        compiled.matches(&virtual_path),
+                        expected,
+                        "{pattern:?} {path:?}"
+                    );
+                }
+            }
+        }
+        let deep = vec!["a"; 4096].join("/");
+        assert!(path_components_match(&["**".into(), "a".into()], &deep));
+        assert!(!path_components_match(&["**".into(), "b".into()], &deep));
+    }
+
+    #[test]
+    fn pattern_fast_paths_preserve_root_and_normalization() {
+        for (pattern, path, expected) in [
+            ("*", ".", false),
+            ("**", ".", true),
+            ("**/**", ".", true),
+            ("a/**", ".", false),
+            ("./a//**/b/", "a/b", true),
+            ("**/é*", "a/été", true),
+            ("**/**/*.key", "a/b/private.key", true),
+            ("**/*.key", ".", false),
+            ("**/a/**/b", "a/x/a/y/b", true),
+            ("**/a/**/b", "a/x/a/y/c", false),
+            ("*.key", "a/private.key", true),
+            ("a/*", "a/b/c", false),
+        ] {
+            assert_eq!(
+                PathPattern::compile(pattern)
+                    .unwrap()
+                    .matches(&VPath::parse(path).unwrap()),
+                expected,
+                "pattern {pattern}, path {path}"
+            );
+        }
     }
 
     #[test]

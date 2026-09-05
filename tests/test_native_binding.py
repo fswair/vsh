@@ -7,7 +7,7 @@ from vsh import _native
 
 
 def test_native_binding_owns_version_and_engine_identity() -> None:
-    assert vsh.__version__ == "0.3.1"
+    assert vsh.__version__ == "0.4.0"
     assert _native.__version__ == vsh.__version__
     assert _native.version() == vsh.__version__
     assert vsh.engine_kind() == "rust"

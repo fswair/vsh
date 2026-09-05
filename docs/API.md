@@ -19,8 +19,11 @@ recovery do not have a parallel Python implementation. See the
 
 - [Transactions and exact promotion](guides/transactions.md)
 - [Policies and resource budgets](guides/policies-and-budgets.md)
+- [High-level VSH functions inside Monty](integrations/monty-tools.md)
 - [Architecture and trust boundaries](ARCHITECTURE.md)
-- [Typed MCP receipt envelope](integrations/mcp.md#output-envelope)
+- [Typed MCP receipt envelope](integrations/mcp.md#receipt-envelope)
+- [Efficient usage and preview retention](guides/efficient-usage.md)
+- [Runnable Python cookbook](python/examples.md) and [Rust cookbook](rust/examples.md)
 
 !!! note "Version 0.3 compatibility break"
 

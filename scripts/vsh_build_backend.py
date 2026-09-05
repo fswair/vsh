@@ -24,7 +24,7 @@ from maturin import prepare_metadata_for_build_wheel as prepare_metadata_for_bui
 
 _ROOT = Path(__file__).resolve().parents[1]
 _WORKER_NAME = "vsh-monty-worker"
-_MONTY_VERSION = "0.0.21"
+_MONTY_VERSION = "0.0.22"
 
 
 def _target_root() -> Path:

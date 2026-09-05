@@ -3,6 +3,10 @@
 This page documents the application-facing `vsh` facade. Rustdoc remains the
 exhaustive source for every re-exported lower-level field and error variant.
 
+Use the [complete Rust cookbook](examples.md) for a compiled example. Unlike Python,
+the Rust preview API accepts a borrowed `RunRequest`; it does not emulate Python's
+source-string overload. The guest `vsh_*` surface is included in VSH 0.4.0.
+
 ## Constants and diagnostics
 
 ```rust
@@ -44,6 +48,8 @@ let config = RuntimeConfig::new(workspace_root)
 | `policy()` | Borrow the deterministic transaction policy |
 
 Builder values contribute to runtime configuration identity where security relevant.
+Idle-pool capacity is not an admission limit on concurrent calls. Reusing a runtime
+retains clean workers and capabilities, but every execution captures a fresh snapshot.
 
 ## `RunRequest<'a>`
 
@@ -67,7 +73,8 @@ pub enum RunMode { Preview, Auto }
 pub enum ReceiptDetail { Compact, Full }
 ```
 
-Preview never changes the host. Auto commits only deterministic `AutoApproved` work.
+Preview does not apply user-file changes; runtime metadata/storage can still be written.
+Auto commits only deterministic `AutoApproved` work.
 Compact omits per-path entries while retaining identity and counts; Full retains the
 complete bounded canonical diff.
 
@@ -78,7 +85,7 @@ complete bounded canonical diff.
 | `Runtime::open(config)` | `Runtime` | Establish capabilities, stores, worker supervision, and startup recovery |
 | `startup_recovery()` | `&RecoveryReport` | Inspect recovery performed during open |
 | `run(request)` | `Receipt` | Execute according to request mode |
-| `preview(request)` | `Receipt` | Force a non-mutating call |
+| `preview(request)` | `Receipt` | Execute without applying proposed user-file changes |
 | `discard_preview(id)` | `bool` | Release a process-local auto-approved artifact |
 | `approve(id, principal, issued, expires)` | `TransactionRecord` | Bind an independent time-limited approval |
 | `commit(id, now)` | `Receipt` | Single-use reserve, revalidate, apply, verify |
@@ -86,6 +93,11 @@ complete bounded canonical diff.
 | `transaction(id)` | `TransactionRecord` | Read current durable lifecycle state |
 
 All fallible methods return `Result<_, VshError>`.
+
+Auto-approved preview IDs must be consumed by the same live runtime. The default
+fail-closed retention caps are 64 artifacts and 128 MiB encoded bytes. Discard completed
+analysis too. Pending approval artifacts are durable and can survive a compatible
+runtime reopen; `approve` binds a `PrincipalId` but does not authenticate its owner.
 
 ## `Receipt`
 
@@ -114,26 +126,37 @@ pub struct Receipt {
 
 Pattern-match the decision rather than parsing its display text.
 
+`diff` is a digest. Each full `DiffEntry` includes `path`, `kind`, `before` and `after`
+`NodeState` values, not text hunks. `value` is the typed `MontyObject`, whereas Python
+projects it to a Python object. Native compatibility can represent values the pinned
+Python converter cannot; choose `ResultCompatibility::Python` when that projection is
+part of your downstream contract.
+
 ## `StageTimings`
 
 All fields are nanoseconds measured with a monotonic clock:
 
 | Field | Includes |
 |---|---|
-| `snapshot_ns` | Capability-rooted metadata/content snapshot |
-| `execute_ns` | Monty bytecode and typed VirtualFs calls |
+| `snapshot_ns` | Fresh capability-rooted metadata traversal and lazy snapshot construction |
+| `execute_ns` | Monty, IPC, typed VirtualFs calls and their call-policy checks |
 | `diff_ns` | Canonical diff freeze |
 | `policy_ns` | Deterministic policy evaluation |
 | `bind_and_store_ns` | Artifact binding and lifecycle writes |
-| `commit_ns` | Reservation, revalidation, application, verification |
-| `total_ns` | Complete native runtime call |
+| `commit_ns` | Committer revalidation, application and verification; excludes preceding persistence, plan creation and reservation |
+| `total_ns` | Complete `run` elapsed time; separate promotion retains preview total plus measured commit interval |
+
+Measure outer wall time for complete `commit()` API latency. Its receipt total does
+not include reviewer wait time and is not a stopwatch for just that API invocation.
 
 ## `ExecutionBudget`
 
 `ExecutionBudget` aliases `vsh_monty::ExecutionLimits` and has public fields for source
-bytes, duration, recursion, memory, OS calls, read/write bytes, per-call I/O, path bytes,
-directory entries, stdout, returned value, and exception payload. Prefer struct update
-syntax from `Default` so later compatible fields receive safe defaults.
+bytes, duration, recursion, memory, typed OS plus high-level VSH calls, read/write bytes,
+per-call I/O, path bytes, directory entries, stdout, returned value, and exception
+payload. Prefer struct update syntax from `Default` so later compatible fields receive
+safe defaults. `vsh_monty::MONTY_VSH_TOOL_NAMES` exposes the stable in-sandbox function
+names; see [VSH functions inside Monty](../integrations/monty-tools.md).
 
 ## `ArtifactLimits`
 
@@ -147,6 +170,10 @@ Trusted-host bounds for durable pending artifacts:
 
 These do not replace execution budgets; they constrain the artifact VSH retains after
 execution.
+
+The guest duration is cumulative bytecode time; the heap cap applies to the supervised
+worker. Neither is a total parent-process RSS or end-to-end request deadline. For all
+defaults and measurement scope, see [policies and budgets](../guides/policies-and-budgets.md).
 
 ## `VshError`
 

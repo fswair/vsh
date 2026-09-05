@@ -1,145 +1,101 @@
-# Start with VSH
+# Start with a transaction
 
-VSH has one execution model and three convenient entry points. Begin with `preview`:
-it executes the whole program and returns evidence, but it never changes host files.
+VSH runs a bounded Python program against a virtual copy of a workspace. You inspect
+what it would change, then commit that exact result. Python and Rust use the same
+native engine; neither needs a second simulator.
 
-## Prerequisites
+## Choose your installation
 
-- Python SDK and MCP: CPython 3.11–3.14.
-- Rust SDK: Rust 1.95.0, as pinned by `rust-toolchain.toml`.
-- A real workspace directory that the VSH process may read and, for commit, write.
-- Production Rust embedding: the exact `vsh-monty-worker` executable. Python wheels
-  bundle and resolve the worker automatically.
+| Host | Package | Entry point |
+|---|---|---|
+| Python 3.11–3.14 | `vsh-python` | `from vsh import Runtime` |
+| Rust | `vsh` | `use vsh::Runtime` |
+| MCP client | `vsh-python[mcp]` | `vsh serve` |
 
-## Install
+```bash
+python -m pip install vsh-python==0.4.0
+```
 
-=== "Python"
+```toml
+[dependencies]
+vsh = "=0.4.0"
+```
 
-    The distribution is named `vsh-python`; the import package and CLI are named `vsh`.
+Python wheels bundle the worker. Rust applications must deploy a matching
+`vsh-monty-worker` executable; see [Rust setup](../rust/index.md). The `vbash`
+packages are compatibility mirrors, not a different engine. Prefer the primary names.
 
-    ```bash
-    uv add vsh-python==0.3.1
-    ```
+!!! note "VSH 0.4.0 surface"
 
-    ```bash
-    python -m pip install vsh-python==0.3.1
-    ```
+    The Monty 0.0.22 integration, ten in-sandbox `vsh_*` functions and the September 5
+    optimizations are part of VSH 0.4.0. The Python wheel bundles the matching worker;
+    native Rust deployments must supply it as described below. Contributors can use
+    the [source build](../development.md).
 
-=== "MCP"
+## A complete first run
 
-    ```bash
-    uv add 'vsh-python[mcp]==0.3.1'
-    uv run vsh serve
-    ```
-
-=== "Rust"
-
-    ```toml
-    [dependencies]
-    vsh = "=0.3.1"
-    ```
-
-    `vsh-runtime` remains the implementation crate; applications use the `vsh` facade.
-
-!!! note "Legacy installer names"
-
-    `vbash==0.3.1` on PyPI installs exactly `vsh-python==0.3.1` and contains no
-    modules. The crates.io `vbash = "=0.3.1"` crate similarly re-exports exactly
-    `vsh = "=0.3.1"`. New dependency declarations should use the primary names above.
-
-## First preview
-
-Create a workspace with `input.txt`, then run:
-
-=== "Python"
-
-    ```python
-    from pathlib import Path
-
-    from vsh import ReceiptDetail, Runtime
-
-    workspace = Path("demo-workspace").resolve()
-    runtime = Runtime.open(workspace)
-    receipt = runtime.preview(
-        """
-    from pathlib import Path
-    value = Path('/workspace/input.txt').read_text()
-    Path('/workspace/output.txt').write_text(value.upper())
-    len(value)
-    """,
-        intent="Create an uppercase derivative",
-        detail=ReceiptDetail.FULL,
-    )
-
-    print(receipt.state)       # auto_approved or pending_approval
-    print(receipt.result)      # typed Python value
-    print(receipt.changes)     # [('output.txt', 'create')]
-    assert not (workspace / "output.txt").exists()
-    ```
-
-=== "CLI"
-
-    ```bash
-    vsh run \
-      --workspace demo-workspace \
-      --mode preview \
-      --detail full \
-      --intent 'Create an uppercase derivative' \
-      --code "from pathlib import Path; value = Path('/workspace/input.txt').read_text(); Path('/workspace/output.txt').write_text(value.upper()); len(value)"
-    ```
-
-=== "Rust"
-
-    ```rust
-    use vsh::{ReceiptDetail, RunRequest, Runtime, RuntimeConfig};
-
-    fn main() -> Result<(), vsh::VshError> {
-        let runtime = Runtime::open(RuntimeConfig::new("demo-workspace"))?;
-        let receipt = runtime.preview(
-            RunRequest::new(
-                "from pathlib import Path\n\
-                 value = Path('/workspace/input.txt').read_text()\n\
-                 Path('/workspace/output.txt').write_text(value.upper())\n\
-                 len(value)",
-            )
-            .with_intent("Create an uppercase derivative")
-            .with_detail(ReceiptDetail::Full),
-        )?;
-
-        println!("transaction: {}", receipt.transaction);
-        println!("decision: {:?}", receipt.decision);
-        println!("changes: {:?}", receipt.changes);
-        Ok(())
-    }
-    ```
-
-## Read a receipt before commit
-
-Check these fields in order:
-
-1. `decision`: denied, auto-approved, or pending independent approval.
-2. `changed_paths` and `changes`: the bounded canonical change set.
-3. `risk_flags` in Python or the `RuntimeDecision` manifest in Rust.
-4. `result` / `value` and captured `stdout`.
-5. execution counters and per-stage timings.
-6. `transaction`: the exact handle to discard, approve, or promote.
-
-If an auto-approved preview is acceptable, promote the exact transaction rather than
-rerunning its source:
+Save this as `first_transaction.py` and run it with Python. It owns a temporary
+workspace, so it cannot overwrite files in your project.
 
 ```python
 import time
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
-committed = runtime.commit(receipt.transaction, time.time_ns() // 1_000_000)
-assert committed.committed
+from vsh import ReceiptDetail, Runtime
+
+with TemporaryDirectory(prefix="vsh-first-") as directory:
+    workspace = Path(directory)
+    (workspace / "input.txt").write_text("hello\n", encoding="utf-8")
+    runtime = Runtime.open(workspace)
+    preview = runtime.preview(
+        """
+from pathlib import Path
+before = Path('/workspace/input.txt').read_text()
+after = before.upper()
+Path('/workspace/output.txt').write_text(after)
+{'before': before, 'after': after}
+""",
+        intent="Create an uppercase derivative of the fixture",
+        detail=ReceiptDetail.FULL,
+    )
+
+    assert not (workspace / "output.txt").exists()
+    assert preview.decision == "auto_approved"
+    assert preview.changes == [("output.txt", "create")]
+    assert preview.result == {"before": "hello\n", "after": "HELLO\n"}
+
+    # This fixture's exact expected content is our trusted review.
+    committed = runtime.commit(preview.transaction, time.time_ns() // 1_000_000)
+    assert committed.committed
+    assert (workspace / "output.txt").read_text() == "HELLO\n"
+    print(committed.state, committed.changed_paths)  # committed 1
 ```
 
-Promotion revalidates the dependencies captured by the preview. If an input changed,
-commit fails stale before applying the virtual output.
+`/workspace` is a synthetic guest namespace, not your host's absolute directory.
+Preview stages user-file changes only in the virtual filesystem. Runtime storage,
+captured blobs and recovery metadata can still be written to disk.
 
-## Next
+## What to inspect
 
-- Learn the [pipeline and trust boundaries](how-it-works.md).
-- Choose a [transaction workflow](../guides/transactions.md).
-- Configure the [Python SDK](../python/) or [Rust SDK](../rust/).
-- Connect a coding agent through [MCP](../integrations/mcp.md).
+Start with `decision`, then the changed paths and their intended content. A successful
+program is not necessarily approved; an approved preview is not yet committed.
+`receipt.diff` is an identity digest, **not a text diff**. Full detail supplies path/kind
+entries in Python. The small result above explicitly returns content for review.
+
+Commit the returned transaction ID using the same live runtime. Do not rerun the
+program and assume the output is identical. If an observed input changes, commit
+rejects stale work before applying its proposed changes.
+
+If you only wanted analysis, release its auto-approved preview with
+`runtime.discard_preview(preview.transaction)`. Even read-only previews occupy the
+bounded pending cache.
+
+## Continue by task
+
+- [Understand snapshots and execution](how-it-works.md).
+- [Choose an appropriate use case](use-cases.md).
+- [Python cookbook](../python/examples.md): migration, generation, review and stale input.
+- [Rust cookbook](../rust/examples.md): run the same guest program natively.
+- [MCP](../integrations/mcp.md): expose one transaction tool to an agent.
+- [Efficient usage](../guides/efficient-usage.md): keep latency, memory and context costs bounded.

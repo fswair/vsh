@@ -8,6 +8,10 @@ _RUN_PROMPT = """\
 Use the single `vsh_run` tool for workspace simulation and mutation.
 
 - Send one Monty Python program containing the complete filesystem transaction.
+- Inside the program, use `pathlib` or the built-in `vsh_read`, `vsh_write`, `vsh_list`,
+  `vsh_mkdir`, `vsh_remove`, `vsh_move`, `vsh_copy`, `vsh_glob`, `vsh_search`, and
+  `vsh_patch` functions; they share one active virtual overlay and are not MCP tools.
+- Set `max_results` on glob/search to the smallest useful bound.
 - Use `mode="preview"` first when the user wants to inspect effects.
 - To apply an auto-approved preview, call `vsh_run` again with its `transaction`, no `code`, and
   `mode="auto"`; dependency revalidation still occurs before mutation.

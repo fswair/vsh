@@ -37,14 +37,19 @@ typed errors to an exception hierarchy. MCP adds a bounded JSON-safe representat
 ### No host mount in the guest
 
 Monty receives a synthetic absolute `/workspace` namespace. Filesystem operations are
-typed calls handled by the Rust adapter against `VirtualFs`. There is no guest-visible
-host path, subprocess, network, or ambient environment capability.
+typed calls handled by the Rust adapter against `VirtualFs`. Ten high-level VSH
+functions use the same typed suspension boundary and active overlay. There is no
+guest-visible host path, subprocess, network, or ambient environment capability.
 
-### Preview is non-mutating
+### Preview does not apply user-file changes
 
 Snapshot and copy-on-write effects remain virtual until a transaction owns a valid
 reservation and passes dependency/capability revalidation. Policy decisions and guest
 return values cannot write the host.
+
+Runtime storage is different: opening performs recovery, lazy capture stores immutable
+blobs, and pending approvals persist evidence. Preview is not a promise of zero disk
+writes anywhere on the host.
 
 ### Commit has one owner
 
@@ -68,11 +73,16 @@ recoverable. Adapters cannot implement alternate writers.
 1. Validate source and request limits.
 2. Capture a bounded immutable base snapshot.
 3. Execute exact source in a supervised Monty worker.
-4. Serve typed calls through policy into copy-on-write `VirtualFs`.
+4. Serve typed OS calls and high-level VSH functions through policy into the same
+   copy-on-write `VirtualFs`.
 5. Freeze an ordered canonical diff and dependency set.
 6. Evaluate deterministic transaction policy.
 7. Bind identity and retain/persist the exact pending artifact.
 8. Return a receipt, or continue into auto commit when authorized.
+
+Every run creates a new base and overlay. Metadata capture traverses the whole configured
+workspace, excluding root `.vsh-runtime`; content is lazy and stamp-verified on capture.
+There is no implicit `.gitignore` filter or retained preview overlay between calls.
 
 ### Commit
 
@@ -105,7 +115,7 @@ See the [crate map](rust/crates.md) for package names and dependency guidance.
 ## Concurrency model
 
 - No global runtime execution lock exists.
-- Each runtime owns a bounded pool of clean supervised workers.
+- Each runtime bounds idle clean worker reuse; the host must separately limit active requests.
 - Snapshot/simulation/policy work does not hold the commit coordination lock.
 - Same-workspace commits serialize the minimal identity recheck and mutation window.
 - Independent workspace runtimes scale in parallel.
@@ -136,6 +146,11 @@ the reservation.
 Python performs one PyO3 call for a whole transaction and uses a typed result converter.
 The remaining warm cost is dominated by real snapshot traversal and Monty/VirtualFs
 work. See [Performance](performance.md).
+
+The September 5 optimization removes policy/path allocation churn and repeated VFS
+index work. It uses constant-space policy matching, canonical borrowed path lookups,
+empty-overlay shortcuts, slash-bounded overlay ranges and flat two-phase diff buffers.
+It does not cache away fresh snapshots or remove integrity/durability checks.
 
 ## Public contract
 
