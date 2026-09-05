@@ -29,7 +29,7 @@ assert normalize_path("src/vsh/./core/../lib.rs") == "src/vsh/lib.rs"
 
 ### `__version__: str`
 
-The Python distribution, extension, Rust workspace, and worker share version `0.4.0`.
+The Python distribution, extension, Rust workspace, and worker share version `0.5.0`.
 
 This is the package version exported by `vsh`; development changes can share that
 version string, so record the checkout revision for reproducible evidence.
@@ -110,6 +110,9 @@ Runtime.open(
     data_directory: str | os.PathLike[str] | None = ...,
     policy: str = "balanced",
     worker_path: str | os.PathLike[str] | None = ...,
+    hook_id: str | None = ...,
+    hook_scope: HookScope | None = ...,
+    review_content_bytes: int = 0,
 ) -> Runtime
 ```
 
@@ -194,6 +197,42 @@ and returns a committed receipt. Stale input raises `VshStaleError` before mutat
 
 Reruns bounded recovery and returns what was finalized, rolled back, cleaned, left
 orphaned, or reported as conflict.
+
+The evidence-first handler surface (`HookedRuntime`, `HookScope`, `RequestEvent`,
+`HookDecision`, `CommitPreparation`, and `CommitResolution`) is documented on the
+[commit hooks](hooks.md) page. The optional agent-native surface is documented under
+[Pydantic AI capability](../integrations/pydantic-ai.md). `CommitJudge` and `JudgeReport`
+are documented under [LLM commit judge](commit-judge.md).
+
+## Optional Pydantic AI surface
+
+Import these classes from `vsh.pydantic_ai` after installing the `pydantic-ai` extra:
+
+```python
+from vsh.pydantic_ai import CommitJudge, JudgeReport, VshCapability, VshToolResult
+```
+
+`VshCapability(workspace, ...)` owns a native runtime and contributes ten filesystem
+tools plus atomic `vsh_run` to `Agent(capabilities=[...])`. It accepts native runtime
+configuration together with `hook_handler`, `hook_scope`, `hook_id`,
+`review_content_bytes`, capability `id`, and `defer_loading`. Construct it directly;
+there is no `VshCapability.open` alias.
+
+`VshToolResult` contains `transaction`, `state`, JSON-compatible `result`,
+`changed_paths`, optional `hook_verdict`, optional `feedback`, and the derived
+`requires_review` property. Pending, rejected, and denied outcomes withhold the guest
+result from the calling agent.
+
+`CommitJudge(model, ...)` builds a bounded structured reviewer. Configure its additive
+`review_instructions`, model settings, content allowlist, usage limits, provider output
+cap, timeout, input-byte cap, and concurrency bound. Pass `judge.hook_handler` to the
+capability or `HookedRuntime`; the judge object itself is not callable. `JudgeReport`
+contains `decision`, `reason`, evidence references, concerns, and missing evidence.
+
+See the [capability constructor and tool reference](../integrations/pydantic-ai.md),
+[judge constructor and evidence contract](commit-judge.md), and guided
+[deterministic](../tutorials/pydantic-ai-deterministic.md) and
+[judge](../tutorials/pydantic-ai-judge.md) applications.
 
 ## `Receipt`
 

@@ -8,7 +8,7 @@ it does not implement a separate filesystem simulator.
 ## Install and launch
 
 ```bash
-python -m pip install 'vsh-python[mcp]==0.4.0'
+python -m pip install 'vsh-python[mcp]==0.5.0'
 vsh serve
 ```
 
@@ -20,7 +20,7 @@ vsh-codemode
 ```
 
 The ten in-program VSH functions and the existing `pathlib` surface are included in
-VSH 0.4.0. See [source installation](../development.md) when developing from a checkout.
+the current release. See [source installation](../development.md) when developing from a checkout.
 
 ## Connect a client
 

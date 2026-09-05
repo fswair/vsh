@@ -45,6 +45,6 @@ htmlcov/
 .cratesrc
 .logfire
 
-# Playground benchmark artifacts
-playground/reports/2026*
+# Local benchmark artifacts
+benchmarks/results/local/
 /references

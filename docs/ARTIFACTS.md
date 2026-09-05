@@ -1,8 +1,7 @@
 # Transaction artifacts
 
 VSH retains the minimum bounded evidence required to promote, reject, recover, and
-audit a filesystem transaction. This page describes native transaction artifacts; the
-legacy Python agent-output spill store is not part of VSH 0.3.
+audit a filesystem transaction.
 
 ## Bound identity
 
@@ -45,4 +44,4 @@ Commit plans, journals, and markers are opened with no-follow identity validatio
 Recovery leaves ambiguous ownership untouched and reports it to the host.
 
 See [Transactions](guides/transactions.md), [Architecture](ARCHITECTURE.md), and the
-full [Threat model](rust-rewrite/THREAT_MODEL.md).
+full [Threat model](threat-model.md).

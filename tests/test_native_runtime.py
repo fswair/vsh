@@ -14,7 +14,11 @@ import pytest
 
 from vsh import (
     ExecutionBudget,
+    HookDecision,
+    HookedRuntime,
+    HookScope,
     ReceiptDetail,
+    RequestEvent,
     RunMode,
     RunRequest,
     Runtime,
@@ -24,7 +28,18 @@ from vsh import (
 from vsh.mcp import vsh_run
 
 
-@pytest.mark.parametrize("example", ["workflows.py", "mcp_workflow.py", "cli_workflow.py"])
+@pytest.mark.parametrize(
+    "example",
+    [
+        "preview.py",
+        "auto_commit.py",
+        "strict_review.py",
+        "budgeted_analysis.py",
+        "workflows.py",
+        "mcp_workflow.py",
+        "cli_workflow.py",
+    ],
+)
 def test_native_cookbook_examples_execute_their_contracts(example: str) -> None:
     source = Path(__file__).resolve().parents[1] / "examples" / "native" / example
     runpy.run_path(str(source), run_name="__main__")
@@ -72,6 +87,198 @@ len(value)
         "snapshot",
         "total",
     }
+
+
+def test_python_hook_returns_evidence_first_feedback_and_keeps_pending(tmp_path: Path) -> None:
+    (tmp_path / "input.txt").write_text("source")
+    events: list[RequestEvent] = []
+
+    def handler(event: RequestEvent) -> HookDecision:
+        events.append(event)
+        return HookDecision.review(
+            "output.txt copies sensitive-looking source data; main agent must confirm"
+        )
+
+    runtime = HookedRuntime.open(
+        tmp_path,
+        hook_handler=handler,
+        hook_scope=HookScope.ALL_REQUESTS,
+        hook_id="python-evidence-review",
+    )
+    preview = runtime.preview(
+        RunRequest(
+            "from pathlib import Path\n"
+            "value = Path('/workspace/input.txt').read_text()\n"
+            "Path('/workspace/output.txt').write_text(value)",
+            intent="copy the source",
+        )
+    )
+    resolution = runtime.commit(preview.transaction, now_unix_ms=100)
+
+    assert resolution.receipt.state == "pending_approval"
+    assert resolution.hook is not None
+    assert resolution.hook.verdict == "review"
+    assert "main agent" in resolution.hook.reason
+    assert runtime.transaction_state(preview.transaction) == "pending_approval"
+    assert not (tmp_path / "output.txt").exists()
+    assert len(events) == 1
+    event = events[0]
+    assert event.intent == "copy the source"
+    assert event.intent_digest is not None
+    assert event.baseline == "auto_approved"
+    assert event.policy_profile == "balanced"
+    assert event.canonical_diff[0].path == "output.txt"
+    assert event.canonical_diff[0].kind == "create"
+    assert event.canonical_diff[0].before is None
+    assert event.canonical_diff[0].after is not None
+    assert event.canonical_diff[0].after.kind == "file"
+    assert event.canonical_diff[0].after.content is not None
+    assert any(effect.operation == "content_read" for effect in event.effects)
+    assert any(effect.operation == "create" for effect in event.effects)
+    assert event.read_bytes > 0
+    assert event.write_bytes > 0
+    assert event.evidence_complete is True
+    assert event.evidence_truncated is False
+
+    assert runtime.approve(preview.transaction, "main-agent", 110, 200) == "approved"
+    committed = runtime.commit(preview.transaction, now_unix_ms=120)
+    assert committed.receipt.state == "committed"
+    assert committed.hook is None
+    assert (tmp_path / "output.txt").read_text() == "source"
+
+
+def test_python_async_hook_can_approve_read_only_request(tmp_path: Path) -> None:
+    (tmp_path / "read.txt").write_text("bounded")
+    events: list[RequestEvent] = []
+
+    async def handler(event: RequestEvent) -> HookDecision:
+        await asyncio.sleep(0)
+        events.append(event)
+        return HookDecision.approve("read set is bounded")
+
+    runtime = HookedRuntime.open(
+        tmp_path,
+        hook_handler=handler,
+        hook_scope=HookScope.ALL_REQUESTS,
+    )
+    receipt = asyncio.run(
+        runtime.arun(
+            RunRequest(
+                "from pathlib import Path\nPath('/workspace/read.txt').read_text()",
+                mode=RunMode.AUTO,
+            )
+        )
+    )
+
+    assert receipt.state == "committed"
+    assert len(events) == 1
+    assert events[0].canonical_diff == []
+    assert any(effect.operation == "content_read" for effect in events[0].effects)
+
+
+def test_sync_hook_rejects_awaitable_and_fails_closed(tmp_path: Path) -> None:
+    async def handler(_event: RequestEvent) -> HookDecision:
+        return HookDecision.approve("async")
+
+    runtime = HookedRuntime.open(
+        tmp_path,
+        hook_handler=handler,
+        hook_scope=HookScope.ALL_REQUESTS,
+    )
+    preview = runtime.preview(
+        "from pathlib import Path\nPath('/workspace/deferred.txt').write_text('value')"
+    )
+
+    with pytest.raises(TypeError, match=r"use acommit\(\) or arun\(\)"):
+        runtime.commit(preview.transaction, now_unix_ms=1)
+
+    assert runtime.transaction_state(preview.transaction) == "pending_approval"
+    assert not (tmp_path / "deferred.txt").exists()
+
+
+def test_hooked_runtime_passthrough_paths_and_helpers(tmp_path: Path) -> None:
+    calls = 0
+
+    def handler(_event: RequestEvent) -> HookDecision:
+        nonlocal calls
+        calls += 1
+        return HookDecision.follow_policy()
+
+    runtime = HookedRuntime.open(tmp_path, hook_handler=handler)
+    assert isinstance(runtime.native, Runtime)
+
+    discarded = runtime.preview("41 + 1")
+    assert runtime.discard_preview(discarded.transaction)
+
+    preview = runtime.run(RunRequest("1", mode=RunMode.PREVIEW))
+    assert preview.state == "auto_approved"
+    assert runtime.discard_preview(preview.transaction)
+
+    committed = runtime.run(
+        RunRequest(
+            "from pathlib import Path\nPath('/workspace/direct.txt').write_text('ok')",
+            mode=RunMode.AUTO,
+        ),
+        now_unix_ms=10,
+    )
+    assert committed.state == "committed"
+    assert calls == 0
+    assert runtime.recover().conflicts == []
+
+
+def test_async_hook_invalid_result_fails_closed(tmp_path: Path) -> None:
+    runtime = HookedRuntime.open(
+        tmp_path,
+        hook_handler=lambda _event: cast(HookDecision, "invalid"),
+        hook_scope=HookScope.ALL_REQUESTS,
+    )
+    preview = runtime.preview(
+        "from pathlib import Path\nPath('/workspace/invalid.txt').write_text('value')"
+    )
+
+    with pytest.raises(TypeError, match="must return HookDecision"):
+        asyncio.run(runtime.acommit(preview.transaction))
+
+    assert runtime.transaction_state(preview.transaction) == "pending_approval"
+
+
+def test_sync_hook_closes_only_real_coroutines(tmp_path: Path) -> None:
+    class AwaitableDecision:
+        def __await__(self):
+            yield
+            return HookDecision.follow_policy()
+
+    runtime = HookedRuntime.open(
+        tmp_path,
+        hook_handler=lambda _event: cast(HookDecision, AwaitableDecision()),
+        hook_scope=HookScope.ALL_REQUESTS,
+    )
+    preview = runtime.preview("42")
+
+    with pytest.raises(TypeError, match=r"use acommit\(\) or arun\(\)"):
+        runtime.commit(preview.transaction)
+
+    assert runtime.transaction_state(preview.transaction) == "pending_approval"
+
+
+def test_hooked_runtime_async_preview_does_not_invoke_handler(tmp_path: Path) -> None:
+    calls = 0
+
+    def handler(_event: RequestEvent) -> HookDecision:
+        nonlocal calls
+        calls += 1
+        return HookDecision.follow_policy()
+
+    runtime = HookedRuntime.open(
+        tmp_path,
+        hook_handler=handler,
+        hook_scope=HookScope.ALL_REQUESTS,
+    )
+    receipt = asyncio.run(runtime.arun(RunRequest("42", mode=RunMode.PREVIEW)))
+
+    assert receipt.state == "auto_approved"
+    assert calls == 0
+    assert runtime.discard_preview(receipt.transaction)
 
 
 def test_pyo3_vsh_functions_and_pathlib_share_one_preview_overlay(tmp_path: Path) -> None:

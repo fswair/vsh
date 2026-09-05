@@ -15,8 +15,8 @@ use vsh_monty::{
     SubprocessMonty, VirtualRoot, validate_result_compatibility,
 };
 use vsh_policy::{
-    DenyManifest, PolicyDecision, PolicyInput, PolicyProfile, RiskManifest,
-    TransactionIdentityInput, TransactionPolicy, bind_transaction,
+    AccessKind, DeniedAccess, DenyManifest, PolicyDecision, PolicyInput, PolicyProfile,
+    RiskManifest, RiskMetrics, TransactionIdentityInput, TransactionPolicy, bind_transaction,
 };
 use vsh_store::{
     ApprovalGrant, ApprovalGrantError, BlobStore, BlobStoreError, DataDirectory,
@@ -26,9 +26,15 @@ use vsh_store::{
 use vsh_types::{
     DiffDigest, DiffEntry, RuntimeConfigDigest, SnapshotId, TransactionId, TransactionState,
 };
-use vsh_vfs::{VfsError, VirtualFs};
+use vsh_vfs::{CanonicalDiff, VfsError, VirtualFs};
 
-use crate::artifact::{ArtifactError, PendingTransaction, decode_pending, encode_pending};
+use crate::artifact::{
+    ArtifactError, PendingTransaction, ReviewEvidence, decode_pending, encode_pending,
+};
+use crate::hook::{
+    CommitPreparation, CommitResolution, HookBaseline, HookConfig, HookDecision,
+    HookDecisionRecord, HookHandlerError, HookVerdict, RequestEvent,
+};
 
 /// Request-scoped resource caps enforced by the Monty/VFS adapter.
 pub type ExecutionBudget = ExecutionLimits;
@@ -48,6 +54,10 @@ pub struct ArtifactLimits {
     pub max_dependencies: usize,
     /// Maximum one-path UTF-8 byte length.
     pub max_path_bytes: usize,
+    /// Maximum retained out-of-band intent bytes exposed to a hook.
+    pub max_intent_bytes: usize,
+    /// Maximum ordered operation-level effects exposed to a hook.
+    pub max_effects: usize,
     /// Maximum process-local auto-approved previews retained by one runtime.
     pub max_ephemeral_entries: usize,
     /// Maximum encoded bytes retained by process-local auto-approved previews.
@@ -63,6 +73,8 @@ impl Default for ArtifactLimits {
             max_entries: 100_000,
             max_dependencies: 250_000,
             max_path_bytes: 16 * 1024,
+            max_intent_bytes: 64 * 1024,
+            max_effects: 250_000,
             max_ephemeral_entries: 64,
             max_ephemeral_bytes: 128 * 1024 * 1024,
         }
@@ -220,6 +232,7 @@ pub struct RuntimeConfig {
     commit_config: CommitConfig,
     store_config: FileStoreConfig,
     artifact_limits: ArtifactLimits,
+    commit_hook: Option<HookConfig>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -250,6 +263,7 @@ impl RuntimeConfig {
             commit_config: CommitConfig::default(),
             store_config: FileStoreConfig::default(),
             artifact_limits: ArtifactLimits::default(),
+            commit_hook: None,
         }
     }
 
@@ -343,6 +357,13 @@ impl RuntimeConfig {
         self
     }
 
+    /// Require the native two-phase hook protocol for matching commit candidates.
+    #[must_use]
+    pub const fn with_commit_hook(mut self, hook: HookConfig) -> Self {
+        self.commit_hook = Some(hook);
+        self
+    }
+
     /// Return the host workspace authority root.
     #[must_use]
     pub fn workspace_root(&self) -> &Path {
@@ -365,6 +386,12 @@ impl RuntimeConfig {
     #[must_use]
     pub const fn policy(&self) -> &TransactionPolicy {
         &self.policy
+    }
+
+    /// Return the commit-hook configuration, when direct commits are guarded.
+    #[must_use]
+    pub const fn commit_hook(&self) -> Option<HookConfig> {
+        self.commit_hook
     }
 }
 
@@ -430,6 +457,14 @@ struct PendingArtifacts {
     encoded_bytes: usize,
 }
 
+struct EvaluatedDiff {
+    diff: CanonicalDiff,
+    decision: PolicyDecision,
+    metrics: RiskMetrics,
+    diff_ns: u64,
+    policy_ns: u64,
+}
+
 impl Runtime {
     /// Open one capability-rooted runtime and recover durable interrupted commits.
     ///
@@ -493,14 +528,7 @@ impl Runtime {
             self.snapshot_filesystem()?;
 
         let monty_config = self.monty_config(request.budget);
-        let runtime_config = aggregate_runtime_digest(
-            self.execution.security_digest(&monty_config),
-            self.config.snapshot_limits,
-            self.config.commit_config,
-            self.config.store_config,
-            self.config.artifact_limits,
-            self.config.result_compatibility,
-        );
+        let runtime_config = self.runtime_config_digest(&monty_config);
         let execute_started = Instant::now();
         let ExecutionOutcome {
             value,
@@ -513,18 +541,13 @@ impl Runtime {
         validate_result_compatibility(&value, self.config.result_compatibility)?;
         let execute_ns = elapsed_ns(execute_started);
 
-        let diff_started = Instant::now();
-        let diff = filesystem.canonical_diff()?;
-        let diff_ns = elapsed_ns(diff_started);
-
-        let policy_started = Instant::now();
-        let policy_decision = self.config.policy.evaluate(PolicyInput {
-            diff: &diff,
-            effects: filesystem.effects(),
-            denied_accesses: &denied_accesses,
-            base_node_count,
-        });
-        let policy_ns = elapsed_ns(policy_started);
+        let EvaluatedDiff {
+            diff,
+            decision: policy_decision,
+            metrics: risk_metrics,
+            diff_ns,
+            policy_ns,
+        } = self.evaluate_diff(&filesystem, &denied_accesses, base_node_count)?;
 
         let bind_started = Instant::now();
         let binding = bind_transaction(TransactionIdentityInput {
@@ -577,6 +600,13 @@ impl Runtime {
                     diff,
                     read_set: filesystem.read_set().clone(),
                     write_set: filesystem.write_set().clone(),
+                    review: ReviewEvidence {
+                        intent: request.intent.map(str::to_owned),
+                        metrics: risk_metrics,
+                        effects: filesystem.effects().to_vec(),
+                        complete: true,
+                        truncated: false,
+                    },
                     receipt,
                 },
                 request.mode,
@@ -653,6 +683,252 @@ impl Runtime {
         transaction: TransactionId,
         now_unix_ms: u64,
     ) -> Result<Receipt, VshError> {
+        if self.config.commit_hook.is_some() {
+            let preparation = self.prepare_commit(transaction)?;
+            if let Some(event) = preparation.event() {
+                return Err(VshError::HookRequired(Box::new(event.clone())));
+            }
+        }
+        self.commit_exact(transaction, now_unix_ms)
+    }
+
+    /// Freeze one exact commit candidate before invoking an external handler.
+    ///
+    /// No handler code runs in this method. Process-local auto-approved previews are
+    /// made durable before an event is returned, so a crash can regenerate the same
+    /// event from the exact transaction artifact.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed store, artifact, configuration, or evidence error.
+    pub fn prepare_commit(
+        &self,
+        transaction: TransactionId,
+    ) -> Result<CommitPreparation, VshError> {
+        let artifact = self.load_pending(transaction)?;
+        validate_result_compatibility(&artifact.receipt.value, self.config.result_compatibility)?;
+        self.persist_ephemeral(&artifact)?;
+        let record = self.store.get(transaction)?;
+        let state = record.state();
+        let Some(hook) = self.config.commit_hook else {
+            return Ok(CommitPreparation::Ready { transaction, state });
+        };
+        if !hook.scope().applies_to(state) {
+            return Ok(CommitPreparation::Ready { transaction, state });
+        }
+        Ok(CommitPreparation::Review(Box::new(
+            self.request_event(&artifact, hook, state)?,
+        )))
+    }
+
+    /// Apply one hook decision to the exact prepared transaction.
+    ///
+    /// The preparation is revalidated against durable state and regenerated evidence,
+    /// so callers cannot substitute a transaction or event after the handler returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed event-binding, state, approval, store, or commit error. The
+    /// exact preparation is checked again before any decision changes host files.
+    pub fn resolve_commit(
+        &self,
+        preparation: &CommitPreparation,
+        decision: &HookDecision,
+        now_unix_ms: u64,
+    ) -> Result<CommitResolution, VshError> {
+        let transaction = preparation.transaction();
+        let prepared_state = preparation.prepared_state();
+        let artifact = self.load_pending(transaction)?;
+        let event = self.validate_hook_preparation(preparation, decision, &artifact)?;
+
+        let (verdict, reason) = match &decision {
+            HookDecision::FollowPolicy => (HookVerdict::FollowPolicy, ""),
+            HookDecision::Approve { reason } => (HookVerdict::Approve, reason.as_str()),
+            HookDecision::Review { feedback } => (HookVerdict::Review, feedback.as_str()),
+            HookDecision::Reject { reason } => (HookVerdict::Reject, reason.as_str()),
+        };
+        if let Some((_, hook)) = event
+            && reason.len() > hook.max_reason_bytes()
+        {
+            return Err(VshError::HookReasonLimit {
+                observed: reason.len(),
+                maximum: hook.max_reason_bytes(),
+            });
+        }
+        let receipt = self.apply_hook_decision(
+            transaction,
+            prepared_state,
+            &artifact,
+            event,
+            decision,
+            now_unix_ms,
+        )?;
+
+        let hook_record = event.map(|(event, hook)| HookDecisionRecord {
+            event_id: event.event_id,
+            hook_id: event.hook_id,
+            verdict,
+            reason: reason.to_owned(),
+            principal: (verdict == HookVerdict::Approve).then(|| hook.principal()),
+        });
+        Ok(CommitResolution {
+            receipt,
+            hook: hook_record,
+        })
+    }
+
+    fn validate_hook_preparation<'a>(
+        &self,
+        preparation: &'a CommitPreparation,
+        decision: &HookDecision,
+        artifact: &PendingTransaction,
+    ) -> Result<Option<(&'a RequestEvent, HookConfig)>, VshError> {
+        let transaction = preparation.transaction();
+        let prepared_state = preparation.prepared_state();
+        let actual = self.store.get(transaction)?.state();
+        if actual != prepared_state {
+            return Err(VshError::HookStateChanged {
+                transaction,
+                prepared: prepared_state,
+                actual,
+            });
+        }
+        match preparation {
+            CommitPreparation::Ready { .. } => {
+                if let Some(hook) = self.config.commit_hook
+                    && hook.scope().applies_to(prepared_state)
+                {
+                    return Err(VshError::HookRequired(Box::new(self.request_event(
+                        artifact,
+                        hook,
+                        prepared_state,
+                    )?)));
+                }
+                if *decision != HookDecision::FollowPolicy {
+                    return Err(VshError::UnexpectedHookDecision { transaction });
+                }
+                Ok(None)
+            }
+            CommitPreparation::Review(event) => {
+                let hook = self
+                    .config
+                    .commit_hook
+                    .ok_or(VshError::HookConfigurationChanged { transaction })?;
+                let expected = self.request_event(artifact, hook, prepared_state)?;
+                if expected != **event {
+                    return Err(VshError::HookEventMismatch { transaction });
+                }
+                Ok(Some((event.as_ref(), hook)))
+            }
+        }
+    }
+
+    fn apply_hook_decision(
+        &self,
+        transaction: TransactionId,
+        prepared_state: TransactionState,
+        artifact: &PendingTransaction,
+        event: Option<(&RequestEvent, HookConfig)>,
+        decision: &HookDecision,
+        now_unix_ms: u64,
+    ) -> Result<Receipt, VshError> {
+        match decision {
+            HookDecision::FollowPolicy => match prepared_state {
+                TransactionState::AutoApproved | TransactionState::Approved => {
+                    self.commit_exact(transaction, now_unix_ms)
+                }
+                TransactionState::PendingApproval => Ok(artifact.receipt.clone()),
+                actual => Err(VshError::HookNotActionable {
+                    transaction,
+                    actual,
+                }),
+            },
+            HookDecision::Approve { .. } => {
+                let (_, hook) = event.ok_or(VshError::UnexpectedHookDecision { transaction })?;
+                if !artifact.review.complete || artifact.review.truncated {
+                    return Err(VshError::IncompleteHookEvidence { transaction });
+                }
+                if prepared_state == TransactionState::PendingApproval {
+                    let expires_at_unix_ms = now_unix_ms
+                        .checked_add(hook.approval_ttl_ms())
+                        .ok_or(VshError::HookApprovalWindow { transaction })?;
+                    self.approve(
+                        transaction,
+                        hook.principal(),
+                        now_unix_ms,
+                        expires_at_unix_ms,
+                    )?;
+                } else if prepared_state != TransactionState::AutoApproved {
+                    return Err(VshError::HookNotActionable {
+                        transaction,
+                        actual: prepared_state,
+                    });
+                }
+                self.commit_exact(transaction, now_unix_ms)
+            }
+            HookDecision::Review { .. } => {
+                if prepared_state == TransactionState::AutoApproved {
+                    self.store.compare_and_transition(
+                        transaction,
+                        TransactionState::AutoApproved,
+                        TransactionState::PendingApproval,
+                    )?;
+                    self.update_pending_state(transaction, TransactionState::PendingApproval)?;
+                } else if prepared_state != TransactionState::PendingApproval {
+                    return Err(VshError::HookNotActionable {
+                        transaction,
+                        actual: prepared_state,
+                    });
+                }
+                self.receipt_in_state(transaction, TransactionState::PendingApproval)
+            }
+            HookDecision::Reject { .. } => {
+                if !matches!(
+                    prepared_state,
+                    TransactionState::AutoApproved | TransactionState::PendingApproval
+                ) {
+                    return Err(VshError::HookNotActionable {
+                        transaction,
+                        actual: prepared_state,
+                    });
+                }
+                self.store.compare_and_transition(
+                    transaction,
+                    prepared_state,
+                    TransactionState::Rejected,
+                )?;
+                self.update_pending_state(transaction, TransactionState::Rejected)?;
+                let receipt = self.receipt_in_state(transaction, TransactionState::Rejected)?;
+                self.remove_pending(transaction)?;
+                Ok(receipt)
+            }
+        }
+    }
+
+    /// Apply fail-closed state after a handler exception, timeout, or cancellation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed store or artifact error if automatic approval cannot be moved
+    /// into the existing pending-approval state.
+    pub fn fail_hook(&self, preparation: &CommitPreparation) -> Result<(), VshError> {
+        let transaction = preparation.transaction();
+        if preparation.prepared_state() == TransactionState::AutoApproved {
+            self.store.compare_and_transition(
+                transaction,
+                TransactionState::AutoApproved,
+                TransactionState::PendingApproval,
+            )?;
+            self.update_pending_state(transaction, TransactionState::PendingApproval)?;
+        }
+        Ok(())
+    }
+
+    fn commit_exact(
+        &self,
+        transaction: TransactionId,
+        now_unix_ms: u64,
+    ) -> Result<Receipt, VshError> {
         let artifact = self.load_pending(transaction)?;
         validate_result_compatibility(&artifact.receipt.value, self.config.result_compatibility)?;
         self.persist_ephemeral(&artifact)?;
@@ -706,10 +982,159 @@ impl Runtime {
         }
     }
 
+    fn request_event(
+        &self,
+        artifact: &PendingTransaction,
+        hook: HookConfig,
+        state: TransactionState,
+    ) -> Result<RequestEvent, VshError> {
+        let transaction = artifact.binding.transaction_id();
+        if artifact.binding.policy != self.config.policy.digest() {
+            return Err(VshError::HookConfigurationChanged { transaction });
+        }
+        let (baseline, risk_flags) = match &artifact.receipt.decision {
+            RuntimeDecision::AutoApproved => (HookBaseline::AutoApproved, Vec::new()),
+            RuntimeDecision::PendingApproval(manifest) => {
+                (HookBaseline::ReviewRequired, manifest.flags.clone())
+            }
+            RuntimeDecision::Denied(_) => {
+                return Err(VshError::HookNotActionable {
+                    transaction,
+                    actual: TransactionState::Denied,
+                });
+            }
+        };
+        let (contents, content_complete) = crate::review::collect_content(
+            artifact.diff.entries(),
+            &artifact.review.effects,
+            self.config.policy.call_policy(),
+            &self.artifacts,
+            hook.max_content_bytes(),
+        )?;
+        Ok(RequestEvent {
+            schema_version: 1,
+            event_id: vsh_types::RequestEventId::derive(transaction, hook.id(), hook.scope().tag()),
+            hook_id: hook.id(),
+            transaction,
+            state,
+            baseline,
+            base_snapshot: artifact.binding.base_snapshot,
+            diff: artifact.binding.diff,
+            read_set: artifact.binding.read_set,
+            write_set: artifact.binding.write_set,
+            program: artifact.binding.program,
+            policy: artifact.binding.policy,
+            runtime_config: artifact.binding.runtime_config,
+            intent_digest: artifact.binding.intent,
+            intent: artifact.review.intent.clone(),
+            policy_profile: self.config.policy.profile(),
+            policy_thresholds: self.config.policy.thresholds(),
+            risk_metrics: artifact.review.metrics,
+            risk_flags,
+            canonical_diff: artifact.diff.entries().to_vec(),
+            effects: artifact.review.effects.clone(),
+            execution: artifact.receipt.execution,
+            evidence_complete: artifact.review.complete,
+            evidence_truncated: artifact.review.truncated,
+            contents,
+            content_complete,
+        })
+    }
+
+    fn evaluate_diff(
+        &self,
+        filesystem: &VirtualFs,
+        denied_accesses: &[DeniedAccess],
+        base_node_count: usize,
+    ) -> Result<EvaluatedDiff, VshError> {
+        let started = Instant::now();
+        let mut diff = filesystem.canonical_diff()?;
+        let mut diff_ns = elapsed_ns(started);
+        let evaluate = |diff: &CanonicalDiff| {
+            self.config.policy.evaluate_with_metrics(PolicyInput {
+                diff,
+                effects: filesystem.effects(),
+                denied_accesses,
+                base_node_count,
+            })
+        };
+        let started = Instant::now();
+        let (mut decision, mut metrics) = evaluate(&diff);
+        let mut policy_ns = elapsed_ns(started);
+        let state = match &decision {
+            PolicyDecision::Deny(_) => TransactionState::Denied,
+            PolicyDecision::AutoApprove => TransactionState::AutoApproved,
+            PolicyDecision::Escalate(_) => TransactionState::PendingApproval,
+        };
+        if let Some(hook) = self.config.commit_hook
+            && hook.max_content_bytes() > 0
+            && hook.scope().applies_to(state)
+            && !diff.entries().is_empty()
+        {
+            let started = Instant::now();
+            let paths = diff.entries().iter().filter_map(|entry| {
+                (entry.before.is_some()
+                    && self
+                        .config
+                        .policy
+                        .call_policy()
+                        .authorize(&entry.path, AccessKind::ContentRead)
+                        .is_ok())
+                .then_some(&entry.path)
+            });
+            filesystem.capture_before_content(paths, hook.max_content_bytes())?;
+            diff = filesystem.canonical_diff()?;
+            diff_ns = diff_ns.saturating_add(elapsed_ns(started));
+            let started = Instant::now();
+            (decision, metrics) = evaluate(&diff);
+            policy_ns = policy_ns.saturating_add(elapsed_ns(started));
+        }
+        Ok(EvaluatedDiff {
+            diff,
+            decision,
+            metrics,
+            diff_ns,
+            policy_ns,
+        })
+    }
+
+    fn update_pending_state(
+        &self,
+        transaction: TransactionId,
+        state: TransactionState,
+    ) -> Result<(), VshError> {
+        if let Some((artifact, _)) = self.pending()?.entries.get_mut(&transaction) {
+            artifact.receipt.state = state;
+        }
+        Ok(())
+    }
+
+    fn receipt_in_state(
+        &self,
+        transaction: TransactionId,
+        state: TransactionState,
+    ) -> Result<Receipt, VshError> {
+        let mut artifact = self.load_pending(transaction)?;
+        artifact.receipt.state = state;
+        Ok(artifact.receipt)
+    }
+
     fn monty_config(&self, budget: ExecutionBudget) -> InProcessConfig {
         InProcessConfig::new(self.config.virtual_root.clone())
             .with_limits(budget)
             .with_call_policy(self.config.policy.call_policy().clone())
+    }
+
+    fn runtime_config_digest(&self, monty_config: &InProcessConfig) -> RuntimeConfigDigest {
+        aggregate_runtime_digest(
+            self.execution.security_digest(monty_config),
+            self.config.snapshot_limits,
+            self.config.commit_config,
+            self.config.store_config,
+            self.config.artifact_limits,
+            self.config.result_compatibility,
+            self.config.commit_hook,
+        )
     }
 
     fn snapshot_filesystem(&self) -> Result<(VirtualFs, SnapshotId, usize, u64), VshError> {
@@ -926,9 +1351,10 @@ fn aggregate_runtime_digest(
     store: FileStoreConfig,
     artifact: ArtifactLimits,
     result_compatibility: ResultCompatibility,
+    commit_hook: Option<HookConfig>,
 ) -> RuntimeConfigDigest {
-    let mut canonical = Vec::with_capacity(33 + 8 * 19);
-    canonical.extend_from_slice(b"vsh-runtime-config-v4");
+    let mut canonical = Vec::with_capacity(66 + 8 * 23);
+    canonical.extend_from_slice(b"vsh-runtime-config-v6");
     canonical.extend_from_slice(monty.as_bytes());
     encode_usize(snapshot.max_nodes, &mut canonical);
     encode_usize(snapshot.max_depth, &mut canonical);
@@ -947,12 +1373,25 @@ fn aggregate_runtime_digest(
     encode_usize(artifact.max_entries, &mut canonical);
     encode_usize(artifact.max_dependencies, &mut canonical);
     encode_usize(artifact.max_path_bytes, &mut canonical);
+    encode_usize(artifact.max_intent_bytes, &mut canonical);
+    encode_usize(artifact.max_effects, &mut canonical);
     encode_usize(artifact.max_ephemeral_entries, &mut canonical);
     encode_usize(artifact.max_ephemeral_bytes, &mut canonical);
     canonical.push(match result_compatibility {
         ResultCompatibility::Native => 0,
         ResultCompatibility::Python => 1,
     });
+    match commit_hook {
+        None => canonical.push(0),
+        Some(hook) => {
+            canonical.push(1);
+            canonical.extend_from_slice(hook.id().as_bytes());
+            canonical.push(hook.scope().tag());
+            canonical.extend_from_slice(&hook.approval_ttl_ms().to_le_bytes());
+            encode_usize(hook.max_reason_bytes(), &mut canonical);
+            encode_usize(hook.max_content_bytes(), &mut canonical);
+        }
+    }
     RuntimeConfigDigest::digest_canonical(&canonical)
 }
 
@@ -960,7 +1399,7 @@ fn encode_usize(value: usize, output: &mut Vec<u8>) {
     output.extend_from_slice(&u64::try_from(value).unwrap_or(u64::MAX).to_le_bytes());
 }
 
-fn receipt_changes(detail: ReceiptDetail, diff: &vsh_vfs::CanonicalDiff) -> Vec<DiffEntry> {
+fn receipt_changes(detail: ReceiptDetail, diff: &CanonicalDiff) -> Vec<DiffEntry> {
     if detail == ReceiptDetail::Full {
         diff.entries().to_vec()
     } else {
@@ -1143,6 +1582,58 @@ pub enum VshError {
     },
     /// The short-lived pending-artifact mutex was poisoned by a panic.
     PendingPoisoned,
+    /// Direct commit was blocked because a configured hook must decide first.
+    HookRequired(Box<RequestEvent>),
+    /// The external hook handler failed after fail-closed state was applied.
+    HookHandler(HookHandlerError),
+    /// Durable state changed after the event was prepared.
+    HookStateChanged {
+        /// Exact transaction represented by the preparation.
+        transaction: TransactionId,
+        /// State captured while preparing the hook event.
+        prepared: TransactionState,
+        /// State observed when resolving the hook decision.
+        actual: TransactionState,
+    },
+    /// Hook configuration no longer matches the prepared transaction evidence.
+    HookConfigurationChanged {
+        /// Transaction whose bound hook configuration changed.
+        transaction: TransactionId,
+    },
+    /// The event supplied for resolution was not the exact regenerated event.
+    HookEventMismatch {
+        /// Transaction whose regenerated event did not match.
+        transaction: TransactionId,
+    },
+    /// A handler decision was supplied when no handler was requested.
+    UnexpectedHookDecision {
+        /// Transaction that did not request a hook decision.
+        transaction: TransactionId,
+    },
+    /// The selected transaction state cannot accept a hook decision.
+    HookNotActionable {
+        /// Transaction rejected by the hook state guard.
+        transaction: TransactionId,
+        /// Non-actionable state observed by the resolver.
+        actual: TransactionState,
+    },
+    /// Hook feedback exceeded its configured hard UTF-8 bound.
+    HookReasonLimit {
+        /// Observed UTF-8 byte length.
+        observed: usize,
+        /// Configured maximum UTF-8 byte length.
+        maximum: usize,
+    },
+    /// Hook approval expiry overflowed or did not advance host time.
+    HookApprovalWindow {
+        /// Transaction whose approval window was invalid.
+        transaction: TransactionId,
+    },
+    /// Legacy or truncated evidence cannot be approved by an automated hook.
+    IncompleteHookEvidence {
+        /// Transaction without complete hook evidence.
+        transaction: TransactionId,
+    },
 }
 
 impl fmt::Display for VshError {
@@ -1199,6 +1690,51 @@ impl fmt::Display for VshError {
                  {attempted_bytes}/{max_bytes} encoded bytes"
             ),
             Self::PendingPoisoned => formatter.write_str("pending artifact lock was poisoned"),
+            Self::HookRequired(event) => write!(
+                formatter,
+                "commit hook {} must decide request event {} for transaction {}",
+                event.hook_id, event.event_id, event.transaction
+            ),
+            Self::HookHandler(source) => write!(formatter, "commit hook handler failed: {source}"),
+            Self::HookStateChanged {
+                transaction,
+                prepared,
+                actual,
+            } => write!(
+                formatter,
+                "transaction {transaction} changed from prepared state {prepared:?} to {actual:?}"
+            ),
+            Self::HookConfigurationChanged { transaction } => write!(
+                formatter,
+                "commit hook configuration changed for transaction {transaction}"
+            ),
+            Self::HookEventMismatch { transaction } => write!(
+                formatter,
+                "commit hook event does not match transaction {transaction}"
+            ),
+            Self::UnexpectedHookDecision { transaction } => write!(
+                formatter,
+                "transaction {transaction} did not request a hook decision"
+            ),
+            Self::HookNotActionable {
+                transaction,
+                actual,
+            } => write!(
+                formatter,
+                "transaction {transaction} in state {actual:?} cannot accept a hook decision"
+            ),
+            Self::HookReasonLimit { observed, maximum } => write!(
+                formatter,
+                "hook feedback uses {observed} bytes, exceeding the {maximum}-byte limit"
+            ),
+            Self::HookApprovalWindow { transaction } => write!(
+                formatter,
+                "hook approval window is invalid for transaction {transaction}"
+            ),
+            Self::IncompleteHookEvidence { transaction } => write!(
+                formatter,
+                "transaction {transaction} has incomplete evidence and cannot be hook-approved"
+            ),
         }
     }
 }
@@ -1216,13 +1752,23 @@ impl Error for VshError {
             Self::CommitPlan(source) => Some(source),
             Self::Artifact(source) => Some(source),
             Self::ResultCompatibility(source) => Some(source),
+            Self::HookHandler(source) => Some(source),
             Self::RecoveryConflicts(_)
             | Self::UnsafeDataDirectory { .. }
             | Self::ArtifactBinding { .. }
             | Self::MissingPending { .. }
             | Self::DuplicatePending { .. }
             | Self::EphemeralCapacity { .. }
-            | Self::PendingPoisoned => None,
+            | Self::PendingPoisoned
+            | Self::HookRequired(_)
+            | Self::HookStateChanged { .. }
+            | Self::HookConfigurationChanged { .. }
+            | Self::HookEventMismatch { .. }
+            | Self::UnexpectedHookDecision { .. }
+            | Self::HookNotActionable { .. }
+            | Self::HookReasonLimit { .. }
+            | Self::HookApprovalWindow { .. }
+            | Self::IncompleteHookEvidence { .. } => None,
         }
     }
 }
@@ -1293,6 +1839,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use vsh_commit::CommitError;
     use vsh_policy::{DenyReason, PolicyProfile};
@@ -1303,6 +1850,10 @@ mod tests {
         DataDirectory, ExecutionBudget, ExecutionError, ReceiptDetail, ResultCompatibility,
         ResultCompatibilityError, RunMode, RunRequest, Runtime, RuntimeConfig, RuntimeDecision,
         SnapshotLimits, TransactionStoreError, VfsError, VshError,
+    };
+    use crate::hook::{
+        HookConfig, HookDecision, HookHandlerError, HookScope, HookVerdict, HookedRuntime,
+        RequestEvent,
     };
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -1654,6 +2205,378 @@ Path('/workspace/output.txt').write_text(value)
 
         assert!(matches!(result, Err(VshError::UnsafeDataDirectory { .. })));
         assert!(!workspace.path().join("nested-data").exists());
+    }
+
+    #[test]
+    fn review_hook_receives_complete_canonical_evidence_and_can_commit() {
+        let directory = TestDirectory::new("review-hook-approve");
+        let observed = Arc::new(Mutex::new(None::<RequestEvent>));
+        let observed_by_hook = Arc::clone(&observed);
+        let runtime = HookedRuntime::open(
+            RuntimeConfig::new(directory.path())
+                .with_policy_profile(PolicyProfile::Strict)
+                .with_in_process_execution(),
+            HookConfig::new("security-review"),
+            move |event: &RequestEvent| {
+                *observed_by_hook.lock().unwrap() = Some(event.clone());
+                Ok(HookDecision::approve("canonical evidence is safe"))
+            },
+        )
+        .unwrap();
+
+        let receipt = runtime
+            .run(
+                RunRequest::new(
+                    "from pathlib import Path\nPath('/workspace/reviewed.txt').write_text('safe')",
+                )
+                .with_intent("create the reviewed output")
+                .with_mode(RunMode::Auto),
+                1_000,
+            )
+            .unwrap();
+
+        assert_eq!(receipt.state, TransactionState::Committed);
+        assert_eq!(
+            fs::read(directory.path().join("reviewed.txt")).unwrap(),
+            b"safe"
+        );
+        let event = observed.lock().unwrap().clone().unwrap();
+        assert_eq!(event.transaction, receipt.transaction);
+        assert_eq!(event.intent.as_deref(), Some("create the reviewed output"));
+        assert_eq!(event.canonical_diff.len(), 1);
+        assert_eq!(event.canonical_diff[0].path.as_str(), "reviewed.txt");
+        assert!(!event.effects.is_empty());
+        assert!(event.evidence_complete);
+        assert!(!event.evidence_truncated);
+    }
+
+    #[test]
+    fn review_content_binds_before_after_and_survives_restart_without_live_reads() {
+        let directory = TestDirectory::new("review-content-restart");
+        let path = directory.path().join("config.txt");
+        fs::write(&path, b"before").unwrap();
+        let config = RuntimeConfig::new(directory.path())
+            .with_policy_profile(PolicyProfile::Strict)
+            .with_commit_hook(HookConfig::new("content-review").with_max_content_bytes(1024))
+            .with_in_process_execution();
+        let runtime = Runtime::open(config.clone()).unwrap();
+        let preview = runtime
+            .preview(RunRequest::new(
+                "vsh_write('/workspace/config.txt', 'after')",
+            ))
+            .unwrap();
+        let prepared = runtime.prepare_commit(preview.transaction).unwrap();
+        let event = prepared.event().unwrap();
+        assert!(event.content_complete);
+        assert_eq!(
+            event
+                .contents
+                .iter()
+                .map(|content| content.bytes.as_slice())
+                .collect::<Vec<_>>(),
+            vec![b"before".as_slice(), b"after".as_slice()]
+        );
+        assert!(
+            event
+                .contents
+                .iter()
+                .all(|content| content.path.as_str() == "config.txt")
+        );
+        drop(runtime);
+
+        fs::write(&path, b"external change").unwrap();
+        let restarted = Runtime::open(config).unwrap();
+        let after_restart = restarted.prepare_commit(preview.transaction).unwrap();
+        assert_eq!(after_restart.event(), prepared.event());
+        assert!(matches!(
+            restarted.resolve_commit(
+                &after_restart,
+                &HookDecision::approve("reviewed exact bytes"),
+                1000
+            ),
+            Err(VshError::Commit(CommitError::Stale { .. }))
+        ));
+        assert_eq!(fs::read(path).unwrap(), b"external change");
+    }
+
+    #[test]
+    fn review_content_budget_is_explicit_and_never_labels_partial_content_complete() {
+        let directory = TestDirectory::new("review-content-budget");
+        fs::write(directory.path().join("file.txt"), b"large before").unwrap();
+        for maximum in [0, 3] {
+            let runtime = Runtime::open(
+                RuntimeConfig::new(directory.path())
+                    .with_policy_profile(PolicyProfile::Strict)
+                    .with_commit_hook(HookConfig::new("bounded").with_max_content_bytes(maximum))
+                    .with_in_process_execution(),
+            )
+            .unwrap();
+            let preview = runtime
+                .preview(RunRequest::new("vsh_write('/workspace/file.txt', 'new')"))
+                .unwrap();
+            let prepared = runtime.prepare_commit(preview.transaction).unwrap();
+            let event = prepared.event().unwrap();
+            assert!(!event.content_complete);
+            assert!(
+                event
+                    .contents
+                    .iter()
+                    .map(|content| content.bytes.len())
+                    .sum::<usize>()
+                    <= maximum
+            );
+            assert_eq!(
+                fs::read(directory.path().join("file.txt")).unwrap(),
+                b"large before"
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_review_contains_exact_observed_content_once() {
+        let directory = TestDirectory::new("review-read-content");
+        fs::write(directory.path().join("read.txt"), b"read evidence").unwrap();
+        let runtime = Runtime::open(
+            RuntimeConfig::new(directory.path())
+                .with_commit_hook(
+                    HookConfig::new("read-content")
+                        .with_scope(HookScope::AllRequests)
+                        .with_max_content_bytes(100),
+                )
+                .with_in_process_execution(),
+        )
+        .unwrap();
+        let receipt = runtime
+            .preview(RunRequest::new(
+                "vsh_read('/workspace/read.txt')\nvsh_read('/workspace/read.txt')",
+            ))
+            .unwrap();
+        let preparation = runtime.prepare_commit(receipt.transaction).unwrap();
+        let event = preparation.event().unwrap();
+        assert!(event.canonical_diff.is_empty());
+        assert!(event.content_complete);
+        assert_eq!(event.contents.len(), 1);
+        assert_eq!(event.contents[0].bytes, b"read evidence");
+    }
+
+    #[test]
+    fn empty_after_content_fits_an_exact_before_byte_budget() {
+        let directory = TestDirectory::new("review-empty-content");
+        fs::write(directory.path().join("file.txt"), b"abc").unwrap();
+        let runtime = Runtime::open(
+            RuntimeConfig::new(directory.path())
+                .with_policy_profile(PolicyProfile::Strict)
+                .with_commit_hook(HookConfig::new("empty-after").with_max_content_bytes(3))
+                .with_in_process_execution(),
+        )
+        .unwrap();
+        let preview = runtime
+            .preview(RunRequest::new("vsh_write('/workspace/file.txt', '')"))
+            .unwrap();
+        let preparation = runtime.prepare_commit(preview.transaction).unwrap();
+        let event = preparation.event().unwrap();
+        assert!(event.content_complete);
+        assert_eq!(event.contents.len(), 2);
+        assert_eq!(event.contents[0].bytes, b"abc");
+        assert!(event.contents[1].bytes.is_empty());
+    }
+
+    #[test]
+    fn ready_preparation_cannot_bypass_an_applicable_hook() {
+        let directory = TestDirectory::new("hook-forged-ready");
+        let runtime = Runtime::open(
+            RuntimeConfig::new(directory.path())
+                .with_commit_hook(HookConfig::new("required").with_scope(HookScope::AllRequests))
+                .with_in_process_execution(),
+        )
+        .unwrap();
+        let receipt = runtime
+            .preview(RunRequest::new(
+                "vsh_write('/workspace/result.txt', 'must not commit')",
+            ))
+            .unwrap();
+        runtime.prepare_commit(receipt.transaction).unwrap();
+        let forged = super::CommitPreparation::Ready {
+            transaction: receipt.transaction,
+            state: receipt.state,
+        };
+        assert!(matches!(
+            runtime.resolve_commit(&forged, &HookDecision::FollowPolicy, 1000),
+            Err(VshError::HookRequired(_))
+        ));
+        assert!(!directory.path().join("result.txt").exists());
+    }
+
+    #[test]
+    fn content_review_never_widens_native_read_permissions() {
+        use vsh_policy::{AccessSet, CallPolicy, ProtectedRule, TransactionPolicy};
+
+        let directory = TestDirectory::new("review-read-permissions");
+        fs::write(directory.path().join("restricted.txt"), b"private before").unwrap();
+        let policy = TransactionPolicy::new(
+            PolicyProfile::Balanced,
+            TransactionPolicy::default().thresholds(),
+            CallPolicy::new(vec![
+                ProtectedRule::new("restricted.txt", AccessSet::CONTENT_READ).unwrap(),
+            ]),
+        )
+        .unwrap();
+        let runtime = Runtime::open(
+            RuntimeConfig::new(directory.path())
+                .with_policy(policy)
+                .with_commit_hook(
+                    HookConfig::new("no-read")
+                        .with_scope(HookScope::AllRequests)
+                        .with_max_content_bytes(1024),
+                )
+                .with_in_process_execution(),
+        )
+        .unwrap();
+        let receipt = runtime
+            .preview(RunRequest::new(
+                "vsh_write('/workspace/restricted.txt', 'replacement')",
+            ))
+            .unwrap();
+        let prepared = runtime.prepare_commit(receipt.transaction).unwrap();
+        let event = prepared.event().unwrap();
+        assert!(!event.content_complete);
+        assert!(event.contents.is_empty());
+    }
+
+    #[test]
+    fn all_hook_can_return_feedback_and_keep_a_transaction_pending() {
+        let directory = TestDirectory::new("hook-review-feedback");
+        let calls = Arc::new(AtomicU64::new(0));
+        let calls_by_hook = Arc::clone(&calls);
+        let runtime = HookedRuntime::open(
+            RuntimeConfig::new(directory.path()).with_in_process_execution(),
+            HookConfig::new("evidence-judge").with_scope(HookScope::AllRequests),
+            move |_event: &RequestEvent| {
+                calls_by_hook.fetch_add(1, Ordering::Relaxed);
+                Ok(HookDecision::review(
+                    "generated file requires an explicit main-agent confirmation",
+                ))
+            },
+        )
+        .unwrap();
+        let preview = runtime
+            .preview(RunRequest::new(
+                "from pathlib import Path\nPath('/workspace/check-me.txt').write_text('value')",
+            ))
+            .unwrap();
+        assert_eq!(preview.state, TransactionState::AutoApproved);
+
+        let resolution = runtime.commit(preview.transaction, 2_000).unwrap();
+        assert_eq!(resolution.receipt.state, TransactionState::PendingApproval);
+        let decision = resolution.hook.unwrap();
+        assert_eq!(decision.verdict, HookVerdict::Review);
+        assert!(decision.reason.contains("main-agent"));
+        assert!(!directory.path().join("check-me.txt").exists());
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        runtime
+            .approve(
+                preview.transaction,
+                PrincipalId::digest_label("main-agent"),
+                2_100,
+                3_000,
+            )
+            .unwrap();
+        let committed = runtime.commit(preview.transaction, 2_200).unwrap();
+        assert_eq!(committed.receipt.state, TransactionState::Committed);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn all_requests_scope_delivers_read_only_evidence() {
+        let directory = TestDirectory::new("hook-read-only");
+        fs::write(directory.path().join("input.txt"), b"evidence").unwrap();
+        let observed = Arc::new(Mutex::new(None::<RequestEvent>));
+        let observed_by_hook = Arc::clone(&observed);
+        let runtime = HookedRuntime::open(
+            RuntimeConfig::new(directory.path()).with_in_process_execution(),
+            HookConfig::new("read-review").with_scope(HookScope::AllRequests),
+            move |event: &RequestEvent| {
+                *observed_by_hook.lock().unwrap() = Some(event.clone());
+                Ok(HookDecision::approve("bounded read is acceptable"))
+            },
+        )
+        .unwrap();
+
+        let receipt = runtime
+            .run(
+                RunRequest::new(
+                    "from pathlib import Path\nPath('/workspace/input.txt').read_text()",
+                )
+                .with_mode(RunMode::Auto),
+                10,
+            )
+            .unwrap();
+
+        assert_eq!(receipt.state, TransactionState::Committed);
+        assert_eq!(receipt.changed_paths, 0);
+        let event = observed.lock().unwrap().clone().unwrap();
+        assert!(event.canonical_diff.is_empty());
+        assert!(
+            event
+                .effects
+                .iter()
+                .any(|effect| matches!(effect.effect, vsh_vfs::Effect::ContentRead { .. }))
+        );
+        assert!(event.execution.read_bytes > 0);
+    }
+
+    #[test]
+    fn failed_hook_closes_auto_approval_into_pending_review() {
+        let directory = TestDirectory::new("hook-failure");
+        let runtime = HookedRuntime::open(
+            RuntimeConfig::new(directory.path()).with_in_process_execution(),
+            HookConfig::new("failing-hook").with_scope(HookScope::AllRequests),
+            |_event: &RequestEvent| Err(HookHandlerError::new("judge unavailable")),
+        )
+        .unwrap();
+        let preview = runtime
+            .preview(RunRequest::new(
+                "from pathlib import Path\nPath('/workspace/not-yet.txt').write_text('value')",
+            ))
+            .unwrap();
+
+        let error = runtime.commit(preview.transaction, 0).unwrap_err();
+        assert!(matches!(error, VshError::HookHandler(_)));
+        assert_eq!(
+            runtime.transaction(preview.transaction).unwrap().state(),
+            TransactionState::PendingApproval
+        );
+        assert!(!directory.path().join("not-yet.txt").exists());
+    }
+
+    #[test]
+    fn hard_policy_denial_never_invokes_hook() {
+        let directory = TestDirectory::new("hook-hard-deny");
+        fs::write(directory.path().join(".env"), b"secret").unwrap();
+        let calls = Arc::new(AtomicU64::new(0));
+        let calls_by_hook = Arc::clone(&calls);
+        let runtime = HookedRuntime::open(
+            RuntimeConfig::new(directory.path()).with_in_process_execution(),
+            HookConfig::new("deny-proof").with_scope(HookScope::AllRequests),
+            move |_event: &RequestEvent| {
+                calls_by_hook.fetch_add(1, Ordering::Relaxed);
+                Ok(HookDecision::approve("must not run"))
+            },
+        )
+        .unwrap();
+        let receipt = runtime
+            .run(
+                RunRequest::new(
+                    "from pathlib import Path\ntry:\n    Path('/workspace/.env').read_text()\nexcept PermissionError:\n    pass",
+                )
+                .with_mode(RunMode::Auto),
+                0,
+            )
+            .unwrap();
+
+        assert_eq!(receipt.state, TransactionState::Denied);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 
     #[test]

@@ -5,14 +5,22 @@ runtime used by native applications. It does not simulate files in Python or fal
 to a second implementation.
 
 ```bash
-python -m pip install vsh-python==0.4.0
+python -m pip install vsh-python==0.5.0
 ```
 
 CPython 3.11–3.14 wheels bundle a matching supervised worker. MCP is optional:
-`vsh-python[mcp]==0.4.0`. The metadata-only `vbash` compatibility installer depends on
+`vsh-python[mcp]==0.5.0`. The metadata-only `vbash` mirror installer depends on
 the matching primary distribution and adds no import package.
 
-The `vsh_*` guest functions are included in VSH 0.4.0; see
+Pydantic AI support is optional too: install `vsh-python[pydantic-ai]` and attach
+`VshCapability` through `Agent(capabilities=[...])`. See the
+[native Pydantic AI integration](../integrations/pydantic-ai.md). Application-owned
+evidence review is covered by [commit hooks](hooks.md); the optional
+[LLM commit judge](commit-judge.md) can approve pending transactions directly.
+Build one end to end with the [deterministic review](../tutorials/pydantic-ai-deterministic.md)
+or [LLM judge](../tutorials/pydantic-ai-judge.md) tutorial.
+
+The `vsh_*` guest functions are included in VSH; see
 [installation and worker setup](../start/index.md).
 
 ## Open a runtime once

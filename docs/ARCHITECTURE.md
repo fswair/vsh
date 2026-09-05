@@ -78,7 +78,10 @@ recoverable. Adapters cannot implement alternate writers.
 5. Freeze an ordered canonical diff and dependency set.
 6. Evaluate deterministic transaction policy.
 7. Bind identity and retain/persist the exact pending artifact.
-8. Return a receipt, or continue into auto commit when authorized.
+8. When configured and in scope, freeze immutable evidence and invoke the host-owned
+   commit hook outside runtime locks.
+9. Return a receipt, keep review feedback pending, or continue into commit when
+   authorized.
 
 Every run creates a new base and overlay. Metadata capture traverses the whole configured
 workspace, excluding root `.vsh-runtime`; content is lazy and stamp-verified on capture.
@@ -87,12 +90,13 @@ There is no implicit `.gitignore` filter or retained preview overlay between cal
 ### Commit
 
 1. Persist an auto-approved process-local artifact if necessary.
-2. Consume the single-use reservation.
-3. Revalidate workspace/runtime identity and every bound dependency.
-4. Write durable intent and canonical plan.
-5. Apply capability-rooted operations with journal checkpoints.
-6. Verify affected host nodes.
-7. Mark committed and clean recoverable temporary state.
+2. Revalidate a prepared hook event and typed decision when a hook applies.
+3. Consume the single-use reservation.
+4. Revalidate workspace/runtime identity and every bound dependency.
+5. Write durable intent and canonical plan.
+6. Apply capability-rooted operations with journal checkpoints.
+7. Verify affected host nodes.
+8. Mark committed and clean recoverable temporary state.
 
 ## Crate boundaries
 
@@ -105,7 +109,7 @@ There is no implicit `.gitignore` filter or retained preview overlay between cal
 | `vsh-store` | Immutable blobs, approval grants, and atomic records |
 | `vsh-commit` | Revalidation, host mutation, verification, recovery |
 | `vsh` | Primary public SDK facade |
-| `vbash` | Implementation-free compatibility re-export of `vsh` |
+| `vbash` | Implementation-free exact-version mirror of `vsh` |
 | `vsh-runtime` | Orchestration implementation and receipts |
 | `vsh-python` | Thin PyO3 conversion/error boundary |
 | `vsh-monty-worker` | Exact-version crash-isolated execution binary |
@@ -161,4 +165,4 @@ not assemble an alternative commit pipeline.
 - [Python SDK](python/)
 - [Rust SDK](rust/)
 - [MCP server](integrations/mcp.md)
-- [Guarantees](rust-rewrite/GUARANTEES.md)
+- [Guarantees](guarantees.md)

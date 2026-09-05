@@ -26,9 +26,15 @@ nav = [
     { "Troubleshooting" = "guides/troubleshooting.md" },
     { "Command line" = "guides/cli.md" },
   ] },
+  { "Tutorials" = [
+    { "Pydantic AI: deterministic review" = "tutorials/pydantic-ai-deterministic.md" },
+    { "Pydantic AI: LLM judge" = "tutorials/pydantic-ai-judge.md" },
+  ] },
   { "Python SDK" = [
     "python/index.md",
     { "API reference" = "python/api.md" },
+    { "Commit hooks" = "python/hooks.md" },
+    { "LLM commit judge" = "python/commit-judge.md" },
     { "Cookbook" = "python/examples.md" },
   ] },
   { "Rust SDK" = [
@@ -39,22 +45,21 @@ nav = [
   ] },
   { "MCP and agents" = [
     { "MCP server" = "integrations/mcp.md" },
+    { "Pydantic AI capability" = "integrations/pydantic-ai.md" },
     { "Monty VSH functions" = "integrations/monty-tools.md" },
     { "Agent environments" = "integrations/agents.md" },
   ] },
   { "Engineering" = [
     { "Architecture" = "ARCHITECTURE.md" },
+    { "Guarantees" = "guarantees.md" },
     { "Security model" = "security.md" },
+    { "Threat model" = "threat-model.md" },
+    { "Language parity" = "language-parity.md" },
     { "Performance" = "performance.md" },
+    { "Dependency policy" = "dependency-policy.md" },
+    { "Coverage contract" = "coverage.md" },
     { "Development" = "development.md" },
-    { "Guarantees" = "rust-rewrite/GUARANTEES.md" },
-    { "Language parity" = "rust-rewrite/PARITY_CONTRACT.md" },
-    { "Dependency policy" = "rust-rewrite/DEPENDENCY_POLICY.md" },
-    { "Threat model" = "rust-rewrite/THREAT_MODEL.md" },
-    { "Coverage contract" = "rust-rewrite/COVERAGE.md" },
-    { "Migration" = "rust-rewrite/MIGRATION.md" },
-    { "Release" = "rust-rewrite/RELEASE.md" },
-    { "Plan validation" = "rust-rewrite/PLAN_VALIDATION.md" },
+    { "Release" = "release.md" },
   ] },
 ]
 

@@ -5,8 +5,17 @@ These are complete native workflows, not snippets that rely on an unexplained
 and exact results, commit only reviewed fixture changes, and clean up their own data.
 They need no model API key or network access.
 
-The recipes use the `vsh_*` surface shipped in VSH 0.4.0. From a source checkout, build
+The recipes use the current `vsh_*` surface. From a source checkout, build
 the release extension and matching worker as described in [development](../development.md), then:
+
+```bash
+uv run --no-sync python examples/native/preview.py
+uv run --no-sync python examples/native/auto_commit.py
+uv run --no-sync python examples/native/strict_review.py
+uv run --no-sync python examples/native/budgeted_analysis.py
+```
+
+For the larger end-to-end cookbook:
 
 ```bash
 uv run --no-sync python examples/native/workflows.py
@@ -123,6 +132,36 @@ It is a protocol exercise, not a model benchmark or a direct helper-function cal
 The CLI recipe launches separate real processes. It proves that a balanced preview
 handle is lost when its process exits, then verifies explicitly requested one-shot
 auto mode. See [CLI guidance](../guides/cli.md) before building a shell-based review flow.
+
+## Pydantic AI agent workflows
+
+Choose the narrowest review mechanism that can decide correctly:
+
+| Workflow | Start here | Expected behavior |
+|---|---|---|
+| Native policy only | [Capability reference](../integrations/pydantic-ai.md) | Agent tools commit or remain pending according to policy |
+| Exact local invariant | [Deterministic tutorial](../tutorials/pydantic-ai-deterministic.md) | Local bytes/metadata rule approves or returns correction |
+| Semantic evidence review | [LLM judge tutorial](../tutorials/pydantic-ai-judge.md) | Separate model reviews canonical diff, content, effects, and intent |
+| Offline judge protocol | `examples/native/commit_judge.py` | `FunctionModel` checks both approve and review branches |
+| Real provider evaluation | `examples/live_commit_judge.py` | Disposable safe and adversarial model calls |
+
+Run the credential-free judge protocol before spending provider tokens:
+
+```bash
+uv run --no-sync python examples/native/commit_judge.py
+```
+
+Then, if Codex authentication is configured, run the explicit live harness:
+
+```bash
+uv run --no-sync --with codex-auth-helper==1.7.0 \
+  python examples/live_commit_judge.py
+```
+
+The live harness asserts host bytes after safe approval, misleading intent,
+file-content prompt injection, a missing authentication field, config deletion, and
+an unauthorized second path. It is an opt-in model evaluation, not part of the offline
+test suite and not a general benchmark of every model or policy.
 
 ## Adapt the recipes safely
 

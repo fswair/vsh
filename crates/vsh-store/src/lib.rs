@@ -648,7 +648,7 @@ pub trait TransactionStore: Send + Sync {
         next: TransactionState,
     ) -> Result<TransactionRecord, TransactionStoreError>;
 
-    /// Bind an independent grant and move `PendingApproval` to `Approved` atomically.
+    /// Bind an independent grant and move a pending state to `Approved` atomically.
     ///
     /// # Errors
     ///

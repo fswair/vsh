@@ -13,22 +13,22 @@ native engine; neither needs a second simulator.
 | MCP client | `vsh-python[mcp]` | `vsh serve` |
 
 ```bash
-python -m pip install vsh-python==0.4.0
+python -m pip install vsh-python==0.5.0
 ```
 
 ```toml
 [dependencies]
-vsh = "=0.4.0"
+vsh = "=0.5.0"
 ```
 
 Python wheels bundle the worker. Rust applications must deploy a matching
 `vsh-monty-worker` executable; see [Rust setup](../rust/index.md). The `vbash`
-packages are compatibility mirrors, not a different engine. Prefer the primary names.
+packages are metadata-only mirrors, not a different engine. Prefer the primary names.
 
-!!! note "VSH 0.4.0 surface"
+!!! note "VSH 0.5.0 surface"
 
     The Monty 0.0.22 integration, ten in-sandbox `vsh_*` functions and the September 5
-    optimizations are part of VSH 0.4.0. The Python wheel bundles the matching worker;
+    optimizations are part of VSH 0.5.0. The Python wheel bundles the matching worker;
     native Rust deployments must supply it as described below. Contributors can use
     the [source build](../development.md).
 
@@ -98,4 +98,8 @@ bounded pending cache.
 - [Python cookbook](../python/examples.md): migration, generation, review and stale input.
 - [Rust cookbook](../rust/examples.md): run the same guest program natively.
 - [MCP](../integrations/mcp.md): expose one transaction tool to an agent.
+- [Pydantic AI, deterministic review](../tutorials/pydantic-ai-deterministic.md): attach
+  a local evidence rule to the native filesystem capability.
+- [Pydantic AI, LLM judge](../tutorials/pydantic-ai-judge.md): review canonical changes
+  and exact content with a separately configured model.
 - [Efficient usage](../guides/efficient-usage.md): keep latency, memory and context costs bounded.

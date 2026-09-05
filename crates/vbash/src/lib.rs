@@ -5,9 +5,17 @@
 //! Python so adapters cannot invent parallel contracts.
 
 mod artifact;
+mod hook;
+mod review;
 mod runtime;
 
 pub use artifact::ArtifactError;
+
+pub use hook::{
+    CommitHook, CommitPreparation, CommitResolution, HookBaseline, HookConfig, HookDecision,
+    HookDecisionRecord, HookHandlerError, HookScope, HookVerdict, HookedRuntime, RequestEvent,
+    ReviewContent,
+};
 
 pub use runtime::{
     ArtifactLimits, ExecutionBudget, Receipt, ReceiptDetail, RunMode, RunRequest, Runtime,
@@ -40,10 +48,10 @@ pub use vsh_store::{
 };
 pub use vsh_types::{
     ApprovalBinding, ApprovalId, BlobId, ContentVersion, DiffDigest, DiffEntry, DiffKind,
-    DirectoryDigest, FileStamp, IntentDigest, NodeKind, NodeState, ParseDigestError,
-    PlatformFileId, PolicyDigest, PrincipalId, ProgramDigest, ReadSetDigest, RuntimeConfigDigest,
-    SnapshotId, TransactionBinding, TransactionId, TransactionState, TransitionError, VPath,
-    VPathError, WriteSetDigest,
+    DirectoryDigest, FileStamp, HookId, IntentDigest, NodeKind, NodeState, ParseDigestError,
+    PlatformFileId, PolicyDigest, PrincipalId, ProgramDigest, ReadSetDigest, RequestEventId,
+    RuntimeConfigDigest, SnapshotId, TransactionBinding, TransactionId, TransactionState,
+    TransitionError, VPath, VPathError, WriteSetDigest,
 };
 pub use vsh_vfs::{
     BaseSnapshot, CanonicalDiff, CanonicalDiffMetrics, CapturedContent, ContentLoadError,
@@ -66,7 +74,7 @@ mod tests {
 
     #[test]
     fn facade_exports_one_versioned_rust_engine() {
-        assert_eq!(VERSION, "0.4.0");
+        assert_eq!(VERSION, "0.5.0");
         assert_eq!(engine_kind(), "rust");
         assert_eq!(VPath::parse("src/lib.rs").unwrap().as_str(), "src/lib.rs");
     }

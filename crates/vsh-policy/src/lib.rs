@@ -634,14 +634,47 @@ impl TransactionPolicy {
     /// Evaluate exact observed artifacts without I/O or mutable global state.
     #[must_use]
     pub fn evaluate(&self, input: PolicyInput<'_>) -> PolicyDecision {
-        let metrics = RiskMetrics::derive(input.diff, input.effects, input.base_node_count);
+        self.evaluate_with_metrics(input).0
+    }
 
+    /// Evaluate once and return the exact metrics used for the decision.
+    ///
+    /// This avoids a second diff/effect traversal when a caller must retain review
+    /// evidence for an external commit hook.
+    #[must_use]
+    pub fn evaluate_with_metrics(&self, input: PolicyInput<'_>) -> (PolicyDecision, RiskMetrics) {
+        let metrics = RiskMetrics::from_evidence(input.diff, input.effects, input.base_node_count);
+        let decision = self.evaluate_observed(&input, metrics);
+        (decision, metrics)
+    }
+
+    fn evaluate_observed(&self, input: &PolicyInput<'_>, metrics: RiskMetrics) -> PolicyDecision {
+        if let Some(denial) = self.hard_denial(input, metrics) {
+            return denial;
+        }
+        if input.diff.is_empty() {
+            return PolicyDecision::AutoApprove;
+        }
+
+        let flags = self.risk_flags(metrics);
+        if flags.is_empty() {
+            PolicyDecision::AutoApprove
+        } else {
+            PolicyDecision::Escalate(RiskManifest {
+                metrics,
+                flags: flags.into_iter().collect(),
+                policy: self.digest,
+            })
+        }
+    }
+
+    fn hard_denial(&self, input: &PolicyInput<'_>, metrics: RiskMetrics) -> Option<PolicyDecision> {
         if let Some(attempt) = input.denied_accesses.first() {
-            return PolicyDecision::Deny(DenyManifest {
+            return Some(PolicyDecision::Deny(DenyManifest {
                 reason: DenyReason::ProtectedAccessAttempt(attempt.clone()),
                 metrics,
                 policy: self.digest,
-            });
+            }));
         }
 
         for entry in input.diff.entries() {
@@ -651,57 +684,56 @@ impl TransactionPolicy {
                 DiffKind::Modify | DiffKind::MetadataChange => AccessKind::Modify,
             };
             if let Err(denial) = self.call_policy.authorize(&entry.path, access) {
-                return PolicyDecision::Deny(DenyManifest {
+                return Some(PolicyDecision::Deny(DenyManifest {
                     reason: DenyReason::ProtectedMutation(denial),
                     metrics,
                     policy: self.digest,
-                });
+                }));
             }
         }
 
         if metrics.touched_paths > self.thresholds.deny_touched_paths {
-            return self.deny(
+            return Some(self.deny(
                 metrics,
                 DenyReason::TouchedPathLimit {
                     limit: self.thresholds.deny_touched_paths,
                     observed: metrics.touched_paths,
                 },
-            );
+            ));
         }
         if metrics.changed_bytes > self.thresholds.deny_changed_bytes {
-            return self.deny(
+            return Some(self.deny(
                 metrics,
                 DenyReason::ChangedByteLimit {
                     limit: self.thresholds.deny_changed_bytes,
                     observed: metrics.changed_bytes,
                 },
-            );
+            ));
         }
         if metrics.deleted_paths > self.thresholds.deny_deleted_paths {
-            return self.deny(
+            return Some(self.deny(
                 metrics,
                 DenyReason::DeletePathLimit {
                     limit: self.thresholds.deny_deleted_paths,
                     observed: metrics.deleted_paths,
                 },
-            );
+            ));
         }
         if metrics.deleted_paths >= self.thresholds.delete_ratio_minimum_paths
             && metrics.delete_ratio_bps >= self.thresholds.deny_delete_ratio_bps
         {
-            return self.deny(
+            return Some(self.deny(
                 metrics,
                 DenyReason::DeleteRatioLimit {
                     limit_bps: self.thresholds.deny_delete_ratio_bps,
                     observed_bps: metrics.delete_ratio_bps,
                 },
-            );
+            ));
         }
+        None
+    }
 
-        if input.diff.is_empty() {
-            return PolicyDecision::AutoApprove;
-        }
-
+    fn risk_flags(&self, metrics: RiskMetrics) -> BTreeSet<RiskFlag> {
         let mut flags = BTreeSet::new();
         if matches!(
             self.profile,
@@ -727,16 +759,7 @@ impl TransactionPolicy {
         if metrics.changed_bytes >= self.thresholds.escalate_changed_bytes {
             flags.insert(RiskFlag::LargeByteChange);
         }
-
-        if flags.is_empty() {
-            PolicyDecision::AutoApprove
-        } else {
-            PolicyDecision::Escalate(RiskManifest {
-                metrics,
-                flags: flags.into_iter().collect(),
-                policy: self.digest,
-            })
-        }
+        flags
     }
 
     fn deny(&self, metrics: RiskMetrics, reason: DenyReason) -> PolicyDecision {
@@ -832,7 +855,13 @@ pub struct RiskMetrics {
 }
 
 impl RiskMetrics {
-    fn derive(diff: &CanonicalDiff, effects: &[EffectEvent], base_node_count: usize) -> Self {
+    /// Derive the exact metrics used by policy from bounded transaction evidence.
+    #[must_use]
+    pub fn from_evidence(
+        diff: &CanonicalDiff,
+        effects: &[EffectEvent],
+        base_node_count: usize,
+    ) -> Self {
         let mut metrics = Self {
             touched_paths: diff.entries().len(),
             ..Self::default()

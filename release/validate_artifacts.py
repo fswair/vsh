@@ -30,13 +30,6 @@ PLATFORM_TAGS = (
     "macosx_",
     "win_amd64",
 )
-FORBIDDEN_WHEEL_PATHS = (
-    "/vsh/agent/",
-    "/vsh/execute/",
-    "/vsh/persistence/",
-    "/vsh/simulate/",
-    "/vsh/snapshot/",
-)
 FORBIDDEN_GENERATED_SUFFIXES = (".profraw", ".pyc", ".pyo")
 
 
@@ -67,7 +60,6 @@ def validate_primary_wheel(path: Path, version: str) -> None:
             raise RuntimeError(f"{path.name} contains corrupt member {corrupt}")
         names = archive.namelist()
         reject_generated_files(names, path.name)
-        lowered = [f"/{name.lower()}" for name in names]
         workers = [
             name for name in names if name.endswith(("/vsh-monty-worker", "/vsh-monty-worker.exe"))
         ]
@@ -88,8 +80,6 @@ def validate_primary_wheel(path: Path, version: str) -> None:
             mode = archive.getinfo(workers[0]).external_attr >> 16
             if mode & 0o111 == 0:
                 raise RuntimeError(f"{path.name} worker is not executable")
-        if any(forbidden in name for forbidden in FORBIDDEN_WHEEL_PATHS for name in lowered):
-            raise RuntimeError(f"{path.name} contains a legacy Python engine path")
         payload = archive.read(metadata[0]).decode("utf-8")
         if (
             f"Name: {PRIMARY_PYTHON_NAME}\n" not in payload
@@ -132,14 +122,6 @@ def validate_primary_sdist(path: Path, version: str) -> None:
             raise RuntimeError(f"{path.name} does not retain the required workspace members")
         if b'get-size2 = { version = "=0.10.3"' not in workspace_manifest:
             raise RuntimeError(f"{path.name} is missing the downstream resolution guard")
-    forbidden = (
-        f"{prefix}src/vsh/agent/",
-        f"{prefix}src/vsh/execute/",
-        f"{prefix}src/vsh/simulate/",
-        f"{prefix}src/vsh/snapshot/",
-    )
-    if any(name.startswith(root) for root in forbidden for name in names):
-        raise RuntimeError(f"{path.name} contains a legacy Python engine path")
 
 
 def validate_compat_metadata(payload: str, version: str, archive_name: str) -> None:

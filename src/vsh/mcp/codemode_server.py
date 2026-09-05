@@ -8,7 +8,7 @@ from fastmcp import FastMCP
 from vsh import __version__
 
 from .prompts import register_codemode_prompts
-from .surface import register_vsh_agent_surface, register_vsh_surface
+from .surface import register_vsh_surface
 
 CODEMODE_SERVER_NAME = "vsh-codemode"
 
@@ -38,7 +38,6 @@ __all__ = (
     "CODEMODE_SERVER_NAME",
     "build_codemode_instructions",
     "codemode_mcp",
-    "create_agent_codemode_server",
     "create_codemode_server",
     "load_custom_instructions",
     "main",
@@ -93,17 +92,6 @@ def create_codemode_server(*, custom_instructions: str | None = None) -> FastMCP
     )
     register_vsh_surface(server)
     register_codemode_prompts(server)
-    return server
-
-
-def create_agent_codemode_server() -> FastMCP:
-    """Build a minimal CodeMode MCP server for pydantic-ai agent runs."""
-    server = FastMCP(
-        CODEMODE_SERVER_NAME,
-        instructions=None,
-        version=__version__,
-    )
-    register_vsh_agent_surface(server)
     return server
 
 

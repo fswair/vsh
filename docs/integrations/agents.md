@@ -61,7 +61,7 @@ VSH's result.
 
 ## Compose inside the active snapshot
 
-In VSH 0.4.0, the [VSH functions](monty-tools.md) make bounded
+The [VSH functions](monty-tools.md) make bounded
 compound operations concise. `pathlib` and `vsh_*` see each other's writes. A second
 `vsh_run` gets a fresh host snapshot, so do not spread dependent staging steps across
 multiple previews expecting a persistent virtual session.
@@ -108,5 +108,5 @@ native allocations, MCP serialization and model billing. The local
 or model quality. Profile your own agent loop before claiming monetary savings.
 
 The MCP cookbook is credential-free and tests protocol behavior. It is not an LLM
-integration evaluation. Older repository examples importing `vsh.agent`, `vsh.schemas`
-or `vsh.simulate` belong to the legacy engine and are not examples of the current wheel.
+integration evaluation. Runnable examples under `examples/native/` use the current
+native transaction API and disposable workspaces.

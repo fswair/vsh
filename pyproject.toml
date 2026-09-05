@@ -1,6 +1,6 @@
 [project]
 name = "vsh-python"
-version = "0.4.0"
+version = "0.5.0"
 description = "VSH is a low-latency transactional filesystem simulator backed by Rust."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,6 +23,7 @@ mcp = ["fastmcp==3.4.7"]
 dev = [
     "basedpyright",
     "maturin==1.15.0",
+    "pydantic-ai-slim==2.40.0",
     "pytest",
     "pytest-cov",
     "ruff",
@@ -30,11 +31,15 @@ dev = [
     "ty",
     "zensical==0.0.57",
 ]
+pydantic-ai = [
+    "pydantic-ai-slim==2.40.0",
+]
 
 [dependency-groups]
 dev = [
     "basedpyright",
     "maturin==1.15.0",
+    "pydantic-ai-slim==2.40.0",
     "pytest",
     "pytest-cov",
     "ruff",
@@ -69,29 +74,6 @@ exclude = [
     "src/vsh/_native*.so",
     "src/vsh/_native*.dylib",
     "src/vsh/_native*.pyd",
-    "src/vsh/agent/**",
-    "src/vsh/artifacts/**",
-    "src/vsh/execute/**",
-    "src/vsh/extensions/**",
-    "src/vsh/http/**",
-    "src/vsh/io/**",
-    "src/vsh/perf/**",
-    "src/vsh/persistence/**",
-    "src/vsh/plans/**",
-    "src/vsh/policy/**",
-    "src/vsh/registry/**",
-    "src/vsh/sandbox/**",
-    "src/vsh/schemas/**",
-    "src/vsh/session/**",
-    "src/vsh/simulate/**",
-    "src/vsh/snapshot/**",
-    "src/vsh/effects.py",
-    "src/vsh/errors.py",
-    "src/vsh/limits.py",
-    "src/vsh/runtime.py",
-    "src/vsh/mcp/receipts.py",
-    "src/vsh/mcp/resources.py",
-    "src/vsh/mcp/tools.py",
 ]
 include = [
     { path = "LICENSE", format = "sdist" },
@@ -127,18 +109,16 @@ ignore = [
 [tool.ty.environment]
 python-version = "3.11"
 
-[tool.ty.src]
-exclude = [
-    "plans/**",
-]
-
 [tool.ty.rules]
 unresolved-import = "ignore"
 
 [tool.pytest.ini_options]
 testpaths = [
+    "tests/test_main.py",
     "tests/test_native_binding.py",
     "tests/test_native_runtime.py",
+    "tests/test_commit_judge.py",
+    "tests/test_pydantic_ai_capability.py",
     "tests/test_python_surface.py",
 ]
 python_files = ["test_*.py"]
@@ -157,29 +137,6 @@ branch = true
 source = ["src/vsh"]
 omit = [
     "src/vsh/_version.py",
-    "src/vsh/agent/**",
-    "src/vsh/artifacts/**",
-    "src/vsh/execute/**",
-    "src/vsh/extensions/**",
-    "src/vsh/http/**",
-    "src/vsh/io/**",
-    "src/vsh/perf/**",
-    "src/vsh/persistence/**",
-    "src/vsh/plans/**",
-    "src/vsh/policy/**",
-    "src/vsh/registry/**",
-    "src/vsh/sandbox/**",
-    "src/vsh/schemas/**",
-    "src/vsh/session/**",
-    "src/vsh/simulate/**",
-    "src/vsh/snapshot/**",
-    "src/vsh/effects.py",
-    "src/vsh/errors.py",
-    "src/vsh/limits.py",
-    "src/vsh/runtime.py",
-    "src/vsh/mcp/receipts.py",
-    "src/vsh/mcp/resources.py",
-    "src/vsh/mcp/tools.py",
 ]
 
 [tool.coverage.report]
@@ -197,14 +154,19 @@ include = [
     "src/vsh/_native.pyi",
     "src/vsh/_version.py",
     "src/vsh/cli.py",
+    "src/vsh/hooks.py",
+    "src/vsh/_judge.py",
     "src/vsh/mcp/__init__.py",
     "src/vsh/mcp/native_tools.py",
     "src/vsh/mcp/surface.py",
     "src/vsh/mcp/server.py",
     "src/vsh/mcp/prompts.py",
     "src/vsh/mcp/codemode_server.py",
+    "src/vsh/pydantic_ai.py",
     "tests/test_native_binding.py",
     "tests/test_native_runtime.py",
+    "tests/test_commit_judge.py",
+    "tests/test_pydantic_ai_capability.py",
     "tests/test_python_surface.py",
     "release/check_versions.py",
     "release/smoke_wheel.py",
@@ -214,5 +176,5 @@ include = [
     "benchmarks/process_tree.py",
     "benchmarks/compare.py",
 ]
-extraPaths = ["src", "playground", "examples"]
+extraPaths = ["src", "examples"]
 exclude = ["references/**", "target/**"]

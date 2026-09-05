@@ -15,7 +15,7 @@ locked in `uv.lock`. Zensical is exactly pinned to `0.0.57`.
 
 ## Build the current native surface
 
-This development tree identifies as `0.4.0` and includes the Monty 0.0.22 functions
+This development tree identifies as `0.5.0` and includes the Monty 0.0.22 functions
 and September 5 optimizations. From a checkout with the environment bootstrapped,
 build matching optimized artifacts:
 
@@ -87,14 +87,19 @@ It runs in the docs-only Pages workflow without installing VSH or compiling Rust
 uv run ruff check
 uv run ruff format --check
 uv run ty check \
-  src/vsh/__init__.py src/vsh/_version.py src/vsh/cli.py src/vsh/mcp \
-  tests/test_native_binding.py tests/test_native_runtime.py tests/test_python_surface.py \
+  src/vsh/__init__.py src/vsh/_version.py src/vsh/cli.py src/vsh/hooks.py \
+  src/vsh/mcp src/vsh/pydantic_ai.py src/vsh/_judge.py \
+  tests/test_main.py tests/test_native_binding.py tests/test_native_runtime.py \
+  tests/test_pydantic_ai_capability.py tests/test_commit_judge.py tests/test_python_surface.py \
   release/check_versions.py release/smoke_wheel.py release/validate_artifacts.py \
   examples/native benchmarks/native_pyo3.py benchmarks/process_tree.py benchmarks/compare.py
 uv run basedpyright
 uv run pytest \
+  tests/test_main.py \
   tests/test_native_binding.py \
   tests/test_native_runtime.py \
+  tests/test_pydantic_ai_capability.py \
+  tests/test_commit_judge.py \
   tests/test_python_surface.py \
   --cov=src/vsh --cov-branch --cov-report=term-missing --cov-fail-under=100
 ```
@@ -128,16 +133,14 @@ versions, and publishes only through protected tag-triggered environments.
 
 ## Documentation writing rules
 
-- Describe behavior owned by the current native runtime, not removed legacy modules.
+- Describe behavior owned by the current native runtime.
 - Mark local measurements with platform, date, sample count, and scope.
 - Never present driver RSS as whole-worker-tree RSS.
 - Keep Python and Rust signatures separate even when behavior is shared.
 - Use `preview` in first examples; explain exact transaction promotion before auto mode.
 - Link deep security claims to the threat model or guarantee record.
 - Keep published-release and later checkout-only capabilities visibly distinct.
-- Test fixture-owning examples; do not present legacy Python modules as current wheel APIs.
+- Test fixture-owning examples as executable contracts.
 - Report RSS scope, sampling gaps, confirmation runs and unfavorable benchmark outcomes.
 
-The bare `ty check` command also discovers historical legacy tests that target the
-removed Python engine. The explicit native release-surface command above follows CI;
-it does not silently reclassify those legacy contracts as current SDK failures.
+The explicit type-check command above matches the maintained release surface used by CI.

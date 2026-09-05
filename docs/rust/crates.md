@@ -6,7 +6,7 @@ on `vsh`; the other crates make boundaries auditable and publishable.
 | Cargo package | Library/binary | Responsibility |
 |---|---|---|
 | `vsh` | `vsh` | Primary public SDK handle; re-exports the runtime facade |
-| `vbash` | `vsh` | Implementation-free compatibility re-export of exact-version `vsh` |
+| `vbash` | `vsh` | Implementation-free exact-version mirror of `vsh` |
 | `vsh-runtime` | `vsh` | Native orchestration implementation behind `vsh` |
 | `vsh-types` | `vsh_types` | Paths, digests, node state, transaction IDs and lifecycle |
 | `vsh-vfs` | `vsh_vfs` | Immutable snapshots and copy-on-write virtual effects |
@@ -29,7 +29,7 @@ vsh-monty ── vsh-commit
        \       /
         vsh-runtime
              |
-            vsh ── vbash compatibility crate
+            vsh ── vbash mirror crate
              |
           vsh-python
 ```
@@ -52,9 +52,9 @@ host mutation.
 
 ## Version and supply-chain contract
 
-All workspace packages share version `0.4.0`, Rust 1.95.0, edition 2024, and Apache-2.0.
+All workspace packages share version `0.5.0`, Rust 1.95.0, edition 2024, and Apache-2.0.
 Direct external crates are exact-pinned, the lockfile is committed, workspace crates
 forbid unsafe code, and CI runs RustSec plus license/source/duplicate policy checks.
 
-See the [dependency admission policy](../rust-rewrite/DEPENDENCY_POLICY.md) and
-[release artifact order](../rust-rewrite/RELEASE.md).
+See the [dependency admission policy](../dependency-policy.md) and
+[release artifact order](../release.md).

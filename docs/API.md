@@ -13,7 +13,7 @@ surfaces.
 
 Python is a thin PyO3 adapter; simulation, policy, transaction state, commit, and
 recovery do not have a parallel Python implementation. See the
-[language parity contract](rust-rewrite/PARITY_CONTRACT.md).
+[language parity contract](language-parity.md).
 
 ## Shared concepts
 
@@ -24,9 +24,3 @@ recovery do not have a parallel Python implementation. See the
 - [Typed MCP receipt envelope](integrations/mcp.md#receipt-envelope)
 - [Efficient usage and preview retention](guides/efficient-usage.md)
 - [Runnable Python cookbook](python/examples.md) and [Rust cookbook](rust/examples.md)
-
-!!! note "Version 0.3 compatibility break"
-
-    Legacy command-registry, plan-token, shell-rendering, CodeMode discovery, and
-    Python committer APIs are not part of the 0.3 native surface. Follow the
-    [migration guide](rust-rewrite/MIGRATION.md) instead of importing removed modules.

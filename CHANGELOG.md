@@ -4,6 +4,34 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-06
+
+### Added
+
+- Focused, executable examples for preview, one-shot auto commit, strict independent
+  review, bounded analysis, CLI, MCP, and compound native transactions.
+- Evidence-first Rust and Python commit hooks with immutable request events, canonical
+  diffs, ordered effects, configurable review scope, and fail-closed resolution.
+- An exact-pinned Pydantic AI 2.40 capability exposing the native VSH filesystem
+  surface and returning pending-review feedback to the calling agent.
+- An optional Pydantic AI `CommitJudge` with transaction-bound before/after content,
+  explicit content-sharing permission, bounded model calls and direct approval of
+  pending transactions. Capability results withhold guest output until committed and
+  carry both review and rejection feedback.
+- `CommitJudge(review_instructions=...)` extends its fixed evidence-first instructions
+  and exposes the VSH adapter explicitly as `judge.hook_handler`.
+- `CommitJudge(max_output_tokens=...)` owns the provider output cap; it defaults to
+  2,048 and accepts an explicit `None` for backends that reject that request parameter.
+- The agent-visible `vsh_run` contract now names its exact Monty functions and Python
+  call syntax, preventing invented `read_file` calls and JSON-shaped positional calls.
+- `VshCapability(workspace, ...)` is now the sole capability construction surface;
+  the redundant `VshCapability.open(...)` constructor was removed before release.
+
+### Removed
+
+- The retired source-only Python command engine and its stale tests, agent examples,
+  playground benchmark archive, rewrite-phase notes, and obsolete implementation plans.
+
 ## [0.4.0] - 2026-09-05
 
 ### Changed

@@ -9,6 +9,7 @@ use monty_proto::python::{InstanceStore, monty_to_py};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 
 create_exception!(
     _native,
@@ -86,6 +87,29 @@ impl From<PyRunMode> for vsh::RunMode {
         match value {
             PyRunMode::Preview => Self::Preview,
             PyRunMode::Auto => Self::Auto,
+        }
+    }
+}
+
+/// Python spelling of commit-hook policy scope.
+#[pyclass(
+    name = "HookScope",
+    eq,
+    eq_int,
+    from_py_object,
+    rename_all = "SCREAMING_SNAKE_CASE"
+)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PyHookScope {
+    ReviewRequired,
+    AllRequests,
+}
+
+impl From<PyHookScope> for vsh::HookScope {
+    fn from(value: PyHookScope) -> Self {
+        match value {
+            PyHookScope::ReviewRequired => Self::ReviewRequired,
+            PyHookScope::AllRequests => Self::AllRequests,
         }
     }
 }
@@ -315,6 +339,398 @@ impl OwnedRunRequest {
     }
 }
 
+/// Metadata/content identity for one side of a canonical change.
+#[pyclass(name = "NodeSummary", frozen, get_all, skip_from_py_object)]
+#[derive(Clone, Debug)]
+struct PyNodeSummary {
+    kind: String,
+    size: u64,
+    mode: u32,
+    content: Option<String>,
+}
+
+impl From<vsh::NodeState> for PyNodeSummary {
+    fn from(state: vsh::NodeState) -> Self {
+        Self {
+            kind: node_kind_name(state.kind()).to_owned(),
+            size: state.size(),
+            mode: state.mode(),
+            content: state.content().map(|content| match content {
+                vsh::ContentVersion::Blob(value) => value.to_string(),
+                vsh::ContentVersion::Stamp(value) => format!(
+                    "stamp:{}:{}:{}:{}:{}:{}:{}",
+                    node_kind_name(value.kind),
+                    value.size,
+                    value.mode,
+                    value.mtime_ns,
+                    value
+                        .ctime_ns
+                        .map_or_else(|| "none".to_owned(), |item| item.to_string()),
+                    value.file_id.high,
+                    value.file_id.low,
+                ),
+                _ => "unknown".to_owned(),
+            }),
+        }
+    }
+}
+
+/// One entry from the exact path-ordered canonical diff.
+#[pyclass(name = "CanonicalChange", frozen, get_all, skip_from_py_object)]
+#[derive(Clone, Debug)]
+struct PyCanonicalChange {
+    path: String,
+    kind: String,
+    before: Option<PyNodeSummary>,
+    after: Option<PyNodeSummary>,
+}
+
+impl From<&vsh::DiffEntry> for PyCanonicalChange {
+    fn from(entry: &vsh::DiffEntry) -> Self {
+        Self {
+            path: entry.path.as_str().to_owned(),
+            kind: diff_kind_name(entry.kind).to_owned(),
+            before: entry.before.map(Into::into),
+            after: entry.after.map(Into::into),
+        }
+    }
+}
+
+/// Ordered operation-level evidence produced by virtual execution.
+#[pyclass(name = "EffectSummary", frozen, get_all, skip_from_py_object)]
+#[derive(Clone, Debug)]
+struct PyEffectSummary {
+    sequence: u64,
+    origin: String,
+    operation: String,
+    paths: Vec<String>,
+    before: Option<PyNodeSummary>,
+    after: Option<PyNodeSummary>,
+    observed_content: Option<String>,
+}
+
+impl From<&vsh::EffectEvent> for PyEffectSummary {
+    fn from(event: &vsh::EffectEvent) -> Self {
+        let (operation, paths, before, after, observed_content) = match &event.effect {
+            vsh::Effect::MetadataRead { path, state } => (
+                "metadata_read",
+                vec![path.as_str().to_owned()],
+                None,
+                state.map(Into::into),
+                None,
+            ),
+            vsh::Effect::ContentRead { path, blob } => (
+                "content_read",
+                vec![path.as_str().to_owned()],
+                None,
+                None,
+                Some(blob.to_string()),
+            ),
+            vsh::Effect::DirectoryRead { path, digest } => (
+                "directory_read",
+                vec![path.as_str().to_owned()],
+                None,
+                None,
+                Some(digest.to_string()),
+            ),
+            vsh::Effect::Create { path, after } => (
+                "create",
+                vec![path.as_str().to_owned()],
+                None,
+                Some((*after).into()),
+                None,
+            ),
+            vsh::Effect::ModifyContent {
+                path,
+                before,
+                after,
+            } => (
+                "modify_content",
+                vec![path.as_str().to_owned()],
+                Some((*before).into()),
+                Some((*after).into()),
+                None,
+            ),
+            vsh::Effect::Delete { path, before } => (
+                "delete",
+                vec![path.as_str().to_owned()],
+                Some((*before).into()),
+                None,
+                None,
+            ),
+            vsh::Effect::Rename {
+                from,
+                to,
+                before,
+                after,
+            } => (
+                "rename",
+                vec![from.as_str().to_owned(), to.as_str().to_owned()],
+                Some((*before).into()),
+                Some((*after).into()),
+                None,
+            ),
+            _ => ("unknown", Vec::new(), None, None, None),
+        };
+        Self {
+            sequence: event.sequence,
+            origin: effect_origin_name(event.origin).to_owned(),
+            operation: operation.to_owned(),
+            paths,
+            before,
+            after,
+            observed_content,
+        }
+    }
+}
+
+/// Immutable evidence delivered to a Python commit hook.
+#[pyclass(name = "ReviewContent", frozen, skip_from_py_object)]
+#[derive(Clone, Debug)]
+struct PyReviewContent {
+    #[pyo3(get)]
+    path: String,
+    #[pyo3(get)]
+    blob: String,
+    bytes: Vec<u8>,
+}
+
+#[pymethods]
+impl PyReviewContent {
+    #[getter]
+    fn bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.bytes)
+    }
+}
+
+impl From<&vsh::ReviewContent> for PyReviewContent {
+    fn from(content: &vsh::ReviewContent) -> Self {
+        Self {
+            path: content.path.as_str().to_owned(),
+            blob: content.blob.to_string(),
+            bytes: content.bytes.clone(),
+        }
+    }
+}
+
+/// Immutable evidence delivered to a Python commit hook.
+#[pyclass(name = "RequestEvent", frozen, get_all, skip_from_py_object)]
+#[derive(Clone, Debug)]
+struct PyRequestEvent {
+    schema_version: u16,
+    event_id: String,
+    hook_id: String,
+    transaction: String,
+    state: String,
+    baseline: String,
+    base_snapshot: String,
+    diff: String,
+    read_set: String,
+    write_set: String,
+    program: String,
+    policy: String,
+    runtime_config: String,
+    intent_digest: Option<String>,
+    intent: Option<String>,
+    policy_profile: String,
+    policy_thresholds: BTreeMap<String, u64>,
+    risk_flags: Vec<String>,
+    touched_paths: usize,
+    created_paths: usize,
+    modified_paths: usize,
+    deleted_paths: usize,
+    renamed_paths: usize,
+    changed_bytes: u64,
+    delete_ratio_bps: u16,
+    executable_changes: usize,
+    symlink_changes: usize,
+    canonical_diff: Vec<PyCanonicalChange>,
+    effects: Vec<PyEffectSummary>,
+    os_calls: u64,
+    read_bytes: u64,
+    write_bytes: u64,
+    directory_entries: u64,
+    output_bytes: usize,
+    denied_accesses: u64,
+    result_bytes: u64,
+    evidence_complete: bool,
+    evidence_truncated: bool,
+    contents: Vec<PyReviewContent>,
+    content_complete: bool,
+}
+
+impl From<&vsh::RequestEvent> for PyRequestEvent {
+    fn from(event: &vsh::RequestEvent) -> Self {
+        let metrics = event.risk_metrics;
+        let thresholds = event.policy_thresholds;
+        Self {
+            schema_version: event.schema_version,
+            event_id: event.event_id.to_string(),
+            hook_id: event.hook_id.to_string(),
+            transaction: event.transaction.to_string(),
+            state: state_name(event.state).to_owned(),
+            baseline: match event.baseline {
+                vsh::HookBaseline::AutoApproved => "auto_approved",
+                vsh::HookBaseline::ReviewRequired => "review_required",
+            }
+            .to_owned(),
+            base_snapshot: event.base_snapshot.to_string(),
+            diff: event.diff.to_string(),
+            read_set: event.read_set.to_string(),
+            write_set: event.write_set.to_string(),
+            program: event.program.to_string(),
+            policy: event.policy.to_string(),
+            runtime_config: event.runtime_config.to_string(),
+            intent_digest: event.intent_digest.map(|value| value.to_string()),
+            intent: event.intent.clone(),
+            policy_profile: policy_profile_name(event.policy_profile).to_owned(),
+            policy_thresholds: [
+                (
+                    "escalate_touched_paths",
+                    u64::try_from(thresholds.escalate_touched_paths).unwrap_or(u64::MAX),
+                ),
+                ("escalate_changed_bytes", thresholds.escalate_changed_bytes),
+                (
+                    "deny_touched_paths",
+                    u64::try_from(thresholds.deny_touched_paths).unwrap_or(u64::MAX),
+                ),
+                ("deny_changed_bytes", thresholds.deny_changed_bytes),
+                (
+                    "deny_deleted_paths",
+                    u64::try_from(thresholds.deny_deleted_paths).unwrap_or(u64::MAX),
+                ),
+                (
+                    "delete_ratio_minimum_paths",
+                    u64::try_from(thresholds.delete_ratio_minimum_paths).unwrap_or(u64::MAX),
+                ),
+                (
+                    "deny_delete_ratio_bps",
+                    u64::from(thresholds.deny_delete_ratio_bps),
+                ),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect(),
+            risk_flags: event
+                .risk_flags
+                .iter()
+                .map(|flag| risk_flag_name(*flag).to_owned())
+                .collect(),
+            touched_paths: metrics.touched_paths,
+            created_paths: metrics.created_paths,
+            modified_paths: metrics.modified_paths,
+            deleted_paths: metrics.deleted_paths,
+            renamed_paths: metrics.renamed_paths,
+            changed_bytes: metrics.changed_bytes,
+            delete_ratio_bps: metrics.delete_ratio_bps,
+            executable_changes: metrics.executable_changes,
+            symlink_changes: metrics.symlink_changes,
+            canonical_diff: event.canonical_diff.iter().map(Into::into).collect(),
+            effects: event.effects.iter().map(Into::into).collect(),
+            os_calls: event.execution.os_calls,
+            read_bytes: event.execution.read_bytes,
+            write_bytes: event.execution.write_bytes,
+            directory_entries: event.execution.directory_entries,
+            output_bytes: event.execution.output_bytes,
+            denied_accesses: event.execution.denied_accesses,
+            result_bytes: event.execution.result_bytes,
+            evidence_complete: event.evidence_complete,
+            evidence_truncated: event.evidence_truncated,
+            contents: event.contents.iter().map(Into::into).collect(),
+            content_complete: event.content_complete,
+        }
+    }
+}
+
+/// Opaque native prepare result carried across a Python handler await point.
+#[pyclass(name = "CommitPreparation", frozen, skip_from_py_object)]
+#[derive(Clone, Debug)]
+struct PyCommitPreparation {
+    inner: vsh::CommitPreparation,
+    event: Option<PyRequestEvent>,
+}
+
+#[pymethods]
+impl PyCommitPreparation {
+    #[getter]
+    fn transaction(&self) -> String {
+        self.inner.transaction().to_string()
+    }
+
+    #[getter]
+    fn event(&self) -> Option<PyRequestEvent> {
+        self.event.clone()
+    }
+}
+
+impl From<vsh::CommitPreparation> for PyCommitPreparation {
+    fn from(inner: vsh::CommitPreparation) -> Self {
+        let event = inner.event().map(Into::into);
+        Self { inner, event }
+    }
+}
+
+/// Typed decision returned by a Python hook handler.
+#[pyclass(name = "HookDecision", frozen, skip_from_py_object)]
+#[derive(Clone, Debug)]
+struct PyHookDecision {
+    inner: vsh::HookDecision,
+}
+
+#[pymethods]
+impl PyHookDecision {
+    #[staticmethod]
+    fn follow_policy() -> Self {
+        Self {
+            inner: vsh::HookDecision::FollowPolicy,
+        }
+    }
+
+    #[staticmethod]
+    fn approve(reason: String) -> Self {
+        Self {
+            inner: vsh::HookDecision::approve(reason),
+        }
+    }
+
+    #[staticmethod]
+    fn review(feedback: String) -> Self {
+        Self {
+            inner: vsh::HookDecision::review(feedback),
+        }
+    }
+
+    #[staticmethod]
+    fn reject(reason: String) -> Self {
+        Self {
+            inner: vsh::HookDecision::reject(reason),
+        }
+    }
+}
+
+/// Hook-decision provenance returned with commit resolution.
+#[pyclass(name = "HookDecisionRecord", frozen, get_all, skip_from_py_object)]
+#[derive(Clone, Debug)]
+struct PyHookDecisionRecord {
+    event_id: String,
+    hook_id: String,
+    verdict: String,
+    reason: String,
+    principal: Option<String>,
+}
+
+impl From<vsh::HookDecisionRecord> for PyHookDecisionRecord {
+    fn from(record: vsh::HookDecisionRecord) -> Self {
+        Self {
+            event_id: record.event_id.to_string(),
+            hook_id: record.hook_id.to_string(),
+            verdict: hook_verdict_name(record.verdict).to_owned(),
+            reason: record.reason,
+            principal: record.principal.map(|value| value.to_string()),
+        }
+    }
+}
+
 /// Python projection of one native VSH receipt.
 #[pyclass(name = "Receipt", frozen, get_all, skip_from_py_object)]
 #[derive(Debug)]
@@ -432,6 +848,23 @@ impl PyReceipt {
     }
 }
 
+/// Receipt plus the decision provenance produced by hook resolution.
+#[pyclass(name = "CommitResolution", frozen, get_all, skip_from_py_object)]
+#[derive(Debug)]
+struct PyCommitResolution {
+    receipt: Py<PyReceipt>,
+    hook: Option<PyHookDecisionRecord>,
+}
+
+impl PyCommitResolution {
+    fn from_native(py: Python<'_>, resolution: vsh::CommitResolution) -> PyResult<Self> {
+        Ok(Self {
+            receipt: Py::new(py, PyReceipt::from_native(py, resolution.receipt)?)?,
+            hook: resolution.hook.map(Into::into),
+        })
+    }
+}
+
 /// Python projection of startup/manual crash recovery.
 #[pyclass(name = "RecoveryReport", frozen, get_all, skip_from_py_object)]
 #[derive(Clone, Debug)]
@@ -475,13 +908,18 @@ struct PyRuntime {
 impl PyRuntime {
     /// Open a capability-rooted workspace and recover interrupted commits.
     #[staticmethod]
-    #[pyo3(signature = (workspace, *, data_directory=None, policy="balanced", worker_path=None))]
+    #[pyo3(signature = (workspace, *, data_directory=None, policy="balanced", worker_path=None, hook_id=None, hook_scope=None, review_content_bytes=0))]
+    // Preserve Python's keyword-only options without a redundant config wrapper.
+    #[allow(clippy::too_many_arguments)]
     fn open(
         py: Python<'_>,
         workspace: PathBuf,
         data_directory: Option<PathBuf>,
         policy: &str,
         worker_path: Option<PathBuf>,
+        hook_id: Option<&str>,
+        hook_scope: Option<PyHookScope>,
+        review_content_bytes: usize,
     ) -> PyResult<Self> {
         let profile = match policy {
             "balanced" => vsh::PolicyProfile::Balanced,
@@ -498,6 +936,17 @@ impl PyRuntime {
             .with_result_compatibility(vsh::ResultCompatibility::Python);
         if let Some(data_directory) = data_directory {
             config = config.with_data_directory(data_directory);
+        }
+        if hook_id.is_some() || hook_scope.is_some() {
+            config = config.with_commit_hook(
+                vsh::HookConfig::new(hook_id.unwrap_or("vsh.python-hook"))
+                    .with_scope(hook_scope.unwrap_or(PyHookScope::ReviewRequired).into())
+                    .with_max_content_bytes(review_content_bytes),
+            );
+        } else if review_content_bytes > 0 {
+            return Err(PyValueError::new_err(
+                "review_content_bytes requires a configured commit hook",
+            ));
         }
         if let Some(worker_path) = worker_path {
             config = config.with_worker_path(worker_path);
@@ -579,6 +1028,54 @@ impl PyRuntime {
             runtime.commit(transaction, now_unix_ms).map_err(Box::new)
         })?;
         PyReceipt::from_native(py, receipt)
+    }
+
+    /// Freeze an exact hook event without executing caller code under native locks.
+    fn prepare_commit(&self, py: Python<'_>, transaction: &str) -> PyResult<PyCommitPreparation> {
+        let transaction = parse_transaction(transaction)?;
+        let runtime = Arc::clone(&self.inner);
+        detach_call(py, runtime, move |runtime| {
+            runtime.prepare_commit(transaction).map_err(Box::new)
+        })
+        .map(Into::into)
+    }
+
+    /// Revalidate and apply a typed decision to one opaque preparation.
+    fn resolve_commit(
+        &self,
+        py: Python<'_>,
+        preparation: &PyCommitPreparation,
+        decision: &PyHookDecision,
+        now_unix_ms: u64,
+    ) -> PyResult<PyCommitResolution> {
+        let preparation = preparation.inner.clone();
+        let decision = decision.inner.clone();
+        let runtime = Arc::clone(&self.inner);
+        let resolution = detach_call(py, runtime, move |runtime| {
+            runtime
+                .resolve_commit(&preparation, &decision, now_unix_ms)
+                .map_err(Box::new)
+        })?;
+        PyCommitResolution::from_native(py, resolution)
+    }
+
+    /// Apply fail-closed state after a Python handler exception or cancellation.
+    fn fail_hook(&self, py: Python<'_>, preparation: &PyCommitPreparation) -> PyResult<()> {
+        let preparation = preparation.inner.clone();
+        let runtime = Arc::clone(&self.inner);
+        detach_call(py, runtime, move |runtime| {
+            runtime.fail_hook(&preparation).map_err(Box::new)
+        })
+    }
+
+    /// Return one durable transaction state without loading result data into Python.
+    fn transaction_state(&self, py: Python<'_>, transaction: &str) -> PyResult<String> {
+        let transaction = parse_transaction(transaction)?;
+        let runtime = Arc::clone(&self.inner);
+        detach_call(py, runtime, move |runtime| {
+            runtime.transaction(transaction).map_err(Box::new)
+        })
+        .map(|record| state_name(record.state()).to_owned())
     }
 
     /// Recover durable interrupted commits while the GIL is released.
@@ -744,6 +1241,7 @@ fn state_name(state: vsh::TransactionState) -> &'static str {
         vsh::TransactionState::Denied => "denied",
         vsh::TransactionState::AutoApproved => "auto_approved",
         vsh::TransactionState::PendingApproval => "pending_approval",
+        vsh::TransactionState::Rejected => "rejected",
         vsh::TransactionState::Approved => "approved",
         vsh::TransactionState::Reserved => "reserved",
         vsh::TransactionState::Revalidating => "revalidating",
@@ -754,6 +1252,40 @@ fn state_name(state: vsh::TransactionState) -> &'static str {
         vsh::TransactionState::RecoveryRequired => "recovery_required",
         vsh::TransactionState::Failed => "failed",
         _ => "unknown",
+    }
+}
+
+fn node_kind_name(kind: vsh::NodeKind) -> &'static str {
+    match kind {
+        vsh::NodeKind::File => "file",
+        vsh::NodeKind::Directory => "directory",
+        vsh::NodeKind::Symlink => "symlink",
+    }
+}
+
+fn effect_origin_name(origin: vsh::EffectOrigin) -> &'static str {
+    match origin {
+        vsh::EffectOrigin::VirtualFs => "virtual_fs",
+        vsh::EffectOrigin::MontyOsCall => "monty_os_call",
+        vsh::EffectOrigin::MontyToolCall => "monty_tool_call",
+        _ => "unknown",
+    }
+}
+
+fn policy_profile_name(profile: vsh::PolicyProfile) -> &'static str {
+    match profile {
+        vsh::PolicyProfile::Balanced => "balanced",
+        vsh::PolicyProfile::Strict => "strict",
+        vsh::PolicyProfile::Paranoid => "paranoid",
+    }
+}
+
+fn hook_verdict_name(verdict: vsh::HookVerdict) -> &'static str {
+    match verdict {
+        vsh::HookVerdict::FollowPolicy => "follow_policy",
+        vsh::HookVerdict::Approve => "approve",
+        vsh::HookVerdict::Review => "review",
+        vsh::HookVerdict::Reject => "reject",
     }
 }
 
@@ -810,10 +1342,20 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module.py().get_type::<VshInternalError>(),
     )?;
     module.add_class::<PyRunMode>()?;
+    module.add_class::<PyHookScope>()?;
     module.add_class::<PyReceiptDetail>()?;
     module.add_class::<PyExecutionBudget>()?;
     module.add_class::<PyRunRequest>()?;
+    module.add_class::<PyNodeSummary>()?;
+    module.add_class::<PyCanonicalChange>()?;
+    module.add_class::<PyEffectSummary>()?;
+    module.add_class::<PyReviewContent>()?;
+    module.add_class::<PyRequestEvent>()?;
+    module.add_class::<PyCommitPreparation>()?;
+    module.add_class::<PyHookDecision>()?;
+    module.add_class::<PyHookDecisionRecord>()?;
     module.add_class::<PyReceipt>()?;
+    module.add_class::<PyCommitResolution>()?;
     module.add_class::<PyRecoveryReport>()?;
     module.add_class::<PyRuntime>()?;
     module.add_function(wrap_pyfunction!(version, module)?)?;

@@ -1,10 +1,20 @@
 from __future__ import annotations as _annotations
 
 from ._native import (
+    CanonicalChange,
+    CommitPreparation,
+    CommitResolution,
+    EffectSummary,
     ExecutionBudget,
+    HookDecision,
+    HookDecisionRecord,
+    HookScope,
+    NodeSummary,
     Receipt,
     ReceiptDetail,
     RecoveryReport,
+    RequestEvent,
+    ReviewContent,
     RunMode,
     RunRequest,
     Runtime,
@@ -18,15 +28,29 @@ from ._native import (
     normalize_path,
 )
 from ._version import __version__
+from .hooks import HookedRuntime, HookHandler, HookResult
 
 __all__ = (
     "__version__",
     "engine_kind",
+    "CanonicalChange",
+    "CommitPreparation",
+    "CommitResolution",
+    "EffectSummary",
     "ExecutionBudget",
+    "HookDecision",
+    "HookDecisionRecord",
+    "HookHandler",
+    "HookedRuntime",
+    "HookResult",
+    "HookScope",
+    "NodeSummary",
     "normalize_path",
     "Receipt",
     "ReceiptDetail",
     "RecoveryReport",
+    "RequestEvent",
+    "ReviewContent",
     "RunMode",
     "RunRequest",
     "Runtime",

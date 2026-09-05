@@ -49,14 +49,20 @@ jobs:
           src/vsh/__init__.py
           src/vsh/_version.py
           src/vsh/cli.py
+          src/vsh/hooks.py
+          src/vsh/_judge.py
           src/vsh/mcp/__init__.py
           src/vsh/mcp/codemode_server.py
           src/vsh/mcp/native_tools.py
           src/vsh/mcp/prompts.py
           src/vsh/mcp/server.py
           src/vsh/mcp/surface.py
+          src/vsh/pydantic_ai.py
+          tests/test_main.py
           tests/test_native_binding.py
           tests/test_native_runtime.py
+          tests/test_commit_judge.py
+          tests/test_pydantic_ai_capability.py
           tests/test_python_surface.py
           benchmarks/native_pyo3.py
           release/check_versions.py
@@ -78,8 +84,11 @@ jobs:
       - name: Enforce Python release-surface line and branch coverage
         run: >-
           uv run pytest
+          tests/test_main.py
           tests/test_native_binding.py
           tests/test_native_runtime.py
+          tests/test_commit_judge.py
+          tests/test_pydantic_ai_capability.py
           tests/test_python_surface.py
           --cov=src/vsh --cov-branch --cov-report=term-missing --cov-fail-under=100
 
@@ -119,8 +128,11 @@ jobs:
       - run: uv build
       - run: >-
           uv run pytest
+          tests/test_main.py
           tests/test_native_binding.py
           tests/test_native_runtime.py
+          tests/test_commit_judge.py
+          tests/test_pydantic_ai_capability.py
           tests/test_python_surface.py
           -q --no-cov
 

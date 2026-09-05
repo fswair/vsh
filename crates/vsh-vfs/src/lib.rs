@@ -1365,9 +1365,43 @@ impl VirtualFs {
     }
 
     /// Return the observed effect ledger.
+    ///
+    /// This excludes host-only evidence capture.
     #[must_use]
     pub fn effects(&self) -> &[EffectEvent] {
         &self.effects
+    }
+
+    /// Capture bounded base content before finalizing a reviewable transaction.
+    ///
+    /// The trusted caller must authorize content reads for every supplied path.
+    /// Existing read/write observations and guest effects are not modified. Call
+    /// `canonical_diff` afterwards to bind any newly materialized before identities.
+    /// Paths exceeding the remaining byte budget retain their lazy stamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if base content changed during capture or cannot be read.
+    pub fn capture_before_content<'a>(
+        &self,
+        paths: impl IntoIterator<Item = &'a VPath>,
+        maximum: usize,
+    ) -> Result<(), VfsError> {
+        let mut remaining = u64::try_from(maximum).unwrap_or(u64::MAX);
+        for path in paths {
+            let Some(node) = self.base.node(path) else {
+                continue;
+            };
+            let state = node.state();
+            if state.kind() == NodeKind::Directory || node.is_materialized() {
+                continue;
+            }
+            if state.size() <= remaining {
+                node.materialized_state(path, self.base.store())?;
+                remaining -= state.size();
+            }
+        }
+        Ok(())
     }
 
     /// Return base dependencies observed by virtual execution.

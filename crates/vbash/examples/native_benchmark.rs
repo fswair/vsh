@@ -449,7 +449,7 @@ fn parse_arguments() -> io::Result<Arguments> {
         cold_iterations: 30,
         parallel_workers: 4,
         worker: PathBuf::from("vsh-monty-worker"),
-        output: PathBuf::from("reports/rust-rewrite/native-rust.json"),
+        output: PathBuf::from("benchmarks/results/local/native-rust.json"),
     };
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {

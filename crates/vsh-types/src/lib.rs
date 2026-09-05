@@ -381,6 +381,14 @@ digest_id!(
     ApprovalId,
     "The digest identity of one exact bounded approval grant."
 );
+digest_id!(
+    HookId,
+    "The opaque digest identity of one configured commit hook."
+);
+digest_id!(
+    RequestEventId,
+    "The digest identity of one exact commit-hook request event."
+);
 
 impl BlobId {
     /// Hash immutable blob bytes with BLAKE3.
@@ -482,6 +490,26 @@ impl PrincipalId {
     #[must_use]
     pub fn digest_label(label: &str) -> Self {
         Self::from_bytes(domain_hash(b"principal-v1", label.as_bytes()))
+    }
+}
+
+impl HookId {
+    /// Hash a stable hook label without retaining configuration text.
+    #[must_use]
+    pub fn digest_label(label: &str) -> Self {
+        Self::from_bytes(domain_hash(b"hook-v1", label.as_bytes()))
+    }
+}
+
+impl RequestEventId {
+    /// Bind an event to one transaction, hook, and configured scope.
+    #[must_use]
+    pub fn derive(transaction: TransactionId, hook: HookId, scope_tag: u8) -> Self {
+        let mut canonical = Vec::with_capacity(65);
+        canonical.extend_from_slice(transaction.as_bytes());
+        canonical.extend_from_slice(hook.as_bytes());
+        canonical.push(scope_tag);
+        Self::from_bytes(domain_hash(b"request-event-v1", &canonical))
     }
 }
 
@@ -808,6 +836,8 @@ pub enum TransactionState {
     AutoApproved,
     /// The transaction is awaiting an independent approval decision.
     PendingApproval,
+    /// A configured commit hook rejected the exact transaction.
+    Rejected,
     /// An independent principal approved the exact transaction.
     Approved,
     /// The transaction acquired the single-use commit reservation.
@@ -842,8 +872,9 @@ impl TransactionState {
                 )
                 | (
                     Self::PendingApproval,
-                    Self::Approved | Self::Denied | Self::Expired | Self::Failed
+                    Self::Approved | Self::Denied | Self::Rejected | Self::Expired | Self::Failed
                 )
+                | (Self::AutoApproved, Self::PendingApproval | Self::Rejected)
                 | (Self::AutoApproved | Self::Approved, Self::Reserved)
                 | (Self::Approved, Self::Expired)
                 | (Self::Reserved, Self::Revalidating | Self::Failed)
@@ -861,7 +892,12 @@ impl TransactionState {
     pub const fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Denied | Self::Committed | Self::Stale | Self::Expired | Self::Failed
+            Self::Denied
+                | Self::Rejected
+                | Self::Committed
+                | Self::Stale
+                | Self::Expired
+                | Self::Failed
         )
     }
 }

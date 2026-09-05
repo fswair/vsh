@@ -21,7 +21,7 @@ workspace, not the repository. No extra dependency or model credential is requir
 The [Rust host source](https://github.com/fswair/vsh/blob/main/crates/vbash/examples/staged_release.rs)
 embeds the same [guest program](https://github.com/fswair/vsh/blob/main/crates/vbash/examples/staged_release.monty)
 as the [Python recipe](../python/examples.md#staged-release-generation). Both are
-included with the VSH 0.4.0 source release.
+included with the VSH 0.5.0 source release.
 
 The workflow creates a template, virtually copies and patches it, renames the generated
 config and writes a README. It checks the exact three final paths and that no host

@@ -18,7 +18,7 @@ name = "vsh"
 doc = false
 
 [dependencies]
-vsh-primary = { package = "vsh", path = "../vsh", version = "=0.4.0" }
+vsh-primary = { package = "vsh", path = "../vsh", version = "=0.5.0" }
 
 [lints]
 workspace = true

@@ -261,12 +261,8 @@ async def _assert_codemode_server_contracts() -> None:
     assert "single `vsh_run` tool" in str(rendered.messages[0].content)
     assert "`vsh_search`" in str(rendered.messages[0].content)
 
-    agent_server = codemode_server.create_agent_codemode_server()
-    assert [tool.name for tool in await agent_server.list_tools()] == ["vsh_run"]
-    assert await agent_server.list_prompts() == []
 
-
-def test_codemode_servers_expose_only_the_native_surface() -> None:
+def test_codemode_server_exposes_only_the_native_surface() -> None:
     asyncio.run(_assert_codemode_server_contracts())
 
 

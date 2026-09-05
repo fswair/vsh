@@ -422,7 +422,7 @@ def main() -> None:
     parser.add_argument("--cold-iterations", type=int, default=30)
     parser.add_argument("--parallel-workers", type=int, default=4)
     parser.add_argument(
-        "--output", type=Path, default=Path("reports/rust-rewrite/native-pyo3.json")
+        "--output", type=Path, default=Path("benchmarks/results/local/native-pyo3.json")
     )
     arguments = parser.parse_args()
 

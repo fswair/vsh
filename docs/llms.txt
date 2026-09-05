@@ -28,11 +28,21 @@ Use the links below for focused documentation. Use llms-full.txt when a single c
 
 - [Command-line workflows](https://fswair.github.io/vsh/guides/cli/): The vsh executable ships with vsh-python. vsh run needs no MCP dependency; vsh serve requires the mcp extra. The CLI delegates to the same native engine as the SDK and writes a JSON receipt to stdout.
 
+## Tutorials
+
+- [Tutorial: deterministic Pydantic AI review](https://fswair.github.io/vsh/tutorials/pydantic-ai-deterministic/): This tutorial builds a Pydantic AI filesystem capability whose commit decision is made entirely by local Python code. The example permits exactly one final service.toml value and sends every other...
+
+- [Tutorial: evidence-first LLM commit review](https://fswair.github.io/vsh/tutorials/pydantic-ai-judge/): This tutorial adds a separate Pydantic AI model as a VSH commit judge. The main agent proposes filesystem work; the judge receives the exact simulated transaction and may approve it, request a...
+
 ## Python SDK
 
 - [Python SDK](https://fswair.github.io/vsh/python/): Install vsh-python, import vsh. The Python layer is a PyO3 binding to the same Rust runtime used by native applications. It does not simulate files in Python or fall back to a second implementation.
 
 - [Python API reference](https://fswair.github.io/vsh/python/api/): Import these names from vsh, supplied by the vsh-python distribution. This reference describes the native boundary: values are typed Python projections, requests are immutable, and all...
+
+- [Commit hooks](https://fswair.github.io/vsh/python/hooks/): Commit hooks let trusted application logic inspect the exact output of a successful VSH simulation before host mutation. They do not replace deterministic policy. A hard policy denial never...
+
+- [LLM commit judge](https://fswair.github.io/vsh/python/commit-judge/): CommitJudge is an optional Pydantic AI commit reviewer. It reviews the actual VSH transaction and can approve pendingapproval work directly, without an additional human approval. Native hard-deny,...
 
 - [Python cookbook](https://fswair.github.io/vsh/python/examples/): These are complete native workflows, not snippets that rely on an unexplained project directory. The source programs create temporary fixtures, assert isolation and exact results, commit only...
 
@@ -50,6 +60,8 @@ Use the links below for focused documentation. Use llms-full.txt when a single c
 
 - [MCP server](https://fswair.github.io/vsh/integrations/mcp/): VSH exposes one normal MCP tool, vshrun. Its code argument is a complete Monty program: one snapshot, one active overlay, one canonical change set and one policy decision. The Python adapter...
 
+- [Pydantic AI capability](https://fswair.github.io/vsh/integrations/pydantic-ai/): VshCapability gives a Pydantic AI agent a capability-rooted filesystem without giving the model a host shell, a host filesystem mount, subprocess access, or a second simulation engine. Eleven...
+
 - [VSH functions inside Monty](https://fswair.github.io/vsh/integrations/monty-tools/): These functions use the Monty 0.0.22 integration. Python wheels bundle the matching worker; Rust deployments must provide it as described in the installation instructions.
 
 - [VSH in an agent environment](https://fswair.github.io/vsh/integrations/agents/): Give the agent a language for proposing changes, while the trusted application retains workspace authority and the decision to apply them. VSH supplies virtual execution, deterministic policy,...
@@ -58,45 +70,31 @@ Use the links below for focused documentation. Use llms-full.txt when a single c
 
 - [Architecture](https://fswair.github.io/vsh/ARCHITECTURE/): VSH is a transactional filesystem simulator with one Rust semantic core. Native Rust enters through the vsh facade; Python/PyO3, CLI, and MCP reach the same vsh-runtime implementation.
 
+- [Guarantees and non-guarantees](https://fswair.github.io/vsh/guarantees/): When VSH is the only filesystem authority available to the untrusted program and the documented platform/configuration requirements are met, VSH guarantees:
+
 - [Security model](https://fswair.github.io/vsh/security/): VSH protects a host workspace from unreviewed filesystem effects by removing ambient authority, simulating through typed capabilities, binding approval to exact evidence, and revalidating before...
+
+- [Threat model](https://fswair.github.io/vsh/threat-model/): Execute an untrusted Monty Python program against a virtual workspace, decide whether its exact resulting transaction is allowed, and apply only that transaction through a trusted committer...
+
+- [Rust and Python API parity](https://fswair.github.io/vsh/language-parity/): The PyO3 SDK is an adapter over the native crate. This document defines what “same engine” means in tests and releases.
 
 - [Performance and optimization evidence](https://fswair.github.io/vsh/performance/): The 2026-09-05 release-profile measurements show roughly 25–30% lower median latency for the large filename-discovery, glob and bulk-delete workloads after this optimization. The strongest...
 
+- [Dependency policy](https://fswair.github.io/vsh/dependency-policy/): Checked: 2026-09-05
+
+- [Coverage contract](https://fswair.github.io/vsh/coverage/): Captured: 2026-09-05
+
 - [Development](https://fswair.github.io/vsh/development/): The workspace builds one Rust core, a PyO3 wheel, a supervised worker, and this Zensical documentation site.
 
-- [VSH Rust rewrite guarantees and non-guarantees](https://fswair.github.io/vsh/rust-rewrite/GUARANTEES/): When VSH is the only filesystem authority available to the untrusted program and the documented platform/configuration requirements are met, VSH guarantees:
-
-- [Native Rust and Python parity contract](https://fswair.github.io/vsh/rust-rewrite/PARITY_CONTRACT/): The PyO3 SDK is an adapter over the native crate. This document defines what “same engine” means in tests and releases.
-
-- [Rust dependency policy and initial admission record](https://fswair.github.io/vsh/rust-rewrite/DEPENDENCY_POLICY/): Checked: 2026-09-05
-
-- [VSH Rust rewrite threat model](https://fswair.github.io/vsh/rust-rewrite/THREAT_MODEL/): Execute an untrusted Monty Python program against a virtual workspace, decide whether its exact resulting transaction is allowed, and apply only that transaction through a trusted committer...
-
-- [VSH merge coverage contract](https://fswair.github.io/vsh/rust-rewrite/COVERAGE/): Captured: 2026-09-05
-
-- [Migration from the Python command engine to VSH 0.3 native runtime](https://fswair.github.io/vsh/rust-rewrite/MIGRATION/): The primary PyPI distribution is now vsh-python and the import package remains vsh. The old vbash distribution is a metadata-only exact-version installer, so existing environments retain the same...
-
-- [VSH dual-registry release](https://fswair.github.io/vsh/rust-rewrite/RELEASE/): The release workflow builds both language surfaces from one tag without publishing anything during an ordinary branch build or manual workflowdispatch run.
-
-- [Rust rewrite plan validation](https://fswair.github.io/vsh/rust-rewrite/PLAN_VALIDATION/): Validated: 2026-09-05\ Scope: current working tree against plans/vshrustrewritedualsdk.md
+- [Release process](https://fswair.github.io/vsh/release/): The release workflow builds both language surfaces from one tag without publishing anything during an ordinary branch build or manual workflowdispatch run.
 
 ## Additional reference
 
 - [API reference](https://fswair.github.io/vsh/API/): VSH exposes one Rust-owned execution model through two deliberately separate language surfaces.
 
-- [Transaction artifacts](https://fswair.github.io/vsh/ARTIFACTS/): VSH retains the minimum bounded evidence required to promote, reject, recover, and audit a filesystem transaction. This page describes native transaction artifacts; the legacy Python agent-output...
-
-- [Performance baseline](https://fswair.github.io/vsh/BASELINE/): The current optimization evidence is the paired release Rust/PyO3 matrix captured on 2026-09-05, with before, final and confirmation runs in benchmarks/results/2026-09-05/. It covers the Monty...
+- [Transaction artifacts](https://fswair.github.io/vsh/ARTIFACTS/): VSH retains the minimum bounded evidence required to promote, reject, recover, and audit a filesystem transaction.
 
 - [CodeMode server](https://fswair.github.io/vsh/CODEMODE/): vsh-codemode is the agent-oriented stdio entry point in VSH 0.3. It exposes the same single vshrun tool as vsh serve, then adds server instructions and the vshruntransaction MCP prompt.
-
-- [Native core and PyO3 performance record](https://fswair.github.io/vsh/rust-rewrite/PERFORMANCE/): Historical record. For the 2026-09-05 Monty 0.0.22 optimization baseline, final and confirmation runs, see current performance and benchmarks/results/2026-09-05/. Do not mix the sample protocols...
-
-- [Rust rewrite Phase 0 baseline](https://fswair.github.io/vsh/rust-rewrite/PHASE_0_BASELINE/): Captured: 2026-08-28\ Python version: VSH 0.3.0\ Baseline revision candidate: 7c7d5cbeaa88f58b99a1cc23953a0ad3b6bc5d91
-
-- [Rust rewrite Phase 2 — immutable snapshot and VirtualFs](https://fswair.github.io/vsh/rust-rewrite/PHASE_2_VFS/): Implemented: 2026-08-28
-
-- [Phase 3 Monty typed-call integration](https://fswair.github.io/vsh/rust-rewrite/PHASE_3_MONTY/): Checked: 2026-09-05
 
 ## Full documentation
 

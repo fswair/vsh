@@ -56,7 +56,7 @@ hide:
 <div class="vsh-example-footer"><span class="vsh-status-dot" aria-hidden="true"></span><span>One virtual file. No user-file changes applied.</span><a href="guides/transactions/">Understand the receipt <span aria-hidden="true">→</span></a></div>
 </section>
 
-These `vsh_*` functions are included in VSH 0.4.0. Start with the
+These `vsh_*` functions are included in VSH. Start with the
 [self-contained installation tutorial](start/index.md) for worker setup and a complete
 preview → review → commit example.
 
@@ -83,11 +83,11 @@ preview → review → commit example.
 <aside class="vsh-engineering-note">
   <span class="vsh-eyebrow">Built to be measured</span>
   <p>Explore the latency measurements, coverage contract, and architectural decisions behind VSH.</p>
-  <div><a href="performance/">Benchmarks <span aria-hidden="true">↗</span></a><a href="rust-rewrite/COVERAGE/">Test coverage <span aria-hidden="true">↗</span></a><a href="ARCHITECTURE/">Architecture <span aria-hidden="true">↗</span></a></div>
+  <div><a href="performance/">Benchmarks <span aria-hidden="true">↗</span></a><a href="coverage/">Test coverage <span aria-hidden="true">↗</span></a><a href="ARCHITECTURE/">Architecture <span aria-hidden="true">↗</span></a></div>
 </aside>
 
 VSH is for bounded workspace transformations. Monty has no host mount, subprocess,
-network capability, or ambient environment. See the [guarantees](rust-rewrite/GUARANTEES.md)
+network capability, or ambient environment. See the [guarantees](guarantees.md)
 for the precise execution and commit contract.
 
 </div>

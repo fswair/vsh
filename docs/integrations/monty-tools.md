@@ -1,6 +1,6 @@
 # VSH functions inside Monty
 
-!!! note "Available in VSH 0.4.0"
+!!! note "Available in VSH"
 
     These functions use the Monty 0.0.22 integration. Python wheels bundle the matching
     worker; Rust deployments must provide it as described in the

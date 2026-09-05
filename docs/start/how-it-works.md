@@ -44,7 +44,7 @@ Choose the smallest workspace root that contains all required inputs and outputs
 ## The guest sees one active overlay
 
 Monty runs a constrained Python subset in a supervised subprocess. Supported `pathlib`
-operations suspend into typed calls answered by Rust. In VSH 0.4.0,
+operations suspend into typed calls answered by Rust. In VSH,
 the [ten VSH functions](../integrations/monty-tools.md) use the same mechanism and the
 same `VirtualFs` instance.
 

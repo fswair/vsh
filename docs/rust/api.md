@@ -5,7 +5,7 @@ exhaustive source for every re-exported lower-level field and error variant.
 
 Use the [complete Rust cookbook](examples.md) for a compiled example. Unlike Python,
 the Rust preview API accepts a borrowed `RunRequest`; it does not emulate Python's
-source-string overload. The guest `vsh_*` surface is included in VSH 0.4.0.
+source-string overload. The guest `vsh_*` surface is included in VSH.
 
 ## Constants and diagnostics
 
@@ -42,6 +42,7 @@ let config = RuntimeConfig::new(workspace_root)
 | `with_commit_config(config)` | Replace trusted commit/recovery ceilings |
 | `with_store_config(config)` | Replace durable transaction-log ceilings |
 | `with_artifact_limits(limits)` | Replace pending-artifact and cache ceilings |
+| `with_commit_hook(hook)` | Bind a hook identity, scope, approval lifetime, and feedback bound |
 | `workspace_root()` | Return the host workspace root |
 | `data_directory()` | Return the trusted artifact root |
 | `worker_path()` | Return the worker path or `None` in trusted in-process mode |
@@ -91,6 +92,9 @@ complete bounded canonical diff.
 | `commit(id, now)` | `Receipt` | Single-use reserve, revalidate, apply, verify |
 | `recover()` | `RecoveryReport` | Resolve bounded durable commit state |
 | `transaction(id)` | `TransactionRecord` | Read current durable lifecycle state |
+| `prepare_commit(id)` | `CommitPreparation` | Freeze an exact hook event without invoking host code |
+| `resolve_commit(preparation, decision, now)` | `CommitResolution` | Revalidate and apply one typed hook decision |
+| `fail_hook(preparation)` | `()` | Move an interrupted automatic approval into pending review |
 
 All fallible methods return `Result<_, VshError>`.
 
@@ -98,6 +102,41 @@ Auto-approved preview IDs must be consumed by the same live runtime. The default
 fail-closed retention caps are 64 artifacts and 128 MiB encoded bytes. Discard completed
 analysis too. Pending approval artifacts are durable and can survive a compatible
 runtime reopen; `approve` binds a `PrincipalId` but does not authenticate its owner.
+
+## Commit hooks
+
+`HookedRuntime<H: CommitHook>` is the synchronous Rust convenience owner. The default
+`HookScope::ReviewRequired` invokes `H` only for deterministic policy escalations;
+`HookScope::AllRequests` also includes successful read-only and auto-approved
+simulations. Hard policy denial never invokes a hook.
+
+Handlers receive an immutable `RequestEvent` containing the canonical diff, ordered
+effects, risk evidence and all transaction-binding digests. They return
+`HookDecision::{FollowPolicy, Approve, Review, Reject}`. `Review` uses the existing
+`PendingApproval` state and carries feedback in `HookDecisionRecord`; there is no
+separate review-only lifecycle state.
+
+Async Rust hosts should call `prepare_commit`, await their own handler outside VSH
+locks, then call `resolve_commit`. If handler execution fails, call `fail_hook` before
+propagating the error. Direct `Runtime::commit` cannot bypass a configured applicable
+hook.
+
+`HookConfig::with_max_content_bytes(maximum)` opts into immutable content evidence;
+the default is zero. When the hook is in scope, VSH captures eligible bounded before
+content before final binding, then recomputes the canonical diff and policy. Native
+content-read permissions also govern review capture and delivery.
+
+`RequestEvent::contents` contains `ReviewContent { path, blob, bytes }` for canonical
+before/after states and observed content reads. `content_complete` distinguishes full
+content coverage from structural `evidence_complete`; oversized, stamped or protected
+content must not be assumed reviewed. Bytes are loaded from hash-verified blobs, not
+from current host paths during handler execution.
+
+A valid `HookDecision::Approve` directly approves pending work and attempts its exact
+commit. An additional human approval is not required. The Python
+[LLM commit judge](../python/commit-judge.md) uses this same native protocol; Rust
+applications can call their chosen model/service inside their own handler without
+adding a provider dependency to the core.
 
 ## `Receipt`
 

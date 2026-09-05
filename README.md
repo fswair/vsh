@@ -54,11 +54,39 @@ print(receipt.state, receipt.result, receipt.changes)
 The GIL is released while snapshotting, executing Monty, generating the diff,
 evaluating policy, revalidating dependencies, and committing.
 
+### Pydantic AI
+
+Install the exact-pinned optional integration:
+
+```bash
+uv add "vsh-python[pydantic-ai]"
+```
+
+```python
+from pydantic_ai import Agent
+from vsh.pydantic_ai import VshCapability
+
+capability = VshCapability("/path/to/workspace")
+agent = Agent("openai:gpt-5", capabilities=[capability])
+```
+
+The capability contributes the ten native `vsh_*` filesystem operations plus
+`vsh_run` for atomic multi-step work. Every call executes in a virtual snapshot first.
+Policy-controlled changes commit exactly once or return `pending_approval`; no internal
+LLM judge is created implicitly.
+
+For explicitly configured model review, attach a
+[`CommitJudge`](https://fswair.github.io/vsh/python/commit-judge/) through
+`hook_handler=judge.hook_handler`. It evaluates canonical changes, before/after
+content, effects and intent together. A valid approval can directly commit pending
+work; native hard-deny and stale checks remain enforced. Review returns actionable
+feedback to the main agent.
+
 ## Rust
 
 ```toml
 [dependencies]
-vsh = "=0.4.0"
+vsh = "=0.5.0"
 ```
 
 ```rust,no_run
@@ -84,7 +112,7 @@ wheels bundle it; native embedders configure its trusted path through
 
 ## Active-snapshot filesystem functions
 
-VSH 0.4.0 injects ten bounded `vsh_*` functions into each Monty program: read, write,
+VSH injects ten bounded `vsh_*` functions into each Monty program: read, write,
 list, make directory, remove, move, copy, glob, literal search and exact text patch.
 They share the same copy-on-write snapshot as `pathlib`, so earlier virtual writes are
 visible to later calls without creating a nested runtime or crossing MCP.
@@ -138,19 +166,16 @@ and sampled process-tree RSS does not establish a repeatable memory reduction. S
 - Process-local preview retention is fail-closed and bounded by both artifact count and
   encoded bytes; it cannot become an unbounded parent-process cache.
 
-See the [threat model](https://fswair.github.io/vsh/rust-rewrite/THREAT_MODEL/),
-[guarantees](https://fswair.github.io/vsh/rust-rewrite/GUARANTEES/), and
-[dependency record](https://fswair.github.io/vsh/rust-rewrite/DEPENDENCY_POLICY/).
-Upgrade and benchmark details are in the
-[migration guide](https://fswair.github.io/vsh/rust-rewrite/MIGRATION/) and current
-[performance report](https://fswair.github.io/vsh/performance/). Merge coverage scope
-and floors are recorded in the
-[coverage contract](https://fswair.github.io/vsh/rust-rewrite/COVERAGE/).
+See the [threat model](https://fswair.github.io/vsh/threat-model/),
+[guarantees](https://fswair.github.io/vsh/guarantees/),
+[dependency policy](https://fswair.github.io/vsh/dependency-policy/), current
+[performance report](https://fswair.github.io/vsh/performance/), and
+[coverage contract](https://fswair.github.io/vsh/coverage/).
 
-## Compatibility handles
+## Package names
 
-Existing declarations may continue to install `vbash==0.4.0` from PyPI or depend on
-`vbash = "=0.4.0"` from crates.io. Both packages are implementation-free mirrors of
+Existing declarations may install `vbash==0.5.0` from PyPI or depend on
+`vbash = "=0.5.0"` from crates.io. Both names are implementation-free mirrors of
 the exact matching VSH release. New projects should use `vsh-python` and `vsh`
 directly; Python code continues to write `import vsh` either way.
 

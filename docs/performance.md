@@ -182,6 +182,5 @@ IPC; use bounded compound functions where their semantics fit. Pending approval 
 commit still pay real durable I/O and integrity/revalidation costs.
 
 Hosted OS/storage measurements, controlled steady-state process memory, commit/recovery
-performance and actual agent-loop cost remain separate evidence work. The
-[August rewrite record](rust-rewrite/PERFORMANCE.md) is preserved as history, not mixed
-into these comparisons. See [efficient usage](guides/efficient-usage.md) for practical tuning.
+performance and actual agent-loop cost remain separate evidence work. See
+[efficient usage](guides/efficient-usage.md) for practical tuning.

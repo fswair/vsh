@@ -9,11 +9,23 @@ use vsh_types::{
     NodeKind, NodeState, PlatformFileId, PolicyDigest, ProgramDigest, ReadSetDigest,
     RuntimeConfigDigest, SnapshotId, TransactionBinding, VPath, WriteSetDigest,
 };
-use vsh_vfs::{CanonicalDiff, ReadObservation, WritePrecondition};
+use vsh_vfs::{
+    CanonicalDiff, Effect, EffectEvent, EffectOrigin, ReadObservation, WritePrecondition,
+};
 
 use crate::runtime::{ArtifactLimits, Receipt, RuntimeDecision, StageTimings};
 
-const ARTIFACT_MAGIC: &[u8; 8] = b"VSHPND01";
+const ARTIFACT_MAGIC_V1: &[u8; 8] = b"VSHPND01";
+const ARTIFACT_MAGIC_V2: &[u8; 8] = b"VSHPND02";
+
+#[derive(Clone)]
+pub(crate) struct ReviewEvidence {
+    pub(crate) intent: Option<String>,
+    pub(crate) metrics: RiskMetrics,
+    pub(crate) effects: Vec<EffectEvent>,
+    pub(crate) complete: bool,
+    pub(crate) truncated: bool,
+}
 
 #[derive(Clone)]
 pub(crate) struct PendingTransaction {
@@ -21,6 +33,7 @@ pub(crate) struct PendingTransaction {
     pub(crate) diff: CanonicalDiff,
     pub(crate) read_set: BTreeMap<VPath, ReadObservation>,
     pub(crate) write_set: BTreeMap<VPath, WritePrecondition>,
+    pub(crate) review: ReviewEvidence,
     pub(crate) receipt: Receipt,
 }
 
@@ -29,8 +42,9 @@ pub(crate) fn encode_pending(
     limits: ArtifactLimits,
 ) -> Result<Vec<u8>, ArtifactError> {
     let mut output = Encoder::new(limits.max_bytes);
-    output.extend_from_slice(ARTIFACT_MAGIC)?;
+    output.extend_from_slice(ARTIFACT_MAGIC_V2)?;
     encode_binding(&artifact.binding, &mut output)?;
+    encode_review_evidence(&artifact.review, limits, &mut output)?;
     output.push(u8::from(!artifact.receipt.changes.is_empty()))?;
     encode_decision(&artifact.receipt.decision, &mut output)?;
 
@@ -146,10 +160,18 @@ pub(crate) fn decode_pending(
         });
     }
     let mut decoder = Decoder::new(bytes);
-    if decoder.take(ARTIFACT_MAGIC.len())? != ARTIFACT_MAGIC {
+    let magic = decoder.take(ARTIFACT_MAGIC_V2.len())?;
+    let has_review_evidence = if magic == ARTIFACT_MAGIC_V2 {
+        true
+    } else if magic == ARTIFACT_MAGIC_V1 {
+        false
+    } else {
         return Err(decoder.corrupt("invalid pending-artifact header"));
-    }
+    };
     let binding = decode_binding(&mut decoder)?;
+    let review = has_review_evidence
+        .then(|| decode_review_evidence(&mut decoder, limits))
+        .transpose()?;
     let full_detail = match decoder.byte()? {
         0 => false,
         1 => true,
@@ -181,6 +203,16 @@ pub(crate) fn decode_pending(
         RuntimeDecision::PendingApproval(_) => vsh_types::TransactionState::PendingApproval,
         RuntimeDecision::Denied(_) => return Err(decoder.corrupt("denied artifact is pending")),
     };
+    let review = review.unwrap_or_else(|| ReviewEvidence {
+        intent: None,
+        metrics: match &decision {
+            RuntimeDecision::PendingApproval(manifest) => manifest.metrics,
+            RuntimeDecision::AutoApproved | RuntimeDecision::Denied(_) => RiskMetrics::default(),
+        },
+        effects: Vec::new(),
+        complete: false,
+        truncated: false,
+    });
     let changes = if full_detail {
         diff.entries().to_vec()
     } else {
@@ -205,8 +237,216 @@ pub(crate) fn decode_pending(
         diff,
         read_set,
         write_set,
+        review,
         receipt,
     })
+}
+
+fn encode_review_evidence(
+    review: &ReviewEvidence,
+    limits: ArtifactLimits,
+    output: &mut Encoder,
+) -> Result<(), ArtifactError> {
+    match &review.intent {
+        None => output.push(0)?,
+        Some(intent) => {
+            if intent.len() > limits.max_intent_bytes {
+                return Err(ArtifactError::Limit {
+                    field: "intent",
+                    observed: intent.len(),
+                    maximum: limits.max_intent_bytes,
+                });
+            }
+            output.push(1)?;
+            encode_bytes(intent.as_bytes(), output)?;
+        }
+    }
+    encode_risk_metrics(review.metrics, output)?;
+    if review.effects.len() > limits.max_effects {
+        return Err(ArtifactError::Limit {
+            field: "review effects",
+            observed: review.effects.len(),
+            maximum: limits.max_effects,
+        });
+    }
+    encode_len(review.effects.len(), output)?;
+    for event in &review.effects {
+        output.extend_from_slice(&event.sequence.to_le_bytes())?;
+        output.push(effect_origin_tag(event.origin)?)?;
+        encode_effect(&event.effect, limits, output)?;
+    }
+    output.push(u8::from(review.complete))?;
+    output.push(u8::from(review.truncated))
+}
+
+fn decode_review_evidence(
+    decoder: &mut Decoder<'_>,
+    limits: ArtifactLimits,
+) -> Result<ReviewEvidence, ArtifactError> {
+    let intent = match decoder.byte()? {
+        0 => None,
+        1 => Some(decoder.string(limits.max_intent_bytes, "intent")?),
+        _ => return Err(decoder.corrupt("unknown optional-intent tag")),
+    };
+    let metrics = decode_risk_metrics(decoder)?;
+    let count = decoder.length(limits.max_effects, "review effects")?;
+    let mut effects = Vec::with_capacity(count);
+    for _ in 0..count {
+        let sequence = decoder.u64()?;
+        let origin = decode_effect_origin(decoder.byte()?)
+            .ok_or_else(|| decoder.corrupt("unknown effect-origin tag"))?;
+        let effect = decode_effect(decoder, limits)?;
+        effects.push(EffectEvent {
+            sequence,
+            origin,
+            effect,
+        });
+    }
+    if !effects
+        .windows(2)
+        .all(|pair| pair[0].sequence < pair[1].sequence)
+    {
+        return Err(decoder.corrupt("effect sequences are not strictly increasing"));
+    }
+    let complete = decode_bool(decoder, "evidence-complete")?;
+    let truncated = decode_bool(decoder, "evidence-truncated")?;
+    Ok(ReviewEvidence {
+        intent,
+        metrics,
+        effects,
+        complete,
+        truncated,
+    })
+}
+
+fn encode_effect(
+    effect: &Effect,
+    limits: ArtifactLimits,
+    output: &mut Encoder,
+) -> Result<(), ArtifactError> {
+    match effect {
+        Effect::MetadataRead { path, state } => {
+            output.push(1)?;
+            encode_path(path, limits, output)?;
+            encode_optional_state(*state, output)?;
+        }
+        Effect::ContentRead { path, blob } => {
+            output.push(2)?;
+            encode_path(path, limits, output)?;
+            output.extend_from_slice(blob.as_bytes())?;
+        }
+        Effect::DirectoryRead { path, digest } => {
+            output.push(3)?;
+            encode_path(path, limits, output)?;
+            output.extend_from_slice(digest.as_bytes())?;
+        }
+        Effect::Create { path, after } => {
+            output.push(4)?;
+            encode_path(path, limits, output)?;
+            encode_state(*after, output)?;
+        }
+        Effect::ModifyContent {
+            path,
+            before,
+            after,
+        } => {
+            output.push(5)?;
+            encode_path(path, limits, output)?;
+            encode_state(*before, output)?;
+            encode_state(*after, output)?;
+        }
+        Effect::Delete { path, before } => {
+            output.push(6)?;
+            encode_path(path, limits, output)?;
+            encode_state(*before, output)?;
+        }
+        Effect::Rename {
+            from,
+            to,
+            before,
+            after,
+        } => {
+            output.push(7)?;
+            encode_path(from, limits, output)?;
+            encode_path(to, limits, output)?;
+            encode_state(*before, output)?;
+            encode_state(*after, output)?;
+        }
+        _ => {
+            return Err(ArtifactError::Unsupported {
+                reason: "unknown effect variant",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn decode_effect(
+    decoder: &mut Decoder<'_>,
+    limits: ArtifactLimits,
+) -> Result<Effect, ArtifactError> {
+    match decoder.byte()? {
+        1 => Ok(Effect::MetadataRead {
+            path: decoder.path(limits)?,
+            state: decode_optional_state(decoder)?,
+        }),
+        2 => Ok(Effect::ContentRead {
+            path: decoder.path(limits)?,
+            blob: vsh_types::BlobId::from_bytes(decoder.digest()?),
+        }),
+        3 => Ok(Effect::DirectoryRead {
+            path: decoder.path(limits)?,
+            digest: DirectoryDigest::from_bytes(decoder.digest()?),
+        }),
+        4 => Ok(Effect::Create {
+            path: decoder.path(limits)?,
+            after: decode_state(decoder)?,
+        }),
+        5 => Ok(Effect::ModifyContent {
+            path: decoder.path(limits)?,
+            before: decode_state(decoder)?,
+            after: decode_state(decoder)?,
+        }),
+        6 => Ok(Effect::Delete {
+            path: decoder.path(limits)?,
+            before: decode_state(decoder)?,
+        }),
+        7 => Ok(Effect::Rename {
+            from: decoder.path(limits)?,
+            to: decoder.path(limits)?,
+            before: decode_state(decoder)?,
+            after: decode_state(decoder)?,
+        }),
+        _ => Err(decoder.corrupt("unknown effect tag")),
+    }
+}
+
+fn effect_origin_tag(origin: EffectOrigin) -> Result<u8, ArtifactError> {
+    match origin {
+        EffectOrigin::VirtualFs => Ok(1),
+        EffectOrigin::MontyOsCall => Ok(2),
+        EffectOrigin::MontyToolCall => Ok(3),
+        _ => Err(ArtifactError::Unsupported {
+            reason: "unknown effect origin",
+        }),
+    }
+}
+
+const fn decode_effect_origin(tag: u8) -> Option<EffectOrigin> {
+    match tag {
+        1 => Some(EffectOrigin::VirtualFs),
+        2 => Some(EffectOrigin::MontyOsCall),
+        3 => Some(EffectOrigin::MontyToolCall),
+        _ => None,
+    }
+}
+
+fn decode_bool(decoder: &mut Decoder<'_>, field: &'static str) -> Result<bool, ArtifactError> {
+    match decoder.byte()? {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(decoder.corrupt(field)),
+    }
 }
 
 fn encode_binding(binding: &TransactionBinding, output: &mut Encoder) -> Result<(), ArtifactError> {
@@ -964,6 +1204,25 @@ mod tests {
             diff,
             read_set,
             write_set,
+            review: ReviewEvidence {
+                intent: Some("create result".to_owned()),
+                metrics: RiskMetrics {
+                    touched_paths: 1,
+                    created_paths: 1,
+                    changed_bytes: 6,
+                    ..RiskMetrics::default()
+                },
+                effects: vec![EffectEvent {
+                    sequence: 1,
+                    origin: EffectOrigin::MontyOsCall,
+                    effect: Effect::Create {
+                        path: VPath::parse("result.txt").unwrap(),
+                        after: state,
+                    },
+                }],
+                complete: true,
+                truncated: false,
+            },
             receipt,
         }
     }
@@ -978,6 +1237,11 @@ mod tests {
         assert_eq!(decoded.diff, artifact.diff);
         assert_eq!(decoded.read_set, artifact.read_set);
         assert_eq!(decoded.write_set, artifact.write_set);
+        assert_eq!(decoded.review.intent, artifact.review.intent);
+        assert_eq!(decoded.review.metrics, artifact.review.metrics);
+        assert_eq!(decoded.review.effects, artifact.review.effects);
+        assert!(decoded.review.complete);
+        assert!(!decoded.review.truncated);
         assert_eq!(decoded.receipt.transaction, artifact.receipt.transaction);
         assert_eq!(decoded.receipt.changes, artifact.receipt.changes);
         assert_eq!(decoded.receipt.value, MontyObject::Int(42));
@@ -987,9 +1251,35 @@ mod tests {
     }
 
     #[test]
+    fn version_one_artifact_decodes_with_incomplete_review_evidence() {
+        let artifact = fixture();
+        let limits = ArtifactLimits::default();
+        let current = encode_pending(&artifact, limits).unwrap();
+
+        let mut binding = Encoder::new(limits.max_bytes);
+        encode_binding(&artifact.binding, &mut binding).unwrap();
+        let binding_len = binding.finish().len();
+        let mut review = Encoder::new(limits.max_bytes);
+        encode_review_evidence(&artifact.review, limits, &mut review).unwrap();
+        let review_len = review.finish().len();
+        let body = &current[ARTIFACT_MAGIC_V2.len()..];
+        let mut legacy = Vec::with_capacity(current.len() - review_len);
+        legacy.extend_from_slice(ARTIFACT_MAGIC_V1);
+        legacy.extend_from_slice(&body[..binding_len]);
+        legacy.extend_from_slice(&body[binding_len + review_len..]);
+
+        let decoded = decode_pending(&legacy, limits).unwrap();
+        assert_eq!(decoded.binding, artifact.binding);
+        assert!(!decoded.review.complete);
+        assert!(!decoded.review.truncated);
+        assert!(decoded.review.intent.is_none());
+        assert!(decoded.review.effects.is_empty());
+    }
+
+    #[test]
     fn pending_artifact_rejects_tampered_binding_and_trailing_bytes() {
         let mut bytes = encode_pending(&fixture(), ArtifactLimits::default()).unwrap();
-        bytes[ARTIFACT_MAGIC.len() + 32] ^= 0x80;
+        bytes[ARTIFACT_MAGIC_V2.len() + 32] ^= 0x80;
         assert!(matches!(
             decode_pending(&bytes, ArtifactLimits::default()),
             Err(ArtifactError::BindingMismatch)

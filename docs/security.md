@@ -64,5 +64,5 @@ VSH is not:
    before release.
 
 For attack assumptions, controls, security test families, and residual risk, read the
-full [threat model](rust-rewrite/THREAT_MODEL.md). The exact supported/non-supported
-promises are in [Guarantees](rust-rewrite/GUARANTEES.md).
+full [threat model](threat-model.md). The exact supported/non-supported promises are in
+[Guarantees](guarantees.md).

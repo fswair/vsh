@@ -1101,6 +1101,7 @@ const fn state_tag(state: TransactionState) -> u8 {
         TransactionState::Expired => 13,
         TransactionState::RecoveryRequired => 14,
         TransactionState::Failed => 15,
+        TransactionState::Rejected => 16,
         _ => 0,
     }
 }
@@ -1122,6 +1123,7 @@ const fn decode_state(tag: u8) -> Option<TransactionState> {
         13 => Some(TransactionState::Expired),
         14 => Some(TransactionState::RecoveryRequired),
         15 => Some(TransactionState::Failed),
+        16 => Some(TransactionState::Rejected),
         _ => None,
     }
 }

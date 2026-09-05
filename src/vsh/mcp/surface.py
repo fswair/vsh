@@ -4,14 +4,9 @@ from fastmcp import FastMCP
 
 from .native_tools import vsh_run
 
-__all__ = ("register_vsh_agent_surface", "register_vsh_surface")
+__all__ = ("register_vsh_surface",)
 
 
 def register_vsh_surface(mcp: FastMCP) -> None:
     """Register the single native VSH transaction tool."""
-    mcp.add_tool(vsh_run)
-
-
-def register_vsh_agent_surface(mcp: FastMCP) -> None:
-    """Register the same single-tool surface for agent runs."""
     mcp.add_tool(vsh_run)
