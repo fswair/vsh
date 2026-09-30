@@ -679,6 +679,27 @@ struct PyHookDecision {
 
 #[pymethods]
 impl PyHookDecision {
+    /// Inspect the proposed verdict without applying or committing it.
+    #[getter]
+    fn verdict(&self) -> &'static str {
+        match &self.inner {
+            vsh::HookDecision::FollowPolicy => "follow_policy",
+            vsh::HookDecision::Approve { .. } => "approve",
+            vsh::HookDecision::Review { .. } => "review",
+            vsh::HookDecision::Reject { .. } => "reject",
+        }
+    }
+
+    /// Return the handler's explanation, or an empty string for follow-policy.
+    #[getter]
+    fn reason(&self) -> &str {
+        match &self.inner {
+            vsh::HookDecision::FollowPolicy => "",
+            vsh::HookDecision::Approve { reason } | vsh::HookDecision::Reject { reason } => reason,
+            vsh::HookDecision::Review { feedback } => feedback,
+        }
+    }
+
     #[staticmethod]
     fn follow_policy() -> Self {
         Self {

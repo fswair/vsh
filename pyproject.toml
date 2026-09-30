@@ -23,7 +23,7 @@ mcp = ["fastmcp==3.4.7"]
 dev = [
     "basedpyright",
     "maturin==1.15.0",
-    "pydantic-ai-slim==2.40.0",
+    "pydantic-ai-slim==2.52.0",
     "pytest",
     "pytest-cov",
     "ruff",
@@ -32,14 +32,15 @@ dev = [
     "zensical==0.0.57",
 ]
 pydantic-ai = [
-    "pydantic-ai-slim==2.40.0",
+    "pydantic-ai-slim==2.52.0",
 ]
+typesafe = ["pydantic-ai-slim[typesafe]==2.52.0", "typesafe-sdk==0.7.2"]
 
 [dependency-groups]
 dev = [
     "basedpyright",
     "maturin==1.15.0",
-    "pydantic-ai-slim==2.40.0",
+    "pydantic-ai-slim==2.52.0",
     "pytest",
     "pytest-cov",
     "ruff",

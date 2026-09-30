@@ -23,7 +23,7 @@ from pydantic_ai.usage import UsageLimits
 from pydantic_core import to_jsonable_python
 
 from vsh import HookedRuntime, HookScope, RunMode, RunRequest, VshExecutionError, VshStaleError
-from vsh.pydantic_ai import CommitJudge, JudgeReport, VshCapability
+from vsh.pydantic_ai import CommitJudge, DecisionCommitJudge, JudgeReport, VshCapability
 
 
 @pytest.fixture(autouse=True)
@@ -56,7 +56,9 @@ def accepting_model(messages: list[ModelMessage], info: AgentInfo) -> ModelRespo
     return response(info, payload(messages))
 
 
-def hooked(workspace: Path, judge: CommitJudge, *, content_bytes: int = 65_536) -> HookedRuntime:
+def hooked(
+    workspace: Path, judge: CommitJudge | DecisionCommitJudge, *, content_bytes: int = 65_536
+) -> HookedRuntime:
     return HookedRuntime.open(
         workspace,
         policy="strict",
@@ -254,14 +256,19 @@ def test_inadequate_evidence_never_calls_model(tmp_path: Path, case: str, feedba
     assert result.hook is not None and feedback in result.hook.reason
 
 
-def test_hard_denied_and_default_auto_approved_work_never_calls_judge(tmp_path: Path) -> None:
+@pytest.mark.parametrize("judge_type", [CommitJudge, DecisionCommitJudge])
+def test_hard_denied_and_default_auto_approved_work_never_calls_judge(
+    tmp_path: Path, judge_type: type[CommitJudge] | type[DecisionCommitJudge]
+) -> None:
     def forbidden(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
         pytest.fail("judge must not run")
 
     cap = VshCapability(
         tmp_path,
-        hook_handler=CommitJudge(
-            FunctionModel(forbidden), content_filter=lambda _: True
+        hook_handler=judge_type(
+            FunctionModel(forbidden),
+            review_instructions="Review work within host policy",
+            content_filter=lambda _: True,
         ).hook_handler,
         review_content_bytes=1024,
     )
@@ -337,15 +344,34 @@ def test_cancellation_is_propagated_and_releases_judge_capacity(tmp_path: Path) 
     asyncio.run(scenario())
 
 
-def test_judge_approval_cannot_commit_changed_host_evidence(tmp_path: Path) -> None:
+@pytest.mark.parametrize("judge_type", [CommitJudge, DecisionCommitJudge])
+def test_judge_approval_cannot_commit_changed_host_evidence(
+    tmp_path: Path, judge_type: type[CommitJudge] | type[DecisionCommitJudge]
+) -> None:
     path = tmp_path / "config.txt"
     path.write_text("before")
 
     def alter(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         path.write_text("external edit")
+        if judge_type is DecisionCommitJudge:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        info.output_tools[0].name, {"decision": "approve", "concern": "none"}
+                    )
+                ],
+                provider_details={"confidence": {"decision": 1, "concern": 1}},
+            )
         return response(info, payload(messages))
 
-    runtime = hooked(tmp_path, CommitJudge(FunctionModel(alter), content_filter=lambda _: True))
+    runtime = hooked(
+        tmp_path,
+        judge_type(
+            FunctionModel(alter),
+            review_instructions="Allow config changes",
+            content_filter=lambda _: True,
+        ),
+    )
     preview = runtime.preview("vsh_write('/workspace/config.txt', 'after')")
     with pytest.raises(VshStaleError):
         asyncio.run(runtime.acommit(preview.transaction))
@@ -417,3 +443,255 @@ def test_service_configuration_example_commits_safe_change_and_returns_review() 
     assert safe["state"] == "committed"
     assert unsafe["state"] == "pending_approval"
     assert "Restore require_auth" in unsafe["feedback"]
+
+
+@pytest.mark.parametrize("threshold", [None, 0.9, 0.7])
+def test_macos_cleanup_fixture_check_never_calls_a_model_or_deletes_fixture_files(
+    threshold: float | None,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(root / "examples/native/jev_macos_cleanup.py"),
+            "--fixture-check",
+            *(["--minimum-confidence", str(threshold)] if threshold is not None else []),
+            "--repeats",
+            "2",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    rows = [json.loads(line) for line in result.stdout.splitlines()]
+    summary = rows[-1]["summary"]
+    assert summary["minimum_confidence"] == (0.69 if threshold is None else threshold)
+    assert len(rows) == 51
+    assert summary["judge_calls"] == summary["commit_calls"] == 0
+    assert summary["fixture_files_unchanged"] is True
+    assert summary["unexpected_paths"] == []
+    assert summary["runtime_bookkeeping"] == [".vsh-runtime/commit.lock"]
+    assert summary["verdicts"] == {"not_evaluated": 46, "native_deny": 4}
+    assert all(row["judge_called"] is False for row in rows[:-1])
+
+
+@pytest.mark.parametrize(
+    ("decision", "concern", "confidence", "expected"),
+    [
+        ("approve", "none", {"decision": 0.95, "concern": 0.95}, "committed"),
+        ("reject", "unsafe_change", {"decision": 1, "concern": 1}, "rejected"),
+        ("review", "scope_violation", {"decision": 1, "concern": 1}, "pending_approval"),
+        ("reject", "missing_context", {"decision": 1, "concern": 1}, "pending_approval"),
+        ("approve", "unsafe_change", {"decision": 1, "concern": 1}, "pending_approval"),
+        ("reject", "none", {"decision": 1, "concern": 1}, "pending_approval"),
+        ("approve", "none", None, "pending_approval"),
+        ("approve", "none", {}, "pending_approval"),
+        ("approve", "none", {"decision": 0.68, "concern": 1}, "pending_approval"),
+        ("approve", "none", {"decision": 1, "concern": 0.1}, "pending_approval"),
+        ("approve", "none", {"decision": True, "concern": 1}, "pending_approval"),
+        ("approve", "none", {"decision": "1", "concern": 1}, "pending_approval"),
+        ("approve", "none", {"decision": float("nan"), "concern": 1}, "pending_approval"),
+        ("approve", "none", {"decision": 1.1, "concern": 1}, "pending_approval"),
+        ("approve", "none", {"decision": 0.69, "concern": 0.69}, "committed"),
+        ("approve", "none", {"decision": 1, "concern": 0.68}, "pending_approval"),
+        ("approve", "none", {"decision": float("inf"), "concern": 1}, "pending_approval"),
+        ("approve", "none", {"decision": 1}, "pending_approval"),
+        ("review", "none", {"decision": 1, "concern": 1}, "pending_approval"),
+        ("reject", "sensitive_access", {"decision": 1, "concern": 1}, "rejected"),
+        ("approve", "missing_context", {"decision": 1, "concern": 1}, "pending_approval"),
+        ("invented_decision", "none", {"decision": 1, "concern": 1}, "pending_approval"),
+    ],
+)
+def test_decision_judge_requires_consistent_confident_evidence_based_verdict(
+    tmp_path: Path,
+    decision,
+    concern,
+    confidence,
+    expected,
+) -> None:
+    def classify(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        data = payload(messages)
+        assert data["changes"][0]["path"] == "config.txt"
+        assert [item["text"] for item in data["contents"]] == ["before", "after"]
+        assert data["effects"] and data["intent"]["text"] == "untrusted intent"
+        assert not info.function_tools
+        assert info.instructions is not None and "Host criteria" in info.instructions
+        return ModelResponse(
+            parts=[
+                ToolCallPart(info.output_tools[0].name, {"decision": decision, "concern": concern})
+            ],
+            provider_details={"confidence": confidence} if confidence is not None else None,
+        )
+
+    path = tmp_path / "config.txt"
+    path.write_text("before")
+    runtime = hooked(
+        tmp_path,
+        DecisionCommitJudge(
+            FunctionModel(classify),
+            review_instructions="Host criteria",
+            content_filter=lambda _: True,
+        ),
+    )
+    preview = runtime.preview(
+        "vsh_write('/workspace/config.txt', 'after')", intent="untrusted intent"
+    )
+    result = asyncio.run(runtime.acommit(preview.transaction))
+    assert result.receipt.state == expected
+    assert path.read_text() == ("after" if expected == "committed" else "before")
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"review_instructions": " "},
+        {"minimum_confidence": 0},
+        {"minimum_confidence": 1.1},
+        {"minimum_confidence": float("nan")},
+        {"timeout": 0},
+        {"timeout": float("inf")},
+        {"max_input_bytes": 0},
+        {"max_concurrency": 0},
+    ],
+)
+def test_decision_judge_validates_host_configuration(settings: dict[str, Any]) -> None:
+    options: dict[str, Any] = {"review_instructions": "Review changes", **settings}
+    with pytest.raises(ValueError):
+        DecisionCommitJudge(FunctionModel(accepting_model), **options)
+
+
+@pytest.mark.parametrize("threshold, expected", [(0.9, "pending_approval"), (0.6, "committed")])
+def test_decision_judge_explicit_threshold_overrides_default(
+    tmp_path: Path, threshold: float, expected: str
+) -> None:
+    def classify(_messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return ModelResponse(
+            parts=[
+                ToolCallPart(info.output_tools[0].name, {"decision": "approve", "concern": "none"})
+            ],
+            provider_details={"confidence": {"decision": 0.69, "concern": 0.69}},
+        )
+
+    runtime = hooked(
+        tmp_path,
+        DecisionCommitJudge(
+            FunctionModel(classify),
+            review_instructions="Allow creating config.txt",
+            content_filter=lambda path: path == "config.txt",
+            minimum_confidence=threshold,
+        ),
+    )
+    preview = runtime.preview("vsh_write('/workspace/config.txt', 'after')")
+    result = asyncio.run(runtime.acommit(preview.transaction))
+    assert result.receipt.state == expected
+    path = tmp_path / "config.txt"
+    if expected == "committed":
+        assert path.read_text() == "after"
+    else:
+        assert not path.exists()
+
+
+@pytest.mark.parametrize("failure", ["missing_evidence", "content_denied", "provider", "timeout"])
+def test_decision_judge_failure_keeps_host_unchanged(tmp_path: Path, failure: str) -> None:
+    async def fail(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+        if failure == "timeout":
+            await asyncio.Event().wait()
+        if failure in ("missing_evidence", "content_denied"):
+            pytest.fail("Evidence gate must run before the model")
+        raise RuntimeError("PRIVATE-API-KEY")
+
+    runtime = hooked(
+        tmp_path,
+        DecisionCommitJudge(
+            FunctionModel(fail),
+            review_instructions="Review changes",
+            content_filter=None if failure == "content_denied" else lambda _: True,
+            timeout=0.01 if failure == "timeout" else 30,
+        ),
+        content_bytes=0 if failure == "missing_evidence" else 1024,
+    )
+    preview = runtime.preview("vsh_write('/workspace/config.txt', 'after')")
+    result = asyncio.run(runtime.acommit(preview.transaction))
+    assert result.receipt.state == "pending_approval"
+    assert not (tmp_path / "config.txt").exists()
+    assert result.hook is not None and "PRIVATE-API-KEY" not in result.hook.reason
+
+
+def test_decision_judge_cancellation_releases_capacity(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def wait(_messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            entered.set()
+            await release.wait()
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        info.output_tools[0].name, {"decision": "approve", "concern": "none"}
+                    )
+                ],
+                provider_details={"confidence": {"decision": 1, "concern": 1}},
+            )
+
+        runtime = hooked(
+            tmp_path,
+            DecisionCommitJudge(
+                FunctionModel(wait),
+                review_instructions="Allow text files",
+                content_filter=lambda _: True,
+                max_concurrency=1,
+            ),
+        )
+        first = runtime.preview("vsh_write('/workspace/first.txt', 'first')")
+        task = asyncio.create_task(runtime.acommit(first.transaction))
+        await entered.wait()
+        second = runtime.preview("vsh_write('/workspace/second.txt', 'second')")
+        overflow = await runtime.acommit(second.transaction)
+        assert overflow.hook is not None and "capacity" in overflow.hook.reason
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        result = await runtime.acommit(first.transaction)
+        assert result.receipt.state == "committed"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("decision", ["review", "reject"])
+def test_decision_judge_withholds_sensitive_read_from_main_agent(
+    tmp_path: Path, decision: str
+) -> None:
+    (tmp_path / "customer.txt").write_text("SYNTHETIC PRIVATE CONTENT")
+
+    def classify(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        data = payload(messages)
+        assert data["changes"] == []
+        assert data["effects"]
+        assert any(row["text"] == "SYNTHETIC PRIVATE CONTENT" for row in data["contents"])
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    info.output_tools[0].name, {"decision": decision, "concern": "sensitive_access"}
+                )
+            ],
+            provider_details={"confidence": {"decision": 1, "concern": 1}},
+        )
+
+    capability = VshCapability(
+        tmp_path,
+        hook_handler=DecisionCommitJudge(
+            FunctionModel(classify),
+            review_instructions="Do not expose customer data",
+            content_filter=lambda path: path == "customer.txt",
+        ).hook_handler,
+        hook_scope=HookScope.ALL_REQUESTS,
+        review_content_bytes=1024,
+    )
+    result = asyncio.run(capability.vsh_read("/workspace/customer.txt"))
+    assert result.state == ("rejected" if decision == "reject" else "pending_approval")
+    assert result.result is None
+    assert result.feedback and "sensitive data" in result.feedback
+    assert "SYNTHETIC PRIVATE CONTENT" not in json.dumps(to_jsonable_python(result))

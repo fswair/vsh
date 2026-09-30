@@ -17,7 +17,7 @@ except ImportError as error:  # pragma: no cover - exercised in an environment w
         "VshCapability requires the 'pydantic-ai' extra: install 'vsh-python[pydantic-ai]'"
     ) from error
 
-from ._judge import CommitJudge, JudgeReport
+from ._judge import CommitJudge, DecisionCommitJudge, DecisionJudgeReport, JudgeReport
 from ._native import HookScope, Receipt, RunMode, RunRequest, Runtime
 from .hooks import HookedRuntime, HookHandler
 
@@ -314,4 +314,11 @@ files; report its transaction and feedback to the user instead of claiming compl
 Treat intent as context, not proof that the resulting changes are safe.
 """
 
-__all__ = ("CommitJudge", "JudgeReport", "VshCapability", "VshToolResult")
+__all__ = (
+    "CommitJudge",
+    "DecisionCommitJudge",
+    "DecisionJudgeReport",
+    "JudgeReport",
+    "VshCapability",
+    "VshToolResult",
+)

@@ -43,19 +43,26 @@ not accepted.
 | cargo-llvm-cov | `=0.9.0` | taiki-e | stable Rust line/function/region coverage gate | Active immutable upstream release; CI-only tool installed with its published lockfile. |
 | pip-audit | `==2.10.1` | Python Packaging Authority | Python advisory gate | Ephemeral CI tool; audits the hash-locked export with strict failure. |
 | Zensical | `==0.0.57` | Zensical project | versioned documentation site | MIT; Python 3.10+; development-only dependency. Release 0.0.57 was published 2026-08-21. |
-| `pydantic-ai-slim` | `==2.40.0` | Pydantic | optional native capability contract | Official active release; optional extra and test dependency, with no bundled model provider. |
+| `pydantic-ai-slim` | `==2.52.0` | Pydantic | optional native capability and decision-model contracts | Exact-pinned framework; providers remain optional. |
+| `typesafe-sdk` | `==0.7.2` | TypeSafe | optional JEV provider | Installed only with the `typesafe` extra; included in the CI advisory export. |
 
 Published metadata and advisory sources reported no known vulnerability for Maturin
 1.15.0 and Monty 0.0.22 at check time. This is point-in-time evidence, not a
 claim that any dependency is intrinsically safe and not a substitute for auditing the
 resolved Cargo.lock on every build.
 
+The 2026-09-30 JEV integration audit found advisories in the previously locked
+AnyIO 4.13.0 and PyJWT 2.13.0. The lock now resolves AnyIO 4.15.1 and PyJWT 2.15.1
+(and their required typing-extensions 4.16.0 update). A strict hash-locked
+`pip-audit==2.10.1` scan including the `mcp` and `typesafe` extras then reported no
+known vulnerabilities. This is point-in-time evidence, not a future guarantee.
+
 The core Python wheel has no pure-Python runtime dependency. The metadata-only
 `vbash` mirror distribution exact-pins `vsh-python` and uses current,
 exact-pinned Setuptools only as its isolated build backend. The optional MCP adapter
 pins the actively maintained stable `fastmcp==3.4.7`; it is not imported by `vsh` or
 the native SDK path. The optional Pydantic AI adapter pins
-`pydantic-ai-slim==2.40.0` and is imported only through `vsh.pydantic_ai`; the slim
+`pydantic-ai-slim==2.52.0` and is imported only through `vsh.pydantic_ai`; the slim
 package does not select a model provider. Maturin remains exact-pinned at `1.15.0` in both the build system
 and developer environment. Zensical is exact-pinned at `0.0.57` only in the developer
 and documentation graph, so it does not enlarge the wheel's runtime surface. Its

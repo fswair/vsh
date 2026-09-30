@@ -31,7 +31,7 @@ imports remain under `vsh`.
 uv add "vsh-python[pydantic-ai]"
 ```
 
-The extra pins `pydantic-ai-slim==2.40.0`. Install the provider package required by
+The extra pins `pydantic-ai-slim==2.52.0`. Install the provider package required by
 your model separately and configure its credentials through that provider. Importing
 base `vsh` does not load Pydantic AI; only `vsh.pydantic_ai` requires the extra.
 

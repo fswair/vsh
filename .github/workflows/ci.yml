@@ -32,7 +32,7 @@ jobs:
           version: "0.12.1"
       - run: uv sync --frozen --all-groups --extra mcp
       - run: >-
-          uv export --quiet --frozen --all-groups --extra mcp
+          uv export --quiet --frozen --all-groups --extra mcp --extra typesafe
           --no-emit-project
           --output-file /tmp/vsh-audit-requirements.txt
       - run: >-

@@ -77,6 +77,13 @@ Review feedback is returned in `CommitResolution.hook.reason`, while the lifecyc
 state remains `pending_approval`. A main agent, human, or another authenticated
 reviewer can then decide how to proceed.
 
+In the development checkout, `HookDecision.verdict` and `HookDecision.reason` are
+read-only properties. They let you inspect a handler's proposal without applying
+it; `follow_policy()` has an empty reason. Calling a handler directly does not
+commit anything. For a dry-run evaluation, obtain the immutable event with
+`Runtime.prepare_commit(preview.transaction)`, call the handler with that event,
+inspect its decision, and discard the preview without calling `resolve_commit`.
+
 Handler exceptions, cancellation, wrong return types, and sync calls that receive an
 awaitable fail closed. An auto-approved transaction becomes `pending_approval`; host
 files remain unchanged.

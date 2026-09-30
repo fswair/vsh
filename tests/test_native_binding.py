@@ -35,6 +35,25 @@ def test_native_exception_hierarchy_has_one_catchable_base() -> None:
 
 
 @pytest.mark.parametrize(
+    ("decision", "verdict", "reason"),
+    [
+        (vsh.HookDecision.follow_policy(), "follow_policy", ""),
+        (vsh.HookDecision.approve("Expected change"), "approve", "Expected change"),
+        (vsh.HookDecision.review("Need evidence"), "review", "Need evidence"),
+        (vsh.HookDecision.reject("Unsafe change"), "reject", "Unsafe change"),
+    ],
+)
+def test_hook_decisions_can_be_inspected_without_committing(
+    decision: vsh.HookDecision, verdict: str, reason: str
+) -> None:
+    assert decision.verdict == verdict
+    assert decision.reason == reason
+    for attribute in ("verdict", "reason"):
+        with pytest.raises(AttributeError):
+            setattr(decision, attribute, "overwritten")
+
+
+@pytest.mark.parametrize(
     ("raw", "normalized"),
     [
         (".", "."),
