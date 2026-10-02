@@ -6,11 +6,33 @@ import importlib
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
 
-from vsh import HookDecision, HookScope, RequestEvent
+from vsh import BashConfig, HookDecision, HookScope, RequestEvent
 from vsh.pydantic_ai import VshCapability
+
+
+@pytest.mark.parametrize("bash_enabled", [False, True])
+def test_agent_receives_language_specific_capability_instructions(tmp_path, bash_enabled) -> None:
+    capability = VshCapability(tmp_path, bash=BashConfig() if bash_enabled else None)
+
+    def answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        assert info.instructions is not None
+        assert "For language='monty' (the default)" in info.instructions
+        assert "If the host enables language='bash', pass bounded shell source" in info.instructions
+        tool = next(tool for tool in info.function_tools if tool.name == "vsh_run")
+        assert tool.parameters_json_schema["properties"]["language"]["enum"] == (
+            ["monty", "bash"] if bash_enabled else ["monty"]
+        )
+        return ModelResponse(parts=[TextPart("instructions verified")])
+
+    agent = Agent(FunctionModel(answer), capabilities=[capability])
+    assert (
+        agent.run_sync("Describe the enabled execution surface.").output == "instructions verified"
+    )
 
 
 def test_capability_exposes_native_vsh_filesystem_toolset(tmp_path) -> None:
@@ -173,3 +195,47 @@ def test_capability_rejects_non_json_native_result() -> None:
 
     with pytest.raises(TypeError, match="cannot be sent to Pydantic AI"):
         normalize(object())
+
+
+def test_bash_capability_opt_in_bytes_and_review_output_gate(tmp_path) -> None:
+    (tmp_path / "binary.bin").write_bytes(b"\xff\x00")
+    disabled = VshCapability(tmp_path)
+    disabled_tools = disabled.get_toolset()
+    assert isinstance(disabled_tools, FunctionToolset)
+    assert disabled_tools.tools["vsh_run"].function_schema.json_schema["properties"]["language"][
+        "enum"
+    ] == ["monty"]
+    with pytest.raises(ValueError, match="not enabled"):
+        asyncio.run(disabled.vsh_run("true", "test host authorization", language="bash"))
+
+    enabled = VshCapability(tmp_path, bash=BashConfig())
+    enabled_tools = enabled.get_toolset()
+    assert isinstance(enabled_tools, FunctionToolset)
+    assert enabled_tools.tools["vsh_run"].function_schema.json_schema["properties"]["language"][
+        "enum"
+    ] == ["monty", "bash"]
+    result = asyncio.run(
+        enabled.vsh_run(
+            "cat binary.bin; printf ok > result.txt", "write a verified result", language="bash"
+        )
+    )
+    assert result.state == "committed" and result.language == "bash"
+    assert result.result == {
+        "exit_code": 0,
+        "profile": "vsh-bash-bounded-v4",
+        "stdout": {"encoding": "base64", "data": "/wA="},
+        "stderr": {"encoding": "base64", "data": ""},
+    }
+    assert (tmp_path / "result.txt").read_text() == "ok"
+
+    reviewed = VshCapability(
+        tmp_path,
+        bash=BashConfig(),
+        hook_handler=lambda _event: HookDecision.review("verify recipient"),
+        hook_scope=HookScope.ALL_REQUESTS,
+    )
+    withheld = asyncio.run(
+        reviewed.vsh_run("cat binary.bin; printf sensitive >&2", "inspect a file", language="bash")
+    )
+    assert withheld.state == "pending_approval" and withheld.feedback == "verify recipient"
+    assert withheld.result is None and withheld.stdout == "" and withheld.stderr == ""

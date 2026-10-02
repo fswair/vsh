@@ -70,6 +70,28 @@ fn engine(config: InProcessConfig) -> SubprocessMonty {
 }
 
 #[test]
+fn active_evidence_failure_retires_worker_and_never_seals_caught_partial_execution() {
+    let limits = ExecutionLimits {
+        max_evidence_records: 8,
+        ..ExecutionLimits::default()
+    };
+    let engine = engine(InProcessConfig::default().with_limits(limits));
+    let (_directory, mut filesystem) = make_filesystem(&[]);
+    let error = engine.execute("from pathlib import Path\nPath('/workspace/partial.txt').write_text('virtual only')\nfor i in range(20):\n    try:\n        Path('/workspace/missing').stat()\n    except OSError:\n        pass\n'done'", &mut filesystem).unwrap_err();
+    assert!(
+        matches!(error, ExecutionError::Limit(source) if matches!(*source, ExecutionLimitExceeded::EvidenceRecords { .. }))
+    );
+    assert!(filesystem.canonical_diff().is_err());
+    assert!(!filesystem.write_set().is_empty());
+    assert!(engine.execute("42", &mut filesystem).is_err());
+    let (_fresh_directory, mut fresh) = make_filesystem(&[]);
+    assert_eq!(
+        engine.execute("6 * 7", &mut fresh).unwrap().value,
+        MontyObject::Int(42)
+    );
+}
+
+#[test]
 fn typed_vfs_execution_is_exact_and_clean_worker_is_reused() {
     let engine = engine(InProcessConfig::default());
     let (_directory, mut filesystem) = make_filesystem(&[("input.txt", b"hello\n")]);
@@ -207,7 +229,7 @@ len(value)
         receipt.decision,
         vsh::RuntimeDecision::AutoApproved
     ));
-    assert_eq!(receipt.value, MontyObject::Int(6));
+    assert_eq!(receipt.output.monty_value(), Some(&MontyObject::Int(6)));
     assert_eq!(
         fs::read(directory.path().join("output.txt")).unwrap(),
         b"HELLO\n"

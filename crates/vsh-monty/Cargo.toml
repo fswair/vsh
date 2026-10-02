@@ -18,9 +18,13 @@ get-size2.workspace = true
 monty.workspace = true
 monty-proto.workspace = true
 monty-types.workspace = true
+vsh-execution.workspace = true
 vsh-policy.workspace = true
 vsh-types.workspace = true
 vsh-vfs.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
 
 [dev-dependencies]
 vsh-store.workspace = true

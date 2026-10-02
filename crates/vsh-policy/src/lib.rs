@@ -16,7 +16,7 @@ use vsh_types::{
 use vsh_vfs::{CanonicalDiff, Effect, EffectEvent, ReadObservation, WritePrecondition};
 
 /// Version of the canonical deterministic-policy encoding.
-pub const POLICY_SCHEMA_VERSION: &str = "vsh-policy-v1";
+pub const POLICY_SCHEMA_VERSION: &str = "vsh-policy-v3";
 
 /// Secret-like paths denied by the default call policy for every access kind.
 pub const DEFAULT_SECRET_PATTERNS: &[&str] = &[
@@ -198,7 +198,7 @@ impl Error for PatternError {}
 struct PathPattern {
     source: String,
     basename_only: bool,
-    components: Vec<String>,
+    components: Vec<ComponentPattern>,
 }
 
 impl PathPattern {
@@ -231,7 +231,7 @@ impl PathPattern {
             if component.contains("**") && component != "**" {
                 return Err(PatternError::InvalidGlobstar);
             }
-            components.push(component.to_owned());
+            components.push(ComponentPattern::compile(component.to_owned()));
         }
         if components.is_empty() {
             return Err(PatternError::Empty);
@@ -239,28 +239,65 @@ impl PathPattern {
         Ok(Self {
             // Any leading globstars can absorb the entire parent path, so
             // **/*.key has exactly the same basename semantics as *.key.
-            basename_only: components.last().is_some_and(|part| part != "**")
+            basename_only: components.last().is_some_and(|part| part.source != "**")
                 && components[..components.len() - 1]
                     .iter()
-                    .all(|part| part == "**"),
+                    .all(|part| part.source == "**"),
             source,
             components,
         })
     }
 
-    fn matches(&self, path: &VPath) -> bool {
+    fn matches(&self, path: &VPath, basename: Option<&str>) -> bool {
         if self.basename_only {
-            return path.file_name().is_some_and(|name| {
-                component_matches(
-                    self.components.last().expect("compiled non-empty pattern"),
-                    name,
-                )
+            return basename.is_some_and(|name| {
+                self.components
+                    .last()
+                    .expect("compiled non-empty pattern")
+                    .matches(name)
             });
         }
         path_components_match(
             &self.components,
             if path.is_root() { "" } else { path.as_str() },
         )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ComponentPattern {
+    source: String,
+    shape: ComponentShape,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ComponentShape {
+    Literal,
+    SingleStar(usize),
+    MultipleStars,
+}
+
+impl ComponentPattern {
+    fn compile(source: String) -> Self {
+        let shape = match source.find('*') {
+            None => ComponentShape::Literal,
+            Some(index) if !source[index + 1..].contains('*') => ComponentShape::SingleStar(index),
+            Some(_) => ComponentShape::MultipleStars,
+        };
+        Self { source, shape }
+    }
+
+    fn matches(&self, value: &str) -> bool {
+        match self.shape {
+            ComponentShape::Literal => self.source == value,
+            ComponentShape::SingleStar(index) => {
+                // Literal ends must not overlap: ab*bc cannot match abc.
+                value.len() >= self.source.len() - 1
+                    && value.starts_with(&self.source[..index])
+                    && value.ends_with(&self.source[index + 1..])
+            }
+            ComponentShape::MultipleStars => component_matches(&self.source, value),
+        }
     }
 }
 
@@ -271,13 +308,15 @@ fn component_matches(pattern: &str, value: &str) -> bool {
     let (mut last_star, mut star_value_index) = (None, 0);
 
     while value_index < value.len() {
-        if pattern_index < pattern.len() && pattern[pattern_index] == value[value_index] {
-            pattern_index += 1;
-            value_index += 1;
-        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+        // A pattern star is always a wildcard, including when the filename
+        // contains a literal star. Matching it as a literal loses the retry point.
+        if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
             last_star = Some(pattern_index);
             pattern_index += 1;
             star_value_index = value_index;
+        } else if pattern_index < pattern.len() && pattern[pattern_index] == value[value_index] {
+            pattern_index += 1;
+            value_index += 1;
         } else if let Some(star) = last_star {
             star_value_index += 1;
             value_index = star_value_index;
@@ -292,7 +331,7 @@ fn component_matches(pattern: &str, value: &str) -> bool {
     pattern_index == pattern.len()
 }
 
-fn path_components_match(pattern: &[String], path: &str) -> bool {
+fn path_components_match(pattern: &[ComponentPattern], path: &str) -> bool {
     // A globstar consumes zero or more whole components. Only the most recent
     // globstar needs a retry point: an earlier one cannot help once a later one
     // has matched. Cloneable string cursors avoid per-rule heap allocations and
@@ -301,7 +340,10 @@ fn path_components_match(pattern: &[String], path: &str) -> bool {
     let mut pattern_index = 0;
     let mut retry = None;
     while let Some(value) = remaining.clone().next() {
-        if pattern.get(pattern_index).is_some_and(|part| part == "**") {
+        if pattern
+            .get(pattern_index)
+            .is_some_and(|part| part.source == "**")
+        {
             pattern_index += 1;
             if pattern_index == pattern.len() {
                 return true;
@@ -309,7 +351,7 @@ fn path_components_match(pattern: &[String], path: &str) -> bool {
             retry = Some((pattern_index, remaining.clone()));
         } else if pattern
             .get(pattern_index)
-            .is_some_and(|part| component_matches(part, value))
+            .is_some_and(|part| part.matches(value))
         {
             pattern_index += 1;
             remaining.next();
@@ -321,7 +363,9 @@ fn path_components_match(pattern: &[String], path: &str) -> bool {
             return false;
         }
     }
-    pattern[pattern_index..].iter().all(|part| part == "**")
+    pattern[pattern_index..]
+        .iter()
+        .all(|part| part.source == "**")
 }
 
 /// One canonical protected-path rule.
@@ -426,8 +470,9 @@ impl CallPolicy {
     ///
     /// Returns the matching [`DeniedAccess`] when the requested capability is protected.
     pub fn authorize(&self, path: &VPath, access: AccessKind) -> Result<(), DeniedAccess> {
+        let basename = path.file_name();
         for rule in &self.rules {
-            if rule.denied.contains(access) && rule.pattern.matches(path) {
+            if rule.denied.contains(access) && rule.pattern.matches(path, basename) {
                 return Err(DeniedAccess {
                     path: path.clone(),
                     access,
@@ -656,7 +701,13 @@ impl TransactionPolicy {
             return PolicyDecision::AutoApprove;
         }
 
-        let flags = self.risk_flags(metrics);
+        let mut flags = self.risk_flags(metrics);
+        if input.diff.entries().iter().any(|entry| {
+            matches!((entry.before, entry.after), (Some(before), Some(after))
+                if before.kind() == after.kind() && before.mode() != after.mode())
+        }) {
+            flags.insert(RiskFlag::PermissionChange);
+        }
         if flags.is_empty() {
             PolicyDecision::AutoApprove
         } else {
@@ -872,12 +923,14 @@ impl RiskMetrics {
                 DiffKind::Delete => metrics.deleted_paths += 1,
                 DiffKind::Modify | DiffKind::MetadataChange => metrics.modified_paths += 1,
             }
-            metrics.changed_bytes = metrics
-                .changed_bytes
-                .saturating_add(entry.before.map_or(0, NodeState::size))
-                .saturating_add(entry.after.map_or(0, NodeState::size));
-            let before_executable = entry.before.is_some_and(|state| state.mode() & 0o111 != 0);
-            let after_executable = entry.after.is_some_and(|state| state.mode() & 0o111 != 0);
+            if entry.kind != DiffKind::MetadataChange {
+                metrics.changed_bytes = metrics
+                    .changed_bytes
+                    .saturating_add(entry.before.map_or(0, NodeState::size))
+                    .saturating_add(entry.after.map_or(0, NodeState::size));
+            }
+            let before_executable = entry.before.map_or(0, |state| state.mode() & 0o111);
+            let after_executable = entry.after.map_or(0, |state| state.mode() & 0o111);
             if before_executable != after_executable {
                 metrics.executable_changes += 1;
             }
@@ -958,6 +1011,8 @@ pub enum RiskFlag {
     LargeTouchedSet,
     /// Changed-byte escalation threshold was reached.
     LargeByteChange,
+    /// Final permission bits changed on an existing file or directory.
+    PermissionChange,
 }
 
 /// Deterministic denial payload.
@@ -1065,6 +1120,7 @@ pub fn bind_transaction(input: TransactionIdentityInput<'_>) -> TransactionBindi
         policy: input.policy.digest(),
         runtime_config: input.runtime_config,
         intent: input.intent.map(IntentDigest::digest_text),
+        execution_evidence: None,
     }
 }
 
@@ -1156,6 +1212,53 @@ mod tests {
     }
 
     #[test]
+    fn component_matching_agrees_with_independent_byte_dynamic_programming() {
+        let mut patterns = vec![String::new()];
+        let mut values = vec![String::new()];
+        for _ in 0..4 {
+            patterns = std::iter::once(String::new())
+                .chain(patterns.iter().flat_map(|prefix| {
+                    ["a", "b", "é", "*"].map(|suffix| format!("{prefix}{suffix}"))
+                }))
+                .collect();
+            values = std::iter::once(String::new())
+                .chain(values.iter().flat_map(|prefix| {
+                    ["a", "b", "é", "*"].map(|suffix| format!("{prefix}{suffix}"))
+                }))
+                .collect();
+        }
+        for pattern in &patterns {
+            let compiled = ComponentPattern::compile(pattern.clone());
+            for value in &values {
+                let mut previous = vec![false; value.len() + 1];
+                previous[0] = true;
+                for literal in pattern.bytes() {
+                    let mut current = vec![false; value.len() + 1];
+                    current[0] = literal == b'*' && previous[0];
+                    for (index, byte) in value.bytes().enumerate() {
+                        current[index + 1] = if literal == b'*' {
+                            previous[index + 1] || current[index]
+                        } else {
+                            previous[index] && literal == byte
+                        };
+                    }
+                    previous = current;
+                }
+                assert_eq!(
+                    compiled.matches(value),
+                    previous[value.len()],
+                    "pattern {pattern:?}, value {value:?}"
+                );
+                assert_eq!(
+                    component_matches(pattern, value),
+                    previous[value.len()],
+                    "general matcher: pattern {pattern:?}, value {value:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn cursor_globstar_matches_dynamic_programming_oracle() {
         fn sequences<'a>(alphabet: &[&'a str], depth: usize) -> Vec<Vec<&'a str>> {
             let mut sequences = vec![Vec::new()];
@@ -1200,14 +1303,19 @@ mod tests {
             previous[path.len()]
         }
 
-        let paths = sequences(&["a", "b", "é"], 4);
+        let paths = sequences(&["a", "b", "é", "**"], 4);
         for components in sequences(&["a", "b", "*", "a*", "**"], 4) {
             let pattern: Vec<String> = components.iter().map(ToString::to_string).collect();
+            let compiled_components: Vec<_> = pattern
+                .iter()
+                .cloned()
+                .map(ComponentPattern::compile)
+                .collect();
             let compiled = (!components.is_empty())
                 .then(|| PathPattern::compile(components.join("/")).unwrap());
             for path in &paths {
                 assert_eq!(
-                    path_components_match(&pattern, &path.join("/")),
+                    path_components_match(&compiled_components, &path.join("/")),
                     oracle(&pattern, path),
                     "pattern {pattern:?}, path {path:?}"
                 );
@@ -1221,7 +1329,7 @@ mod tests {
                     let virtual_path =
                         VPath::parse(&path.join("/")).unwrap_or_else(|_| VPath::root());
                     assert_eq!(
-                        compiled.matches(&virtual_path),
+                        compiled.matches(&virtual_path, virtual_path.file_name()),
                         expected,
                         "{pattern:?} {path:?}"
                     );
@@ -1229,8 +1337,14 @@ mod tests {
             }
         }
         let deep = vec!["a"; 4096].join("/");
-        assert!(path_components_match(&["**".into(), "a".into()], &deep));
-        assert!(!path_components_match(&["**".into(), "b".into()], &deep));
+        assert!(path_components_match(
+            &["**", "a"].map(|part| ComponentPattern::compile(part.into())),
+            &deep
+        ));
+        assert!(!path_components_match(
+            &["**", "b"].map(|part| ComponentPattern::compile(part.into())),
+            &deep
+        ));
     }
 
     #[test]
@@ -1248,13 +1362,77 @@ mod tests {
             ("**/a/**/b", "a/x/a/y/c", false),
             ("*.key", "a/private.key", true),
             ("a/*", "a/b/c", false),
+            ("*", "**", true),
+            ("*.key", "*.key.key", true),
+            ("*a*b", "*a*a*b", true),
+            ("*a*b", "*a*a*c", false),
         ] {
+            let virtual_path = VPath::parse(path).unwrap();
             assert_eq!(
                 PathPattern::compile(pattern)
                     .unwrap()
-                    .matches(&VPath::parse(path).unwrap()),
+                    .matches(&virtual_path, virtual_path.file_name()),
                 expected,
                 "pattern {pattern}, path {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn corrected_wildcard_semantics_have_a_new_policy_identity() {
+        let policy = TransactionPolicy::default();
+        let thresholds = policy.thresholds();
+        // Reconstruct the former encoding independently: pending approvals made
+        // under its different wildcard semantics must never share today's digest.
+        let mut legacy = Vec::new();
+        encode_bytes(b"vsh-policy-v2", &mut legacy);
+        legacy.push(policy.profile().tag());
+        for value in [
+            thresholds.escalate_touched_paths as u64,
+            thresholds.escalate_changed_bytes,
+            thresholds.deny_touched_paths as u64,
+            thresholds.deny_changed_bytes,
+            thresholds.deny_deleted_paths as u64,
+            thresholds.delete_ratio_minimum_paths as u64,
+        ] {
+            legacy.extend_from_slice(&value.to_le_bytes());
+        }
+        legacy.extend_from_slice(&thresholds.deny_delete_ratio_bps.to_le_bytes());
+        policy.call_policy().encode_canonical(&mut legacy);
+        assert_ne!(policy.digest(), PolicyDigest::digest_canonical(&legacy));
+        assert_eq!(POLICY_SCHEMA_VERSION, "vsh-policy-v3");
+    }
+
+    #[test]
+    fn literal_star_filenames_cannot_bypass_protected_capabilities() {
+        let policy = CallPolicy::default();
+        for path in [
+            "*.key.key",
+            "nested/*.key.key",
+            ".env.**",
+            "nested/.env.**/token",
+        ] {
+            let path = VPath::parse(path).unwrap();
+            for access in [
+                AccessKind::MetadataRead,
+                AccessKind::ContentRead,
+                AccessKind::DirectoryRead,
+                AccessKind::Create,
+                AccessKind::Modify,
+                AccessKind::Delete,
+                AccessKind::RenameSource,
+                AccessKind::RenameDestination,
+            ] {
+                let denied = policy.authorize(&path, access).unwrap_err();
+                assert_eq!(denied.path, path);
+                assert_eq!(denied.access, access);
+            }
+        }
+        for path in ["nested/public**.txt", "env.**", "public.key.txt"] {
+            assert!(
+                policy
+                    .authorize(&VPath::parse(path).unwrap(), AccessKind::ContentRead)
+                    .is_ok()
             );
         }
     }
@@ -1349,6 +1527,37 @@ mod tests {
             panic!("strict mutation should escalate")
         };
         assert_eq!(manifest.flags, vec![RiskFlag::Mutation]);
+    }
+
+    #[test]
+    fn final_permission_changes_require_review_without_charging_unchanged_content() {
+        let (_guard, mut filesystem) = filesystem(&[("input.txt", b"one")]);
+        let path = VPath::parse("input.txt").unwrap();
+        filesystem.set_mode(&path, 0o600).unwrap();
+        let diff = filesystem.canonical_diff().unwrap();
+        let decision = TransactionPolicy::default().evaluate(PolicyInput {
+            diff: &diff,
+            effects: filesystem.effects(),
+            denied_accesses: &[],
+            base_node_count: 2,
+        });
+        let PolicyDecision::Escalate(manifest) = decision else {
+            panic!("meaningful permission changes need review")
+        };
+        assert!(manifest.flags.contains(&RiskFlag::PermissionChange));
+        assert!(!manifest.flags.contains(&RiskFlag::ExecutableChange));
+        assert_eq!(manifest.metrics.changed_bytes, 0);
+        filesystem.set_mode(&path, 0o644).unwrap();
+        let diff = filesystem.canonical_diff().unwrap();
+        assert_eq!(
+            TransactionPolicy::default().evaluate(PolicyInput {
+                diff: &diff,
+                effects: filesystem.effects(),
+                denied_accesses: &[],
+                base_node_count: 2,
+            }),
+            PolicyDecision::AutoApprove
+        );
     }
 
     #[test]

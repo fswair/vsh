@@ -405,6 +405,13 @@ def _render_evidence(
         },
         "intent": {"ref": "intent", "text": event.intent, "digest": event.intent_digest},
         "execution": {
+            "language": "bash" if event.execution_context.profile is not None else "monty",
+            "profile": event.execution_context.profile,
+            "exit_code": event.execution_context.exit_code,
+            "complete": event.execution_context.complete,
+            "evidence_digest": event.execution_context.evidence,
+            "stdout_bytes": event.execution_context.stdout_bytes,
+            "stderr_bytes": event.execution_context.stderr_bytes,
             "os_calls": event.os_calls,
             "read_bytes": event.read_bytes,
             "write_bytes": event.write_bytes,

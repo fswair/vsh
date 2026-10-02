@@ -4,6 +4,36 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in bounded Bash execution through a separate Bashkit worker, with a shared
+  policy-aware filesystem gateway, binary-safe output, explicit language selection,
+  cancellation and bounded execution evidence. Rust, Python, CLI, MCP and Pydantic AI
+  surfaces retain the same preview/review/commit workflow. See the Bash guide for
+  supported commands, Unix-only availability and intentionally unsupported features.
+- Virtual permission changes and opaque symlinks with canonical diffs, policy
+  review, stale revalidation and durable commit/recovery support.
+
+### Fixed
+
+- Protected wildcard rules now match filenames containing literal `*` characters.
+  The policy digest advances to v3; approval, preparation, hook resolution and direct
+  commit reject artifacts evaluated under a different policy. Create a fresh preview
+  after upgrading. Recovery of already-entered durable commits remains available.
+
+### Changed
+
+- Canonical diffs borrow candidate paths, avoid repeated expansion of nested deletion
+  tombstones and avoid temporary node/path clones. Lazy materialization, metrics and
+  canonical ordering are preserved.
+- Durable state records use one framed write instead of three, preserving their
+  existing bytes, checksums, bounds, locks and synchronization guarantees.
+- Existing blob directories are inspected before creation, avoiding redundant
+  `mkdir` calls while preserving no-follow and opened/named identity checks.
+- Documented a scoped stable-integration performance exception: delete-5K p95
+  regressed 5.74% against the pre-Bash reference, beyond the unchanged 5% target;
+  its median improved 3.44%. Earlier unfavorable measurements remain documented.
+
 ## [0.5.0] - 2026-09-06
 
 ### Added

@@ -20,6 +20,8 @@ wildcards = "deny"
 highlight = "all"
 skip = [
     { crate = "getrandom@0.2.17", reason = "Monty/Ruff's Unicode name generator still uses rand 0.8; runtime ahash uses getrandom 0.3" },
+    { crate = "getrandom@0.3.4", reason = "Monty 0.0.22/ahash require 0.3 while the isolated Bashkit 0.18.2 worker uses 0.4; host and worker production graphs stay separate" },
+    { crate = "fancy-regex@0.17.0", reason = "Monty 0.0.22 requires 0.17 while the isolated Bashkit 0.18.2 worker requires 0.19; these are incompatible upstream minor APIs, not replaceable pins" },
     { crate = "hashbrown@0.16.1", reason = "Monty 0.0.22 directly uses 0.16 while its Ruff/get-size graph uses 0.17" },
     { crate = "itertools@0.14.0", reason = "Monty 0.0.22 directly pins 0.14 while its Ruff 0.0.9 parser uses 0.15" },
     { crate = "syn@2.0.119", reason = "Monty/PyO3 proc macros use syn 2 while current serde/ICU derives use syn 3" },
@@ -48,3 +50,7 @@ allow = [
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+
+[[licenses.exceptions]]
+crate = "libbz2-rs-sys@0.2.5"
+allow = ["bzip2-1.0.6"]

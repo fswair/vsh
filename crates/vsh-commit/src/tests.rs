@@ -79,6 +79,7 @@ fn binding(vfs: &VirtualFs, diff: &CanonicalDiff) -> TransactionBinding {
         policy: PolicyDigest::digest_canonical(b"test-policy"),
         runtime_config: RuntimeConfigDigest::digest_canonical(b"test-runtime"),
         intent: None,
+        execution_evidence: None,
     }
 }
 
@@ -138,7 +139,7 @@ fn snapshot_is_lazy_and_hides_the_trusted_runtime_directory() {
     let snapshot = committer.snapshot(SnapshotLimits::default()).unwrap();
     assert_eq!(snapshot.metrics().lazy_content_nodes, 1);
     let mut vfs = VirtualFs::new(snapshot);
-    assert!(!vfs.exists(&path(".vsh-runtime")));
+    assert!(!vfs.exists(&path(".vsh-runtime")).unwrap());
     assert_eq!(vfs.read(&path("old.txt")).unwrap(), b"old");
 }
 
@@ -726,6 +727,139 @@ fn commit_installs_opaque_symlinks_and_quarantines_subtrees() {
     assert_eq!(fs::read(workspace.join("target.txt")).unwrap(), b"target");
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn symlink_replacement_rejects_unrepresentable_modes_before_host_mutation() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let (directory, committer) = fixture("symlink-mode-preflight");
+    let workspace = directory.workspace();
+    for (name, mode) in [("source", "600"), ("dest", "700")] {
+        symlink("old.txt", workspace.join(name)).unwrap();
+        assert!(
+            std::process::Command::new("/bin/chmod")
+                .args(["-h", mode])
+                .arg(workspace.join(name))
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let mut vfs = VirtualFs::new(committer.snapshot(SnapshotLimits::default()).unwrap());
+    vfs.read_link(&path("dest")).unwrap();
+    vfs.rename(&path("source"), &path("dest")).unwrap();
+    let diff = vfs.canonical_diff().unwrap();
+    let binding = binding(&vfs, &diff);
+    let plan = CommitPlan::new(&binding, &diff, vfs.read_set(), vfs.write_set()).unwrap();
+    let store = MemoryTransactionStore::default();
+
+    assert!(matches!(
+        committer.commit(&store, reserve(&store, &binding), &plan),
+        Err(CommitError::Verification(_))
+    ));
+    assert!(committer.recover(&store).unwrap().conflicts.is_empty());
+    for (name, mode) in [("source", 0o600), ("dest", 0o700)] {
+        let link = workspace.join(name);
+        assert_eq!(fs::read_link(&link).unwrap(), Path::new("old.txt"));
+        assert_eq!(
+            fs::symlink_metadata(link).unwrap().permissions().mode() & 0o777,
+            mode
+        );
+    }
+    assert_eq!(fs::read(workspace.join("old.txt")).unwrap(), b"old");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn same_target_symlink_replacement_quarantines_and_recovers_original_modes() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    for (case, fault) in [
+        None,
+        Some(FaultPoint::IntentSynced(2)),
+        Some(FaultPoint::OperationApplied(2)),
+        Some(FaultPoint::DoneSynced(2)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (directory, committer) = fixture(&format!("symlink-metadata-replacement-{case}"));
+        let workspace = directory.workspace();
+        symlink("old.txt", workspace.join("source")).unwrap();
+        symlink("old.txt", workspace.join("dest")).unwrap();
+        let source_mode = fs::symlink_metadata(workspace.join("source"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let dest_mode = if source_mode == 0o700 { 0o600 } else { 0o700 };
+        assert!(
+            std::process::Command::new("/bin/chmod")
+                .args(["-h", &format!("{dest_mode:o}")])
+                .arg(workspace.join("dest"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut vfs = VirtualFs::new(committer.snapshot(SnapshotLimits::default()).unwrap());
+        vfs.read_link(&path("dest")).unwrap();
+        vfs.rename(&path("source"), &path("dest")).unwrap();
+        let diff = vfs.canonical_diff().unwrap();
+        assert!(
+            diff.entries()
+                .iter()
+                .any(|entry| entry.path == path("dest") && entry.kind == DiffKind::MetadataChange)
+        );
+        let binding = binding(&vfs, &diff);
+        let plan = CommitPlan::new(&binding, &diff, vfs.read_set(), vfs.write_set()).unwrap();
+        let store = MemoryTransactionStore::default();
+        let result =
+            committer.commit_with_faults(&store, reserve(&store, &binding), &plan, &move |point| {
+                Some(point) == fault
+            });
+        if let Some(point) = fault {
+            assert!(
+                matches!(&result, Err(CommitError::RecoveryRequired { cause, .. }) if cause.contains(&format!("{point:?}"))),
+                "{result:?}"
+            );
+            let report = committer.recover(&store).unwrap();
+            assert!(report.conflicts.is_empty(), "{report:?}");
+            assert_eq!(
+                fs::read_link(workspace.join("source")).unwrap(),
+                Path::new("old.txt")
+            );
+            assert_eq!(
+                fs::symlink_metadata(workspace.join("source"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                source_mode
+            );
+        } else {
+            assert!(result.is_ok(), "{result:?}");
+            assert!(fs::symlink_metadata(workspace.join("source")).is_err());
+        }
+        assert_eq!(
+            fs::read_link(workspace.join("dest")).unwrap(),
+            Path::new("old.txt")
+        );
+        assert_eq!(
+            fs::symlink_metadata(workspace.join("dest"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            if fault.is_none() {
+                source_mode
+            } else {
+                dest_mode
+            }
+        );
+        assert_eq!(fs::read(workspace.join("old.txt")).unwrap(), b"old");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn commit_applies_and_verifies_directory_mode_changes() {
@@ -778,6 +912,7 @@ fn commit_applies_and_verifies_directory_mode_changes() {
         policy: PolicyDigest::digest_canonical(b"test-policy"),
         runtime_config: RuntimeConfigDigest::digest_canonical(b"test-runtime"),
         intent: None,
+        execution_evidence: None,
     };
     let plan = CommitPlan::new(&binding, &diff, &read_set, &write_set).unwrap();
     let store = MemoryTransactionStore::default();
@@ -819,6 +954,485 @@ fn stale_write_precondition_never_overwrites_external_work() {
         store.get(binding.transaction_id()).unwrap().state(),
         TransactionState::Stale
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn file_permission_commit_preserves_inode_bytes_and_lazy_content() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let (directory, committer) = fixture("file-mode-commit");
+    let host_path = directory.workspace().join("old.txt");
+    fs::set_permissions(&host_path, fs::Permissions::from_mode(0o644)).unwrap();
+    let before = fs::metadata(&host_path).unwrap();
+    let snapshot = committer.snapshot(SnapshotLimits::default()).unwrap();
+    let mut vfs = VirtualFs::new(snapshot.clone());
+    vfs.set_mode(&path("old.txt"), 0o600).unwrap();
+    let diff = vfs.canonical_diff().unwrap();
+    assert_eq!(diff.entries()[0].kind, DiffKind::MetadataChange);
+    assert_eq!(snapshot.metrics().materialized_content_nodes, 0);
+    let binding = binding(&vfs, &diff);
+    let plan = CommitPlan::new(&binding, &diff, vfs.read_set(), vfs.write_set()).unwrap();
+    let store = MemoryTransactionStore::default();
+    let receipt = committer
+        .commit(&store, reserve(&store, &binding), &plan)
+        .unwrap();
+    assert_eq!(receipt.operations, 1);
+    let after = fs::metadata(&host_path).unwrap();
+    assert_eq!(after.ino(), before.ino());
+    assert_eq!(after.dev(), before.dev());
+    assert_eq!(after.mtime(), before.mtime());
+    assert_eq!(after.mtime_nsec(), before.mtime_nsec());
+    assert_eq!(after.mode() & 0o7777, 0o600);
+    assert_eq!(fs::read(&host_path).unwrap(), b"old");
+    assert_eq!(snapshot.metrics().materialized_content_nodes, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn file_permission_commit_rejects_stale_content_or_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    for content_change in [false, true] {
+        let (directory, committer) = fixture("file-mode-stale");
+        let host_path = directory.workspace().join("old.txt");
+        fs::set_permissions(&host_path, fs::Permissions::from_mode(0o644)).unwrap();
+        let mut vfs = VirtualFs::new(committer.snapshot(SnapshotLimits::default()).unwrap());
+        vfs.set_mode(&path("old.txt"), 0o600).unwrap();
+        let diff = vfs.canonical_diff().unwrap();
+        let binding = binding(&vfs, &diff);
+        let plan = CommitPlan::new(&binding, &diff, vfs.read_set(), vfs.write_set()).unwrap();
+        if content_change {
+            fs::write(&host_path, b"external").unwrap();
+        } else {
+            fs::set_permissions(&host_path, fs::Permissions::from_mode(0o640)).unwrap();
+        }
+        let store = MemoryTransactionStore::default();
+        assert!(matches!(
+            committer.commit(&store, reserve(&store, &binding), &plan),
+            Err(CommitError::Stale { .. })
+        ));
+        assert_eq!(
+            fs::read(&host_path).unwrap(),
+            if content_change {
+                b"external".as_slice()
+            } else {
+                b"old".as_slice()
+            }
+        );
+        assert_eq!(
+            fs::metadata(&host_path).unwrap().permissions().mode() & 0o777,
+            if content_change { 0o644 } else { 0o640 }
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn file_permission_commits_recover_at_every_durable_boundary() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    for point in [
+        FaultPoint::PlanSynced,
+        FaultPoint::StageSynced,
+        FaultPoint::Revalidated,
+        FaultPoint::CommitStatePersisted,
+        FaultPoint::IntentSynced(0),
+        FaultPoint::OperationApplied(0),
+        FaultPoint::DoneSynced(0),
+        FaultPoint::OwnershipMarkersCleared,
+        FaultPoint::Verified,
+        FaultPoint::CommitMarkerSynced,
+        FaultPoint::CommittedStatePersisted,
+    ] {
+        let (directory, committer) = fixture("file-mode-fault");
+        let host_path = directory.workspace().join("old.txt");
+        fs::set_permissions(&host_path, fs::Permissions::from_mode(0o644)).unwrap();
+        let inode = fs::metadata(&host_path).unwrap().ino();
+        let mut vfs = VirtualFs::new(committer.snapshot(SnapshotLimits::default()).unwrap());
+        vfs.set_mode(&path("old.txt"), 0o600).unwrap();
+        let diff = vfs.canonical_diff().unwrap();
+        let binding = binding(&vfs, &diff);
+        let plan = CommitPlan::new(&binding, &diff, vfs.read_set(), vfs.write_set()).unwrap();
+        let store = MemoryTransactionStore::default();
+        let result = committer.commit_with_faults(
+            &store,
+            reserve(&store, &binding),
+            &plan,
+            &move |candidate| candidate == point,
+        );
+        if point != FaultPoint::CommittedStatePersisted {
+            assert!(result.is_err(), "{point:?}");
+        }
+        let report = committer.recover(&store).unwrap();
+        assert!(report.conflicts.is_empty(), "{point:?}: {report:?}");
+        let completed = matches!(
+            point,
+            FaultPoint::CommitMarkerSynced | FaultPoint::CommittedStatePersisted
+        );
+        assert_eq!(
+            fs::metadata(&host_path).unwrap().permissions().mode() & 0o777,
+            if completed { 0o600 } else { 0o644 },
+            "{point:?}"
+        );
+        assert_eq!(fs::metadata(&host_path).unwrap().ino(), inode);
+        assert_eq!(fs::read(&host_path).unwrap(), b"old");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn file_permission_commits_reject_existing_and_racing_hard_link_aliases() {
+    use std::os::unix::fs::PermissionsExt;
+    for existing in [true, false] {
+        let (directory, committer) = fixture("mode-hard-link");
+        let original = directory.workspace().join("old.txt");
+        let alias = directory.0.join("unapproved-alias.txt");
+        fs::set_permissions(&original, fs::Permissions::from_mode(0o644)).unwrap();
+        if existing {
+            fs::hard_link(&original, &alias).unwrap();
+        }
+        let mut vfs = VirtualFs::new(committer.snapshot(SnapshotLimits::default()).unwrap());
+        vfs.set_mode(&path("old.txt"), 0o600).unwrap();
+        let diff = vfs.canonical_diff().unwrap();
+        let binding = binding(&vfs, &diff);
+        let plan = CommitPlan::new(&binding, &diff, vfs.read_set(), vfs.write_set()).unwrap();
+        let store = MemoryTransactionStore::default();
+        assert!(
+            committer
+                .commit_with_faults(&store, reserve(&store, &binding), &plan, &|point| {
+                    if !existing && point == FaultPoint::IntentSynced(0) {
+                        fs::hard_link(&original, &alias).unwrap();
+                    }
+                    false
+                })
+                .is_err()
+        );
+        for candidate in [&original, &alias] {
+            assert_eq!(
+                fs::metadata(candidate).unwrap().permissions().mode() & 0o777,
+                0o644
+            );
+            assert_eq!(fs::read(candidate).unwrap(), b"old");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn inaccessible_mode_transitions_are_rejected_before_host_mutation() {
+    use std::os::unix::fs::PermissionsExt;
+    for (before, after) in [(0o644, 0), (0, 0o644), (0o644, 0o111)] {
+        let (directory, committer) = fixture("mode-no-access");
+        let host_path = directory.workspace().join("old.txt");
+        fs::set_permissions(&host_path, fs::Permissions::from_mode(before)).unwrap();
+        let mut vfs = VirtualFs::new(committer.snapshot(SnapshotLimits::default()).unwrap());
+        vfs.set_mode(&path("old.txt"), after).unwrap();
+        let diff = vfs.canonical_diff().unwrap();
+        let binding = binding(&vfs, &diff);
+        assert!(matches!(
+            CommitPlan::new(&binding, &diff, vfs.read_set(), vfs.write_set()),
+            Err(CommitPlanError::UnsupportedMetadataMode { .. })
+        ));
+        assert_eq!(
+            fs::metadata(&host_path).unwrap().permissions().mode() & 0o777,
+            before
+        );
+        fs::set_permissions(&host_path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(fs::read(&host_path).unwrap(), b"old");
+    }
+    for (created, mode) in [
+        (false, 0),
+        (false, 0o400),
+        (true, 0),
+        (true, 0o500),
+        (true, 0o555),
+    ] {
+        let (directory, committer) = fixture("directory-mode-no-access");
+        let host_path = directory.workspace().join("folder");
+        if !created {
+            fs::create_dir(&host_path).unwrap();
+            fs::set_permissions(&host_path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut vfs = VirtualFs::new(committer.snapshot(SnapshotLimits::default()).unwrap());
+        if created {
+            vfs.mkdir(&path("folder"), mode).unwrap();
+        } else {
+            vfs.set_mode(&path("folder"), mode).unwrap();
+        }
+        let diff = vfs.canonical_diff().unwrap();
+        let binding = binding(&vfs, &diff);
+        assert!(matches!(
+            CommitPlan::new(&binding, &diff, vfs.read_set(), vfs.write_set()),
+            Err(CommitPlanError::UnsupportedMetadataMode { .. })
+        ));
+        assert_eq!(host_path.exists(), !created);
+        if !created {
+            assert_eq!(
+                fs::metadata(&host_path).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn write_only_file_modes_can_be_recovered_without_content_read_access() {
+    use std::os::unix::fs::PermissionsExt;
+    let (directory, committer) = fixture("mode-write-only");
+    let host_path = directory.workspace().join("old.txt");
+    fs::set_permissions(&host_path, fs::Permissions::from_mode(0o644)).unwrap();
+    let mut vfs = VirtualFs::new(committer.snapshot(SnapshotLimits::default()).unwrap());
+    vfs.set_mode(&path("old.txt"), 0o200).unwrap();
+    let diff = vfs.canonical_diff().unwrap();
+    let binding = binding(&vfs, &diff);
+    let plan = CommitPlan::new(&binding, &diff, vfs.read_set(), vfs.write_set()).unwrap();
+    let store = MemoryTransactionStore::default();
+    assert!(
+        committer
+            .commit_with_faults(&store, reserve(&store, &binding), &plan, &|point| point
+                == FaultPoint::DoneSynced(0))
+            .is_err()
+    );
+    assert_eq!(
+        fs::metadata(&host_path).unwrap().permissions().mode() & 0o777,
+        0o200
+    );
+    let report = committer.recover(&store).unwrap();
+    assert!(report.conflicts.is_empty(), "{report:?}");
+    assert_eq!(
+        fs::metadata(&host_path).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+    assert_eq!(fs::read(&host_path).unwrap(), b"old");
+}
+
+#[cfg(unix)]
+#[test]
+fn completed_mode_rollback_is_restart_idempotent() {
+    use std::os::unix::fs::PermissionsExt;
+    let (directory, committer) = fixture("mode-rollback-restart");
+    let host_path = directory.workspace().join("old.txt");
+    fs::set_permissions(&host_path, fs::Permissions::from_mode(0o644)).unwrap();
+    let mut vfs = VirtualFs::new(committer.snapshot(SnapshotLimits::default()).unwrap());
+    vfs.set_mode(&path("old.txt"), 0o600).unwrap();
+    let diff = vfs.canonical_diff().unwrap();
+    let binding = binding(&vfs, &diff);
+    let plan = CommitPlan::new(&binding, &diff, vfs.read_set(), vfs.write_set()).unwrap();
+    let store = MemoryTransactionStore::default();
+    assert!(
+        committer
+            .commit_with_faults(&store, reserve(&store, &binding), &plan, &|point| point
+                == FaultPoint::DoneSynced(0))
+            .is_err()
+    );
+    // Emulate loss after permission restoration but before store transition/cleanup.
+    fs::set_permissions(&host_path, fs::Permissions::from_mode(0o644)).unwrap();
+    let report = committer.recover(&store).unwrap();
+    assert!(report.conflicts.is_empty(), "{report:?}");
+    assert_eq!(report.rolled_back, 1);
+    assert_eq!(fs::read(&host_path).unwrap(), b"old");
+    assert_eq!(
+        fs::metadata(&host_path).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn blob_backed_mode_commits_bind_the_intent_to_the_original_file_identity() {
+    use std::os::unix::fs::PermissionsExt;
+    for replace_after_intent in [false, true] {
+        let (directory, committer) = fixture("mode-blob-intent");
+        let host_path = directory.workspace().join("old.txt");
+        fs::set_permissions(&host_path, fs::Permissions::from_mode(0o644)).unwrap();
+        let root =
+            cap_std::fs::Dir::open_ambient_dir(directory.workspace(), cap_std::ambient_authority())
+                .unwrap();
+        let mut snapshot = vsh_vfs::SnapshotBuilder::with_root_stamp(
+            committer.artifact_store(),
+            host::stamp_dir(&root, &VPath::root()).unwrap(),
+        );
+        snapshot.add_file(path("old.txt"), b"old", 0o644).unwrap();
+        let mut vfs = VirtualFs::new(snapshot.build().unwrap());
+        vfs.set_mode(&path("old.txt"), 0o600).unwrap();
+        let diff = vfs.canonical_diff().unwrap();
+        let binding = binding(&vfs, &diff);
+        let plan = CommitPlan::new(&binding, &diff, vfs.read_set(), vfs.write_set()).unwrap();
+        let store = MemoryTransactionStore::default();
+        let result =
+            committer.commit_with_faults(&store, reserve(&store, &binding), &plan, &|point| {
+                if replace_after_intent && point == FaultPoint::IntentSynced(0) {
+                    fs::rename(&host_path, directory.0.join("original.txt")).unwrap();
+                    fs::write(&host_path, b"old").unwrap();
+                    fs::set_permissions(&host_path, fs::Permissions::from_mode(0o644)).unwrap();
+                }
+                false
+            });
+        assert_eq!(result.is_err(), replace_after_intent, "{result:?}");
+        assert_eq!(
+            fs::metadata(&host_path).unwrap().permissions().mode() & 0o777,
+            if replace_after_intent { 0o644 } else { 0o600 }
+        );
+        assert_eq!(fs::read(&host_path).unwrap(), b"old");
+        if replace_after_intent {
+            let report = committer.recover(&store).unwrap();
+            assert_eq!(report.conflicts.len(), 1, "{report:?}");
+            assert_eq!(
+                fs::metadata(&host_path).unwrap().permissions().mode() & 0o777,
+                0o644
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn unreadable_blob_backed_mode_evidence_is_rejected_before_chmod() {
+    use std::os::unix::fs::PermissionsExt;
+    let (directory, committer) = fixture("mode-blob-unreadable");
+    let host_path = directory.workspace().join("old.txt");
+    fs::set_permissions(&host_path, fs::Permissions::from_mode(0o644)).unwrap();
+    let root =
+        cap_std::fs::Dir::open_ambient_dir(directory.workspace(), cap_std::ambient_authority())
+            .unwrap();
+    let mut snapshot = vsh_vfs::SnapshotBuilder::with_root_stamp(
+        committer.artifact_store(),
+        host::stamp_dir(&root, &VPath::root()).unwrap(),
+    );
+    snapshot.add_file(path("old.txt"), b"old", 0o644).unwrap();
+    let mut vfs = VirtualFs::new(snapshot.build().unwrap());
+    vfs.set_mode(&path("old.txt"), 0o200).unwrap();
+    let diff = vfs.canonical_diff().unwrap();
+    let binding = binding(&vfs, &diff);
+    assert!(matches!(
+        CommitPlan::new(&binding, &diff, vfs.read_set(), vfs.write_set()),
+        Err(CommitPlanError::UnsupportedMetadataMode { .. })
+    ));
+    assert_eq!(
+        fs::metadata(&host_path).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+    assert_eq!(fs::read(&host_path).unwrap(), b"old");
+}
+
+#[cfg(unix)]
+#[test]
+fn directory_permission_changes_follow_child_writes_and_recover_before_child_undo() {
+    use std::os::unix::fs::PermissionsExt;
+    for interrupted in [false, true] {
+        let (directory, committer) = fixture("directory-mode-with-child-write");
+        let folder = directory.workspace().join("folder");
+        fs::create_dir(&folder).unwrap();
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut vfs = VirtualFs::new(committer.snapshot(SnapshotLimits::default()).unwrap());
+        vfs.set_mode(&path("folder"), 0o555).unwrap();
+        vfs.write(&path("folder/new.txt"), b"new").unwrap();
+        let diff = vfs.canonical_diff().unwrap();
+        let binding = binding(&vfs, &diff);
+        let plan = CommitPlan::new(&binding, &diff, vfs.read_set(), vfs.write_set()).unwrap();
+        let store = MemoryTransactionStore::default();
+        let result =
+            committer.commit_with_faults(&store, reserve(&store, &binding), &plan, &|point| {
+                interrupted && point == FaultPoint::OperationApplied(1)
+            });
+        assert_eq!(result.is_err(), interrupted, "{result:?}");
+        assert_eq!(
+            fs::metadata(&folder).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+        let report = committer.recover(&store).unwrap();
+        assert!(report.conflicts.is_empty(), "{report:?}");
+        assert_eq!(folder.join("new.txt").exists(), !interrupted);
+        assert_eq!(
+            fs::metadata(&folder).unwrap().permissions().mode() & 0o777,
+            if interrupted { 0o755 } else { 0o555 }
+        );
+        if !interrupted {
+            assert_eq!(fs::read(folder.join("new.txt")).unwrap(), b"new");
+        }
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn directory_access_grants_precede_nested_installs_and_roll_back_last() {
+    use std::os::unix::fs::PermissionsExt;
+    for fault in [
+        None,
+        Some(FaultPoint::DoneSynced(0)),
+        Some(FaultPoint::DoneSynced(1)),
+        Some(FaultPoint::OperationApplied(2)),
+    ] {
+        let (directory, committer) = fixture("directory-access-grant");
+        let folder = directory.workspace().join("folder");
+        let nested = folder.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::set_permissions(&nested, fs::Permissions::from_mode(0o500)).unwrap();
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o555)).unwrap();
+        let mut vfs = VirtualFs::new(committer.snapshot(SnapshotLimits::default()).unwrap());
+        vfs.set_mode(&path("folder"), 0o755).unwrap();
+        vfs.set_mode(&path("folder/nested"), 0o750).unwrap();
+        vfs.write(&path("folder/nested/new.txt"), b"new").unwrap();
+        let diff = vfs.canonical_diff().unwrap();
+        let binding = binding(&vfs, &diff);
+        let plan = CommitPlan::new(&binding, &diff, vfs.read_set(), vfs.write_set()).unwrap();
+        let store = MemoryTransactionStore::default();
+        let result =
+            committer.commit_with_faults(&store, reserve(&store, &binding), &plan, &|point| {
+                fault == Some(point)
+            });
+        assert_eq!(result.is_err(), fault.is_some(), "{result:?}");
+        let report = committer.recover(&store).unwrap();
+        assert!(report.conflicts.is_empty(), "{report:?}");
+        assert_eq!(nested.join("new.txt").exists(), fault.is_none());
+        assert_eq!(
+            fs::metadata(&folder).unwrap().permissions().mode() & 0o777,
+            if fault.is_some() { 0o555 } else { 0o755 }
+        );
+        assert_eq!(
+            fs::metadata(&nested).unwrap().permissions().mode() & 0o777,
+            if fault.is_some() { 0o500 } else { 0o750 }
+        );
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&nested, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn completed_directory_mode_recovery_preserves_third_modes_and_already_undone_state() {
+    use std::os::unix::fs::PermissionsExt;
+    for external_mode in [0o700, 0o755] {
+        let (directory, committer) = fixture("directory-mode-recovery-state");
+        let folder = directory.workspace().join("folder");
+        fs::create_dir(&folder).unwrap();
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut vfs = VirtualFs::new(committer.snapshot(SnapshotLimits::default()).unwrap());
+        vfs.set_mode(&path("folder"), 0o555).unwrap();
+        let diff = vfs.canonical_diff().unwrap();
+        let binding = binding(&vfs, &diff);
+        let plan = CommitPlan::new(&binding, &diff, vfs.read_set(), vfs.write_set()).unwrap();
+        let store = MemoryTransactionStore::default();
+        assert!(
+            committer
+                .commit_with_faults(&store, reserve(&store, &binding), &plan, &|point| point
+                    == FaultPoint::DoneSynced(0))
+                .is_err()
+        );
+        fs::set_permissions(&folder, fs::Permissions::from_mode(external_mode)).unwrap();
+        let report = committer.recover(&store).unwrap();
+        assert_eq!(
+            report.conflicts.is_empty(),
+            external_mode == 0o755,
+            "{report:?}"
+        );
+        assert_eq!(report.rolled_back, usize::from(external_mode == 0o755));
+        assert_eq!(
+            fs::metadata(&folder).unwrap().permissions().mode() & 0o777,
+            external_mode
+        );
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
+    }
 }
 
 #[test]

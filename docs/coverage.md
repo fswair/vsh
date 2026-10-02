@@ -1,6 +1,6 @@
 # Coverage contract
 
-Captured: 2026-09-05
+Captured: 2026-10-02, local macOS arm64; optimized Bash integration checkout, not a new release.
 
 Coverage is a merge gate, not an inferred property of the test count. Python and Rust
 use separate measurements because the CPython extension and supervised worker cross
@@ -22,7 +22,7 @@ uv run pytest \
   --cov=src/vsh --cov-branch --cov-report=term-missing --cov-fail-under=100
 ```
 
-Current result: 103 tests, 508 statements, 124 branches, 100% line and 100% branch
+Current result: 182 tests, 664 statements, 178 branches, 100% line and 100% branch
 coverage.
 
 `pyproject.toml` omits only the generated/static version module. Every maintained
@@ -46,16 +46,18 @@ Current stable-toolchain core result:
 
 | Metric | Measured | Merge floor |
 |---|---:|---:|
-| Lines | 81.48% | 79% |
-| Functions | 74.65% | 70% |
-| Regions | 83.05% | 81% |
+| Lines | 84.51% | 79% |
+| Functions | 77.34% | 70% |
+| Regions | 84.93% | 81% |
 
-The measurement executed 166 Rust tests. The ignore expression affects the threshold
+The measurement executed 295 Rust tests. The ignore expression affects the threshold
 report, not test execution. `vsh-python`
 is loaded and exercised by the Python/PyO3 suite. `vsh-worker` is exercised through
-ten real subprocess protocol/isolation tests. Both report zero when measured only by
-the parent `cargo test` profile because they execute in a CPython runtime or a child
-process; counting those zeros as untested Rust core would misstate both boundaries.
+real subprocess protocol/isolation tests. These boundaries require their own
+behavioral tests; parent-only zero coverage is not proof that they are untested.
+The new `vsh-bash` protocol, parent gateway and worker code are **not** added to the
+ignore expression. Stable LLVM reports regions, not Rust branch coverage; this run
+does not establish 100% Rust branches.
 
 Rust 100% is not a merge target. Mutually exclusive Unix/Windows paths, injected I/O
 failures, child-process code, and the CPython extension cannot all be represented
@@ -72,6 +74,10 @@ broad regressions; these tests protect the
 high-risk contracts even where platform error branches remain unexecuted locally.
 Hook coverage additionally exercises immutable canonical evidence, read-only scope,
 pending feedback, approval, hard-deny exclusion and fail-closed Python handler errors.
+The Bash suite adds binary streams, profile rejection, durable preview/restart,
+permission review and stale mode checks, caught policy denial, bounded evidence,
+worker retirement and cancellation. Python tests also cover repeated cancellation,
+unseen-preview cleanup, durable automatic-approval revocation and the commit-entry race.
 The Pydantic AI tests register a real capability on `Agent`, execute every filesystem
 tool, verify JSON-safe result projection, and preserve review feedback without adding a
 new lifecycle state.
@@ -83,9 +89,24 @@ input/concurrency, timeout, cancellation, provider failure and stale commit reje
 They verify the integration contract, not a real model's judgment accuracy or
 resistance to prompt injection.
 
-The optimization additions include a 94,501-case policy-matcher differential oracle,
+The optimization additions include a 266,321-case path-matcher differential oracle,
 compiled-pattern fast-path comparisons, portable path normalization oracle checks,
 overlay prefix-sibling visibility and existing generated-operation replay checks.
+The wildcard fix checks both compiled and general matchers against an independent
+byte-DP oracle for all 116,281 component cases, including literal-star filenames.
+Active-policy checks cover direct and hooked approval/commit after restart; injected
+commit failures verify recovery after a policy change. Diff tests verify canonical
+entries, digest and complete metrics, both lexical directions of lazy rename, and
+metadata-only edits without content capture. State-log tests verify unchanged frame
+bytes for optional artifact/approval fields and reject oversize appends before I/O.
+Store tests cover existing-directory reuse without changing its contents,
+non-directory rejection and concurrent creation; existing symlink and capability
+relocation tests retain the filesystem trust boundary.
+An ancestor-first point-lookup oracle covers missing nodes, tombstones and hidden
+present nodes across generated operation sequences.
+Snapshot tests preserve punctuation/root ordering; sibling-resolution
+tests cover renamed, deleted and non-directory ancestors without resurrecting hidden
+children. No evidence limit, security check or coverage exclusion was relaxed.
 Python acceptance also executes fixture-owning SDK/MCP/separate-process CLI recipes,
 the actual first-run documentation block and multibyte Unicode output truncation.
 APFS rejects invalid UTF-8 filename fixtures before snapshot capture; that platform

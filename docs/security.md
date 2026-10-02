@@ -40,6 +40,22 @@ revalidation.
 Auto-approval is a deterministic policy result, not an AI judgement. Strict and
 paranoid profiles force mutations to an independent approval boundary.
 
+### Policy changes invalidate pending authority
+
+Approval, commit preparation, hook resolution and direct commit require the pending
+artifact's policy digest to equal the runtime's active policy digest. A profile,
+protected-rule or policy-semantics change requires a fresh preview, even if the old
+transaction was already approved. Rust returns `VshError::PolicyChanged`; Python
+raises `VshStateError` with a fresh-preview instruction. Old lifecycle records remain
+inspectable. Do not reuse the old approval for the new transaction ID.
+
+The wildcard correction uses the `vsh-policy-v3` digest domain. `*` in a protected
+pattern always means a wildcard, even when the actual filename contains literal
+stars: `*.key` protects `*.key.key`, and `.env.*` protects `.env.**`. Pending artifacts
+created under v2 require a new preview. This check does not interrupt recovery of an
+already-entered durable commit: recovery must complete or roll back according to its
+journal and ownership evidence, including after a policy change.
+
 ## Explicit non-goals
 
 VSH is not:

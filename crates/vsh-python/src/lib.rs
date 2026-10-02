@@ -31,6 +31,12 @@ create_exception!(
 );
 create_exception!(
     _native,
+    VshBashError,
+    VshExecutionError,
+    "Noncommittable Bash failure with typed diagnostics."
+);
+create_exception!(
+    _native,
     VshStaleError,
     VshRuntimeError,
     "Host dependencies changed after virtual execution."
@@ -88,6 +94,176 @@ impl From<PyRunMode> for vsh::RunMode {
             PyRunMode::Preview => Self::Preview,
             PyRunMode::Auto => Self::Auto,
         }
+    }
+}
+
+/// Host-selected guest frontend; Bash must be explicitly enabled at open time.
+#[pyclass(
+    name = "Language",
+    eq,
+    eq_int,
+    from_py_object,
+    rename_all = "SCREAMING_SNAKE_CASE"
+)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PyLanguage {
+    Monty,
+    Bash,
+}
+
+impl From<PyLanguage> for vsh::Language {
+    fn from(value: PyLanguage) -> Self {
+        match value {
+            PyLanguage::Monty => Self::Monty,
+            PyLanguage::Bash => Self::Bash,
+        }
+    }
+}
+
+/// Bash-specific interpreter work ceilings, independent of filesystem budgets.
+#[pyclass(name = "BashLimits", frozen, get_all, from_py_object)]
+#[derive(Clone, Debug)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "Python keyword names match the shared maximum-budget contract"
+)]
+struct PyBashLimits {
+    max_work_units: u64,
+    max_aggregate_input_bytes: u64,
+    max_live_intermediate_bytes: u64,
+    max_commands: usize,
+    max_loop_iterations: usize,
+    max_total_loop_iterations: usize,
+    max_parser_operations: usize,
+}
+
+#[pymethods]
+impl PyBashLimits {
+    #[new]
+    #[pyo3(signature = (*, max_work_units=10_000_000, max_aggregate_input_bytes=100_000_000, max_live_intermediate_bytes=16_777_216, max_commands=10_000, max_loop_iterations=10_000, max_total_loop_iterations=1_000_000, max_parser_operations=100_000))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        max_work_units: u64,
+        max_aggregate_input_bytes: u64,
+        max_live_intermediate_bytes: u64,
+        max_commands: usize,
+        max_loop_iterations: usize,
+        max_total_loop_iterations: usize,
+        max_parser_operations: usize,
+    ) -> Self {
+        Self {
+            max_work_units,
+            max_aggregate_input_bytes,
+            max_live_intermediate_bytes,
+            max_commands,
+            max_loop_iterations,
+            max_total_loop_iterations,
+            max_parser_operations,
+        }
+    }
+}
+
+/// Explicit host opt-in to a separate Bash worker pool.
+#[pyclass(name = "BashConfig", frozen, get_all, from_py_object)]
+#[derive(Clone, Debug)]
+struct PyBashConfig {
+    worker_path: Option<PathBuf>,
+    limits: PyBashLimits,
+    wall_timeout_ms: Option<u64>,
+    max_active_workers: usize,
+    max_idle_workers: usize,
+}
+
+#[pymethods]
+impl PyBashConfig {
+    #[new]
+    #[pyo3(signature = (*, worker_path=None, limits=None, wall_timeout_ms=None, max_active_workers=4, max_idle_workers=4))]
+    fn new(
+        worker_path: Option<PathBuf>,
+        limits: Option<PyBashLimits>,
+        wall_timeout_ms: Option<u64>,
+        max_active_workers: usize,
+        max_idle_workers: usize,
+    ) -> PyResult<Self> {
+        if max_active_workers == 0
+            || max_idle_workers > max_active_workers
+            || wall_timeout_ms == Some(0)
+        {
+            return Err(PyValueError::new_err(
+                "Bash worker counts and wall timeout must be positive; idle cannot exceed active",
+            ));
+        }
+        Ok(Self {
+            worker_path,
+            limits: limits.unwrap_or_else(|| {
+                PyBashLimits::new(
+                    10_000_000,
+                    100_000_000,
+                    16_777_216,
+                    10_000,
+                    10_000,
+                    1_000_000,
+                    100_000,
+                )
+            }),
+            wall_timeout_ms,
+            max_active_workers,
+            max_idle_workers,
+        })
+    }
+}
+
+/// Byte-authoritative Bash result. Text projections are never execution evidence.
+#[pyclass(name = "BashResult", frozen, get_all, skip_from_py_object)]
+struct PyBashResult {
+    profile: String,
+    exit_code: i32,
+    stdout: Py<PyBytes>,
+    stderr: Py<PyBytes>,
+}
+
+#[pyclass(name = "BashDiagnostics", frozen, get_all, skip_from_py_object)]
+struct PyBashDiagnostics {
+    kind: String,
+    exit_code: Option<i32>,
+    stdout: Py<PyBytes>,
+    stderr: Py<PyBytes>,
+    changes: Vec<PyCanonicalChange>,
+    changes_complete: bool,
+    denied_accesses: usize,
+}
+
+impl PyBashResult {
+    fn from_native(py: Python<'_>, result: vsh::BashResult) -> Self {
+        Self {
+            profile: result.profile,
+            exit_code: result.exit_code,
+            stdout: PyBytes::new(py, &result.stdout).unbind(),
+            stderr: PyBytes::new(py, &result.stderr).unbind(),
+        }
+    }
+}
+
+/// Internal request lifetime token shared by async adapters and native execution.
+#[pyclass(name = "_Cancellation", frozen)]
+struct PyCancellation {
+    inner: vsh::ExecutionCancellation,
+}
+
+#[pymethods]
+impl PyCancellation {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: vsh::ExecutionCancellation::default(),
+        }
+    }
+    fn cancel(&self) -> bool {
+        self.inner.cancel()
+    }
+    #[getter]
+    fn commit_entered(&self) -> bool {
+        self.inner.commit_entered()
     }
 }
 
@@ -152,6 +328,8 @@ struct PyExecutionBudget {
     max_io_call_bytes: usize,
     max_path_bytes: usize,
     max_directory_entries: u64,
+    max_evidence_records: u64,
+    max_evidence_bytes: u64,
     max_output_bytes: usize,
     max_result_bytes: usize,
     max_exception_bytes: usize,
@@ -160,7 +338,7 @@ struct PyExecutionBudget {
 #[pymethods]
 impl PyExecutionBudget {
     #[new]
-    #[pyo3(signature = (*, max_program_bytes=None, max_duration_ms=None, max_recursion_depth=None, max_memory_bytes=None, max_os_calls=None, max_read_bytes=None, max_write_bytes=None, max_io_call_bytes=None, max_path_bytes=None, max_directory_entries=None, max_output_bytes=None, max_result_bytes=None, max_exception_bytes=None))]
+    #[pyo3(signature = (*, max_program_bytes=None, max_duration_ms=None, max_recursion_depth=None, max_memory_bytes=None, max_os_calls=None, max_read_bytes=None, max_write_bytes=None, max_io_call_bytes=None, max_path_bytes=None, max_directory_entries=None, max_evidence_records=None, max_evidence_bytes=None, max_output_bytes=None, max_result_bytes=None, max_exception_bytes=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         max_program_bytes: Option<usize>,
@@ -173,6 +351,8 @@ impl PyExecutionBudget {
         max_io_call_bytes: Option<usize>,
         max_path_bytes: Option<usize>,
         max_directory_entries: Option<u64>,
+        max_evidence_records: Option<u64>,
+        max_evidence_bytes: Option<u64>,
         max_output_bytes: Option<usize>,
         max_result_bytes: Option<usize>,
         max_exception_bytes: Option<usize>,
@@ -191,6 +371,8 @@ impl PyExecutionBudget {
             max_io_call_bytes: max_io_call_bytes.unwrap_or(defaults.max_io_call_bytes),
             max_path_bytes: max_path_bytes.unwrap_or(defaults.max_path_bytes),
             max_directory_entries: max_directory_entries.unwrap_or(defaults.max_directory_entries),
+            max_evidence_records: max_evidence_records.unwrap_or(defaults.max_evidence_records),
+            max_evidence_bytes: max_evidence_bytes.unwrap_or(defaults.max_evidence_bytes),
             max_output_bytes: max_output_bytes.unwrap_or(defaults.max_output_bytes),
             max_result_bytes: max_result_bytes.unwrap_or(defaults.max_result_bytes),
             max_exception_bytes: max_exception_bytes.unwrap_or(defaults.max_exception_bytes),
@@ -212,7 +394,8 @@ impl PyExecutionBudget {
 impl Default for PyExecutionBudget {
     fn default() -> Self {
         Self::new(
-            None, None, None, None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+            None,
         )
     }
 }
@@ -230,6 +413,8 @@ impl From<PyExecutionBudget> for vsh::ExecutionBudget {
             max_io_call_bytes: value.max_io_call_bytes,
             max_path_bytes: value.max_path_bytes,
             max_directory_entries: value.max_directory_entries,
+            max_evidence_records: value.max_evidence_records,
+            max_evidence_bytes: value.max_evidence_bytes,
             max_output_bytes: value.max_output_bytes,
             max_result_bytes: value.max_result_bytes,
             max_exception_bytes: value.max_exception_bytes,
@@ -242,6 +427,7 @@ impl From<PyExecutionBudget> for vsh::ExecutionBudget {
 #[derive(Clone, Debug)]
 struct PyRunRequest {
     code: String,
+    language: PyLanguage,
     intent: Option<String>,
     mode: PyRunMode,
     detail: PyReceiptDetail,
@@ -251,9 +437,10 @@ struct PyRunRequest {
 #[pymethods]
 impl PyRunRequest {
     #[new]
-    #[pyo3(signature = (code, *, intent=None, mode=None, detail=None, budget=None))]
+    #[pyo3(signature = (code, *, language=None, intent=None, mode=None, detail=None, budget=None))]
     fn new(
         code: String,
+        language: Option<PyLanguage>,
         intent: Option<String>,
         mode: Option<PyRunMode>,
         detail: Option<PyReceiptDetail>,
@@ -261,6 +448,7 @@ impl PyRunRequest {
     ) -> Self {
         Self {
             code,
+            language: language.unwrap_or(PyLanguage::Monty),
             intent,
             mode: mode.unwrap_or(PyRunMode::Preview),
             detail: detail.unwrap_or(PyReceiptDetail::Compact),
@@ -281,6 +469,7 @@ impl PyRunRequest {
 #[derive(Clone)]
 struct OwnedRunRequest {
     code: String,
+    language: vsh::Language,
     intent: Option<String>,
     mode: vsh::RunMode,
     detail: vsh::ReceiptDetail,
@@ -291,6 +480,7 @@ impl From<&PyRunRequest> for OwnedRunRequest {
     fn from(value: &PyRunRequest) -> Self {
         Self {
             code: value.code.clone(),
+            language: value.language.into(),
             intent: value.intent.clone(),
             mode: value.mode.into(),
             detail: value.detail.into(),
@@ -303,6 +493,7 @@ impl OwnedRunRequest {
     fn borrowed(&self) -> vsh::RunRequest<'_> {
         vsh::RunRequest {
             code: &self.code,
+            language: self.language,
             intent: self.intent.as_deref(),
             mode: self.mode,
             detail: self.detail,
@@ -312,15 +503,16 @@ impl OwnedRunRequest {
 
     fn preview_input(
         request: &Bound<'_, PyAny>,
+        language: Option<PyLanguage>,
         intent: Option<String>,
         detail: Option<PyReceiptDetail>,
         budget: Option<PyExecutionBudget>,
     ) -> PyResult<Self> {
         if request.is_instance_of::<PyRunRequest>() {
             let request = request.extract::<PyRef<'_, PyRunRequest>>()?;
-            if intent.is_some() || detail.is_some() || budget.is_some() {
+            if language.is_some() || intent.is_some() || detail.is_some() || budget.is_some() {
                 return Err(PyTypeError::new_err(
-                    "intent, detail, and budget are only valid when preview() receives source code",
+                    "language, intent, detail, and budget are only valid when preview() receives source code",
                 ));
             }
             return Ok(Self::from(&*request));
@@ -331,6 +523,7 @@ impl OwnedRunRequest {
         })?;
         Ok(Self {
             code,
+            language: language.unwrap_or(PyLanguage::Monty).into(),
             intent,
             mode: vsh::RunMode::Preview,
             detail: detail.unwrap_or(PyReceiptDetail::Compact).into(),
@@ -458,6 +651,17 @@ impl From<&vsh::EffectEvent> for PyEffectSummary {
                 None,
                 None,
             ),
+            vsh::Effect::ModifyMetadata {
+                path,
+                before,
+                after,
+            } => (
+                "modify_metadata",
+                vec![path.as_str().to_owned()],
+                Some((*before).into()),
+                Some((*after).into()),
+                None,
+            ),
             vsh::Effect::Rename {
                 from,
                 to,
@@ -553,10 +757,23 @@ struct PyRequestEvent {
     output_bytes: usize,
     denied_accesses: u64,
     result_bytes: u64,
+    execution_context: PyExecutionContext,
     evidence_complete: bool,
     evidence_truncated: bool,
     contents: Vec<PyReviewContent>,
     content_complete: bool,
+}
+
+#[pyclass(name = "ExecutionContext", frozen, get_all, from_py_object)]
+#[derive(Clone, Debug)]
+struct PyExecutionContext {
+    language: PyLanguage,
+    profile: Option<String>,
+    exit_code: Option<i32>,
+    complete: bool,
+    evidence: Option<String>,
+    stdout_bytes: usize,
+    stderr_bytes: usize,
 }
 
 impl From<&vsh::RequestEvent> for PyRequestEvent {
@@ -634,6 +851,21 @@ impl From<&vsh::RequestEvent> for PyRequestEvent {
             output_bytes: event.execution.output_bytes,
             denied_accesses: event.execution.denied_accesses,
             result_bytes: event.execution.result_bytes,
+            execution_context: PyExecutionContext {
+                language: match event.execution_context.language {
+                    vsh::Language::Monty => PyLanguage::Monty,
+                    vsh::Language::Bash => PyLanguage::Bash,
+                },
+                profile: event.execution_context.profile.clone(),
+                exit_code: event.execution_context.exit_code,
+                complete: event.execution_context.complete,
+                evidence: event
+                    .execution_context
+                    .evidence
+                    .map(|value| value.to_string()),
+                stdout_bytes: event.execution_context.stdout_bytes,
+                stderr_bytes: event.execution_context.stderr_bytes,
+            },
             evidence_complete: event.evidence_complete,
             evidence_truncated: event.evidence_truncated,
             contents: event.contents.iter().map(Into::into).collect(),
@@ -753,42 +985,115 @@ impl From<vsh::HookDecisionRecord> for PyHookDecisionRecord {
 }
 
 /// Python projection of one native VSH receipt.
-#[pyclass(name = "Receipt", frozen, get_all, skip_from_py_object)]
+#[pyclass(name = "Receipt", frozen, skip_from_py_object)]
 #[derive(Debug)]
 struct PyReceipt {
+    #[pyo3(get)]
     transaction: String,
+    #[pyo3(get)]
     base_snapshot: String,
+    #[pyo3(get)]
     state: String,
+    #[pyo3(get)]
     decision: String,
+    #[pyo3(get)]
     diff: String,
+    #[pyo3(get)]
     changed_paths: usize,
+    #[pyo3(get)]
     changes: Vec<(String, String)>,
+    #[pyo3(get)]
     result: Py<PyAny>,
-    stdout: String,
+    #[pyo3(get)]
+    language: PyLanguage,
+    monty_stdout: Option<String>,
+    #[pyo3(get)]
     risk_flags: Vec<String>,
+    #[pyo3(get)]
     deny_reason: Option<String>,
+    #[pyo3(get)]
     os_calls: u64,
+    #[pyo3(get)]
     read_bytes: u64,
+    #[pyo3(get)]
     write_bytes: u64,
+    #[pyo3(get)]
     directory_entries: u64,
+    #[pyo3(get)]
     output_bytes: usize,
+    #[pyo3(get)]
     denied_accesses: u64,
+    #[pyo3(get)]
     result_bytes: u64,
+    #[pyo3(get)]
     committed: bool,
+    #[pyo3(get)]
     commit_operations: Option<usize>,
+    #[pyo3(get)]
     verified_paths: Option<usize>,
+    #[pyo3(get)]
     cleanup_pending: bool,
+    #[pyo3(get)]
     snapshot_ns: u64,
+    #[pyo3(get)]
     execute_ns: u64,
+    #[pyo3(get)]
     diff_ns: u64,
+    #[pyo3(get)]
     policy_ns: u64,
+    #[pyo3(get)]
     bind_and_store_ns: u64,
+    #[pyo3(get)]
     commit_ns: u64,
+    #[pyo3(get)]
     total_ns: u64,
 }
 
 #[pymethods]
 impl PyReceipt {
+    #[getter]
+    fn stdout(&self, py: Python<'_>) -> PyResult<String> {
+        if let Some(stdout) = &self.monty_stdout {
+            return Ok(stdout.clone());
+        }
+        let result = self.result.bind(py).extract::<PyRef<'_, PyBashResult>>()?;
+        Ok(String::from_utf8_lossy(result.stdout.bind(py).as_bytes()).into_owned())
+    }
+
+    #[getter]
+    fn stderr(&self, py: Python<'_>) -> PyResult<String> {
+        if self.language == PyLanguage::Monty {
+            return Ok(String::new());
+        }
+        let result = self.result.bind(py).extract::<PyRef<'_, PyBashResult>>()?;
+        Ok(String::from_utf8_lossy(result.stderr.bind(py).as_bytes()).into_owned())
+    }
+
+    #[getter]
+    fn stdout_bytes(&self, py: Python<'_>) -> PyResult<Py<PyBytes>> {
+        if let Some(stdout) = &self.monty_stdout {
+            return Ok(PyBytes::new(py, stdout.as_bytes()).unbind());
+        }
+        Ok(self
+            .result
+            .bind(py)
+            .extract::<PyRef<'_, PyBashResult>>()?
+            .stdout
+            .clone_ref(py))
+    }
+
+    #[getter]
+    fn stderr_bytes(&self, py: Python<'_>) -> PyResult<Py<PyBytes>> {
+        if self.language == PyLanguage::Monty {
+            return Ok(PyBytes::new(py, b"").unbind());
+        }
+        Ok(self
+            .result
+            .bind(py)
+            .extract::<PyRef<'_, PyBashResult>>()?
+            .stderr
+            .clone_ref(py))
+    }
     fn __repr__(&self) -> String {
         format!(
             "Receipt(transaction='{}', state='{}', decision='{}', changed_paths={})",
@@ -825,7 +1130,18 @@ impl PyReceipt {
             .commit
             .as_ref()
             .is_some_and(|commit| commit.cleanup_pending);
-        let result = monty_to_py(py, &receipt.value, &InstanceStore::new(py))?;
+        let (result, language, monty_stdout) = match receipt.output {
+            vsh::ExecutionOutput::Monty { value, stdout } => (
+                monty_to_py(py, &value, &InstanceStore::new(py))?,
+                PyLanguage::Monty,
+                Some(stdout),
+            ),
+            vsh::ExecutionOutput::Bash(result) => (
+                Py::new(py, PyBashResult::from_native(py, result))?.into_any(),
+                PyLanguage::Bash,
+                None,
+            ),
+        };
         Ok(Self {
             transaction: receipt.transaction.to_string(),
             base_snapshot: receipt.base_snapshot.to_string(),
@@ -844,7 +1160,8 @@ impl PyReceipt {
                 })
                 .collect(),
             result,
-            stdout: receipt.stdout,
+            language,
+            monty_stdout,
             risk_flags,
             deny_reason,
             os_calls: receipt.execution.os_calls,
@@ -929,7 +1246,7 @@ struct PyRuntime {
 impl PyRuntime {
     /// Open a capability-rooted workspace and recover interrupted commits.
     #[staticmethod]
-    #[pyo3(signature = (workspace, *, data_directory=None, policy="balanced", worker_path=None, hook_id=None, hook_scope=None, review_content_bytes=0))]
+    #[pyo3(signature = (workspace, *, data_directory=None, policy="balanced", worker_path=None, bash=None, hook_id=None, hook_scope=None, review_content_bytes=0))]
     // Preserve Python's keyword-only options without a redundant config wrapper.
     #[allow(clippy::too_many_arguments)]
     fn open(
@@ -938,6 +1255,7 @@ impl PyRuntime {
         data_directory: Option<PathBuf>,
         policy: &str,
         worker_path: Option<PathBuf>,
+        bash: Option<PyBashConfig>,
         hook_id: Option<&str>,
         hook_scope: Option<PyHookScope>,
         review_content_bytes: usize,
@@ -972,9 +1290,30 @@ impl PyRuntime {
         if let Some(worker_path) = worker_path {
             config = config.with_worker_path(worker_path);
         } else if std::env::var_os("VSH_MONTY_WORKER").is_none()
-            && let Some(worker_path) = python_scripts_worker(py)
+            && let Some(worker_path) = python_scripts_worker(py, "vsh-monty-worker")
         {
             config = config.with_worker_path(worker_path);
+        }
+        if let Some(bash) = bash {
+            let path = bash.worker_path.or_else(|| std::env::var_os("VSH_BASH_WORKER").filter(|value| !value.is_empty()).map(PathBuf::from))
+                .or_else(|| python_scripts_worker(py, "vsh-bash-worker"))
+                .ok_or_else(|| PyValueError::new_err("Bash requires an installed vsh-bash-worker or an explicit BashConfig(worker_path=...)"))?;
+            let limits = bash.limits;
+            let mut bash_config = vsh::BashConfig::new(path)
+                .with_limits(vsh::BashLimits {
+                    max_work_units: limits.max_work_units,
+                    max_aggregate_input_bytes: limits.max_aggregate_input_bytes,
+                    max_live_intermediate_bytes: limits.max_live_intermediate_bytes,
+                    max_commands: limits.max_commands,
+                    max_loop_iterations: limits.max_loop_iterations,
+                    max_total_loop_iterations: limits.max_total_loop_iterations,
+                    max_parser_operations: limits.max_parser_operations,
+                })
+                .with_worker_limits(bash.max_active_workers, bash.max_idle_workers);
+            if let Some(milliseconds) = bash.wall_timeout_ms {
+                bash_config = bash_config.with_wall_timeout(Duration::from_millis(milliseconds));
+            }
+            config = config.with_bash(bash_config);
         }
         detach_open(py, config).map(|inner| Self { inner })
     }
@@ -989,20 +1328,61 @@ impl PyRuntime {
         PyReceipt::from_native(py, receipt)
     }
 
+    fn _run(
+        &self,
+        py: Python<'_>,
+        request: &PyRunRequest,
+        cancellation: &PyCancellation,
+    ) -> PyResult<PyReceipt> {
+        let request = OwnedRunRequest::from(request);
+        let cancellation = cancellation.inner.clone();
+        let receipt = detach_call(py, Arc::clone(&self.inner), move |runtime| {
+            runtime
+                .run_cancellable(request.borrowed(), &cancellation)
+                .map_err(Box::new)
+        })?;
+        PyReceipt::from_native(py, receipt)
+    }
+
     /// Execute policy-bound virtual state from a request or source code.
-    #[pyo3(signature = (request, *, intent=None, detail=None, budget=None))]
+    #[pyo3(signature = (request, *, language=None, intent=None, detail=None, budget=None))]
     fn preview(
         &self,
         py: Python<'_>,
         request: &Bound<'_, PyAny>,
+        language: Option<PyLanguage>,
         intent: Option<String>,
         detail: Option<PyReceiptDetail>,
         budget: Option<PyExecutionBudget>,
     ) -> PyResult<PyReceipt> {
-        let request = OwnedRunRequest::preview_input(request, intent, detail, budget)?;
+        let request = OwnedRunRequest::preview_input(request, language, intent, detail, budget)?;
         let runtime = Arc::clone(&self.inner);
         let receipt = detach_call(py, runtime, move |runtime| {
             runtime.preview(request.borrowed()).map_err(Box::new)
+        })?;
+        PyReceipt::from_native(py, receipt)
+    }
+
+    #[pyo3(signature = (request, cancellation, *, language=None, intent=None, detail=None, budget=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn _preview(
+        &self,
+        py: Python<'_>,
+        request: &Bound<'_, PyAny>,
+        cancellation: &PyCancellation,
+        language: Option<PyLanguage>,
+        intent: Option<String>,
+        detail: Option<PyReceiptDetail>,
+        budget: Option<PyExecutionBudget>,
+    ) -> PyResult<PyReceipt> {
+        let mut request =
+            OwnedRunRequest::preview_input(request, language, intent, detail, budget)?;
+        request.mode = vsh::RunMode::Preview;
+        let cancellation = cancellation.inner.clone();
+        let receipt = detach_call(py, Arc::clone(&self.inner), move |runtime| {
+            runtime
+                .run_cancellable(request.borrowed(), &cancellation)
+                .map_err(Box::new)
         })?;
         PyReceipt::from_native(py, receipt)
     }
@@ -1013,6 +1393,14 @@ impl PyRuntime {
         let runtime = Arc::clone(&self.inner);
         detach_call(py, runtime, move |runtime| {
             runtime.discard_preview(transaction).map_err(Box::new)
+        })
+    }
+
+    fn _cancel_receipt(&self, py: Python<'_>, transaction: &str) -> PyResult<()> {
+        let transaction = parse_transaction(transaction)?;
+        let runtime = Arc::clone(&self.inner);
+        detach_call(py, runtime, move |runtime| {
+            runtime.discard_cancelled(transaction).map_err(Box::new)
         })
     }
 
@@ -1051,6 +1439,23 @@ impl PyRuntime {
         PyReceipt::from_native(py, receipt)
     }
 
+    fn _commit(
+        &self,
+        py: Python<'_>,
+        transaction: &str,
+        now_unix_ms: u64,
+        cancellation: &PyCancellation,
+    ) -> PyResult<PyReceipt> {
+        let transaction = parse_transaction(transaction)?;
+        let cancellation = cancellation.inner.clone();
+        let receipt = detach_call(py, Arc::clone(&self.inner), move |runtime| {
+            runtime
+                .commit_cancellable(transaction, now_unix_ms, &cancellation)
+                .map_err(Box::new)
+        })?;
+        PyReceipt::from_native(py, receipt)
+    }
+
     /// Freeze an exact hook event without executing caller code under native locks.
     fn prepare_commit(&self, py: Python<'_>, transaction: &str) -> PyResult<PyCommitPreparation> {
         let transaction = parse_transaction(transaction)?;
@@ -1075,6 +1480,25 @@ impl PyRuntime {
         let resolution = detach_call(py, runtime, move |runtime| {
             runtime
                 .resolve_commit(&preparation, &decision, now_unix_ms)
+                .map_err(Box::new)
+        })?;
+        PyCommitResolution::from_native(py, resolution)
+    }
+
+    fn _resolve_commit(
+        &self,
+        py: Python<'_>,
+        preparation: &PyCommitPreparation,
+        decision: &PyHookDecision,
+        now_unix_ms: u64,
+        cancellation: &PyCancellation,
+    ) -> PyResult<PyCommitResolution> {
+        let preparation = preparation.inner.clone();
+        let decision = decision.inner.clone();
+        let cancellation = cancellation.inner.clone();
+        let resolution = detach_call(py, Arc::clone(&self.inner), move |runtime| {
+            runtime
+                .resolve_commit_cancellable(&preparation, &decision, now_unix_ms, &cancellation)
                 .map_err(Box::new)
         })?;
         PyCommitResolution::from_native(py, resolution)
@@ -1114,7 +1538,7 @@ impl PyRuntime {
     }
 }
 
-fn python_scripts_worker(py: Python<'_>) -> Option<PathBuf> {
+fn python_scripts_worker(py: Python<'_>, name: &str) -> Option<PathBuf> {
     let scripts = py
         .import("sysconfig")
         .ok()?
@@ -1123,9 +1547,9 @@ fn python_scripts_worker(py: Python<'_>) -> Option<PathBuf> {
         .extract::<PathBuf>()
         .ok()?;
     let filename = if cfg!(windows) {
-        "vsh-monty-worker.exe"
+        format!("{name}.exe")
     } else {
-        "vsh-monty-worker"
+        name.to_owned()
     };
     let worker = scripts.join(filename);
     worker.is_file().then_some(worker)
@@ -1196,6 +1620,51 @@ fn map_detached_failure(error: DetachedFailure) -> PyErr {
 
 fn map_vsh_error(error: vsh::VshError) -> PyErr {
     match error {
+        vsh::VshError::Bash {
+            source,
+            changes,
+            changes_complete,
+        } => Python::attach(|py| {
+            let error = VshBashError::new_err(source.to_string());
+            let kind = match &source {
+                vsh::BashError::Exit { .. } => "exit",
+                vsh::BashError::Cancelled => "cancelled",
+                vsh::BashError::Timeout => "timeout",
+                vsh::BashError::Limit(_) => "limit",
+                vsh::BashError::Unsupported(_) => "unsupported",
+                vsh::BashError::Configuration(_) => "configuration",
+                vsh::BashError::Protocol(_) => "protocol",
+                vsh::BashError::Io(_) => "transport",
+                vsh::BashError::Execution(_) => "execution",
+            };
+            let (exit_code, stdout, stderr, denied_accesses) = match source {
+                vsh::BashError::Exit {
+                    code,
+                    stdout,
+                    stderr,
+                    denied_accesses,
+                } => (Some(code), stdout, stderr, denied_accesses.len()),
+                _ => (None, Vec::new(), Vec::new(), 0),
+            };
+            let diagnostics = PyBashDiagnostics {
+                kind: kind.to_owned(),
+                exit_code,
+                stdout: PyBytes::new(py, &stdout).unbind(),
+                stderr: PyBytes::new(py, &stderr).unbind(),
+                changes: changes.iter().map(Into::into).collect(),
+                changes_complete,
+                denied_accesses,
+            };
+            match Py::new(py, diagnostics)
+                .and_then(|diagnostics| error.value(py).setattr("diagnostics", diagnostics))
+            {
+                Ok(()) => error,
+                Err(error) => error,
+            }
+        }),
+        source @ (vsh::VshError::Cancelled | vsh::VshError::LanguageUnavailable { .. }) => {
+            VshExecutionError::new_err(source.to_string())
+        }
         vsh::VshError::UnsafeDataDirectory { .. } => PyValueError::new_err(error.to_string()),
         vsh::VshError::Execution(source) => VshExecutionError::new_err(source.to_string()),
         vsh::VshError::ResultCompatibility(source) => {
@@ -1219,6 +1688,7 @@ fn map_vsh_error(error: vsh::VshError) -> PyErr {
             report.conflicts.len()
         )),
         source @ (vsh::VshError::MissingPending { .. }
+        | vsh::VshError::PolicyChanged { .. }
         | vsh::VshError::DuplicatePending { .. }
         | vsh::VshError::EphemeralCapacity { .. }
         | vsh::VshError::Approval(_)) => VshStateError::new_err(source.to_string()),
@@ -1289,6 +1759,7 @@ fn effect_origin_name(origin: vsh::EffectOrigin) -> &'static str {
         vsh::EffectOrigin::VirtualFs => "virtual_fs",
         vsh::EffectOrigin::MontyOsCall => "monty_os_call",
         vsh::EffectOrigin::MontyToolCall => "monty_tool_call",
+        vsh::EffectOrigin::BashCall => "bash_call",
         _ => "unknown",
     }
 }
@@ -1328,6 +1799,7 @@ fn risk_flag_name(flag: vsh::RiskFlag) -> &'static str {
         vsh::RiskFlag::SymlinkChange => "symlink_change",
         vsh::RiskFlag::LargeTouchedSet => "large_touched_set",
         vsh::RiskFlag::LargeByteChange => "large_byte_change",
+        vsh::RiskFlag::PermissionChange => "permission_change",
     }
 }
 
@@ -1363,6 +1835,14 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module.py().get_type::<VshInternalError>(),
     )?;
     module.add_class::<PyRunMode>()?;
+    module.add_class::<PyLanguage>()?;
+    module.add_class::<PyBashConfig>()?;
+    module.add_class::<PyBashLimits>()?;
+    module.add_class::<PyBashResult>()?;
+    module.add_class::<PyBashDiagnostics>()?;
+    module.add_class::<PyExecutionContext>()?;
+    module.add_class::<PyCancellation>()?;
+    module.add("VshBashError", module.py().get_type::<VshBashError>())?;
     module.add_class::<PyHookScope>()?;
     module.add_class::<PyReceiptDetail>()?;
     module.add_class::<PyExecutionBudget>()?;

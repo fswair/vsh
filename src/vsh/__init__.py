@@ -1,14 +1,20 @@
 from __future__ import annotations as _annotations
 
 from ._native import (
+    BashConfig,
+    BashDiagnostics,
+    BashLimits,
+    BashResult,
     CanonicalChange,
     CommitPreparation,
     CommitResolution,
     EffectSummary,
     ExecutionBudget,
+    ExecutionContext,
     HookDecision,
     HookDecisionRecord,
     HookScope,
+    Language,
     NodeSummary,
     Receipt,
     ReceiptDetail,
@@ -18,6 +24,7 @@ from ._native import (
     RunMode,
     RunRequest,
     Runtime,
+    VshBashError,
     VshExecutionError,
     VshInternalError,
     VshRecoveryError,
@@ -31,6 +38,13 @@ from ._version import __version__
 from .hooks import HookedRuntime, HookHandler, HookResult
 
 __all__ = (
+    "BashConfig",
+    "BashDiagnostics",
+    "BashLimits",
+    "BashResult",
+    "ExecutionContext",
+    "Language",
+    "VshBashError",
     "__version__",
     "engine_kind",
     "CanonicalChange",

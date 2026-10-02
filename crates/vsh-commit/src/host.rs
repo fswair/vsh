@@ -492,6 +492,70 @@ pub(crate) fn relocated_state_matches(
     }
 }
 
+/// Verify an already-pinned regular file, never reopening the approved pathname.
+pub(crate) fn file_state_matches(
+    file: &File,
+    path: &VPath,
+    expected: NodeState,
+) -> Result<(bool, NodeState), HostError> {
+    let before = stamp_file(file, path)?;
+    if before.kind != NodeKind::File
+        || expected.kind() != NodeKind::File
+        || before.size != expected.size()
+        || before.mode != expected.mode()
+    {
+        return Ok((false, NodeState::from_stamp(before)));
+    }
+    let actual = match expected.content() {
+        Some(ContentVersion::Blob(_)) => {
+            let mut hasher = blake3::Hasher::new();
+            let mut reader = file;
+            let mut remaining = before.size;
+            let mut buffer = [0; 16 * 1024];
+            while remaining != 0 {
+                let wanted = usize::try_from(remaining)
+                    .unwrap_or(usize::MAX)
+                    .min(buffer.len());
+                let count = reader
+                    .read(&mut buffer[..wanted])
+                    .map_err(|source| HostError::io("hash pinned file", path, source))?;
+                if count == 0 {
+                    return Ok((false, NodeState::from_stamp(stamp_file(file, path)?)));
+                }
+                hasher.update(&buffer[..count]);
+                remaining -= count as u64;
+            }
+            NodeState::file(
+                BlobId::from_bytes(*hasher.finalize().as_bytes()),
+                before.size,
+                before.mode,
+            )
+        }
+        _ => NodeState::from_stamp(before),
+    };
+    let after = stamp_file(file, path)?;
+    let matches = before == after
+        && match expected.content() {
+            Some(ContentVersion::Stamp(stamp)) => before == stamp,
+            Some(ContentVersion::Blob(_)) => actual == expected,
+            _ => false,
+        };
+    Ok((matches, actual))
+}
+
+/// An in-place mode change must not mutate unapproved hard-link aliases.
+pub(crate) fn is_single_link(file: &File) -> io::Result<bool> {
+    #[cfg(unix)]
+    {
+        Ok(MetadataExt::nlink(&file.metadata()?) == 1)
+    }
+    #[cfg(windows)]
+    {
+        let _ = file;
+        Ok(false)
+    }
+}
+
 pub(crate) fn content_digest(root: &Dir, path: &VPath) -> Result<BlobId, HostError> {
     stable_content(root, path).map(|capture| BlobId::digest(&capture.bytes))
 }
@@ -715,6 +779,17 @@ pub(crate) fn open_real_file(parent: &Dir, name: &str) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
     open_real_file_with(parent, name, &options)
+}
+
+pub(crate) fn open_file_for_mode(parent: &Dir, name: &str) -> io::Result<File> {
+    match open_real_file(parent, name) {
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            let mut options = OpenOptions::new();
+            options.write(true);
+            open_real_file_with(parent, name, &options)
+        }
+        result => result,
+    }
 }
 
 fn open_real_file_with(parent: &Dir, name: &str, options: &OpenOptions) -> io::Result<File> {

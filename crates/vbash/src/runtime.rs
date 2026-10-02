@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "bash")]
+use std::sync::Arc;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -11,7 +13,7 @@ use vsh_commit::{
 };
 use vsh_monty::{
     ExecutionError, ExecutionLimits, ExecutionOutcome, ExecutionStats, InProcessConfig,
-    InProcessMonty, MontyObject, ResultCompatibility, ResultCompatibilityError, SubprocessConfig,
+    InProcessMonty, ResultCompatibility, ResultCompatibilityError, SubprocessConfig,
     SubprocessMonty, VirtualRoot, validate_result_compatibility,
 };
 use vsh_policy::{
@@ -30,11 +32,16 @@ use vsh_vfs::{CanonicalDiff, VfsError, VirtualFs};
 
 use crate::artifact::{
     ArtifactError, PendingTransaction, ReviewEvidence, decode_pending, encode_pending,
+    execution_evidence_digest, seal_pending_and_encode, seal_pending_and_size,
 };
 use crate::hook::{
     CommitPreparation, CommitResolution, HookBaseline, HookConfig, HookDecision,
     HookDecisionRecord, HookHandlerError, HookVerdict, RequestEvent,
 };
+use crate::output::{ExecutionOutput, Language};
+#[cfg(feature = "bash")]
+use crate::{BashConfig, BashResult};
+use vsh_execution::ExecutionCancellation;
 
 /// Request-scoped resource caps enforced by the Monty/VFS adapter.
 pub type ExecutionBudget = ExecutionLimits;
@@ -106,6 +113,8 @@ pub enum ReceiptDetail {
 pub struct RunRequest<'a> {
     /// Exact Monty source executed against virtual state.
     pub code: &'a str,
+    /// Explicit guest language; existing requests default to Monty.
+    pub language: Language,
     /// Optional out-of-band intent bound into transaction identity.
     pub intent: Option<&'a str>,
     /// Preview-only or deterministic auto-commit behavior.
@@ -122,6 +131,7 @@ impl<'a> RunRequest<'a> {
     pub fn new(code: &'a str) -> Self {
         Self {
             code,
+            language: Language::Monty,
             intent: None,
             mode: RunMode::Preview,
             detail: ReceiptDetail::Compact,
@@ -133,6 +143,13 @@ impl<'a> RunRequest<'a> {
     #[must_use]
     pub const fn with_intent(mut self, intent: &'a str) -> Self {
         self.intent = Some(intent);
+        self
+    }
+
+    /// Select an explicitly enabled guest language.
+    #[must_use]
+    pub const fn with_language(mut self, language: Language) -> Self {
+        self.language = language;
         self
     }
 
@@ -167,6 +184,16 @@ pub enum RuntimeDecision {
     AutoApproved,
     /// An exact independent approval is required before reservation.
     PendingApproval(RiskManifest),
+}
+
+impl From<PolicyDecision> for RuntimeDecision {
+    fn from(decision: PolicyDecision) -> Self {
+        match decision {
+            PolicyDecision::Deny(manifest) => Self::Denied(manifest),
+            PolicyDecision::AutoApprove => Self::AutoApproved,
+            PolicyDecision::Escalate(manifest) => Self::PendingApproval(manifest),
+        }
+    }
 }
 
 /// Monotonic stage costs recorded without string allocation in the hot path.
@@ -205,10 +232,8 @@ pub struct Receipt {
     pub changed_paths: usize,
     /// Complete canonical entries only when full detail was requested.
     pub changes: Vec<DiffEntry>,
-    /// Bounded Monty return value.
-    pub value: MontyObject,
-    /// Bounded captured `print()` output.
-    pub stdout: String,
+    /// Complete backend-tagged result and byte-authoritative output.
+    pub output: ExecutionOutput,
     /// Independent execution counters.
     pub execution: ExecutionStats,
     /// Native stage timings.
@@ -233,6 +258,8 @@ pub struct RuntimeConfig {
     store_config: FileStoreConfig,
     artifact_limits: ArtifactLimits,
     commit_hook: Option<HookConfig>,
+    #[cfg(feature = "bash")]
+    bash: Option<BashConfig>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -264,6 +291,8 @@ impl RuntimeConfig {
             store_config: FileStoreConfig::default(),
             artifact_limits: ArtifactLimits::default(),
             commit_hook: None,
+            #[cfg(feature = "bash")]
+            bash: None,
         }
     }
 
@@ -279,6 +308,14 @@ impl RuntimeConfig {
     #[must_use]
     pub fn with_worker_path(mut self, worker_path: impl Into<PathBuf>) -> Self {
         self.worker_path = Some(worker_path.into());
+        self
+    }
+
+    /// Explicitly enable the separately isolated Bash worker.
+    #[cfg(feature = "bash")]
+    #[must_use]
+    pub fn with_bash(mut self, config: BashConfig) -> Self {
+        self.bash = Some(config);
         self
     }
 
@@ -403,27 +440,49 @@ fn default_worker_path() -> PathBuf {
 
 enum RuntimeExecution {
     Subprocess(Box<SubprocessMonty>),
-    InProcess,
+    #[cfg(feature = "bash")]
+    Deferred {
+        config: Box<SubprocessConfig>,
+        worker: Mutex<Option<Arc<SubprocessMonty>>>,
+    },
+    InProcess(Box<InProcessConfig>),
 }
 
 impl RuntimeExecution {
     fn open(config: &RuntimeConfig) -> Result<Self, ExecutionError> {
-        let Some(worker_path) = &config.worker_path else {
-            return Ok(Self::InProcess);
-        };
         let adapter = InProcessConfig::new(config.virtual_root.clone())
             .with_call_policy(config.policy.call_policy().clone());
-        let worker = SubprocessMonty::new(
-            SubprocessConfig::new(worker_path, adapter)
-                .with_max_idle_workers(config.max_idle_workers),
-        )?;
+        let Some(worker_path) = &config.worker_path else {
+            return Ok(Self::InProcess(Box::new(adapter)));
+        };
+        let config_worker = SubprocessConfig::new(worker_path, adapter)
+            .with_max_idle_workers(config.max_idle_workers);
+        #[cfg(feature = "bash")]
+        if config.bash.is_some() {
+            return Ok(Self::Deferred {
+                config: Box::new(config_worker),
+                worker: Mutex::new(None),
+            });
+        }
+        let worker = SubprocessMonty::new(config_worker)?;
         Ok(Self::Subprocess(Box::new(worker)))
+    }
+
+    fn adapter(&self) -> &InProcessConfig {
+        match self {
+            Self::Subprocess(worker) => worker.config().adapter(),
+            #[cfg(feature = "bash")]
+            Self::Deferred { config, .. } => config.adapter(),
+            Self::InProcess(adapter) => adapter,
+        }
     }
 
     fn security_digest(&self, adapter: &InProcessConfig) -> RuntimeConfigDigest {
         match self {
             Self::Subprocess(worker) => worker.config().security_digest_for(adapter),
-            Self::InProcess => adapter.security_digest(),
+            #[cfg(feature = "bash")]
+            Self::Deferred { config, .. } => config.security_digest_for(adapter),
+            Self::InProcess(_) => adapter.security_digest(),
         }
     }
 
@@ -432,10 +491,26 @@ impl RuntimeExecution {
         code: &str,
         filesystem: &mut VirtualFs,
         adapter: &InProcessConfig,
+        cancellation: &ExecutionCancellation,
     ) -> Result<ExecutionOutcome, ExecutionError> {
         match self {
-            Self::Subprocess(worker) => worker.execute_with_config(code, filesystem, adapter),
-            Self::InProcess => InProcessMonty::new(adapter.clone()).execute(code, filesystem),
+            Self::Subprocess(worker) => {
+                worker.execute_cancellable(code, filesystem, adapter, cancellation)
+            }
+            #[cfg(feature = "bash")]
+            Self::Deferred { config, worker } => {
+                let mut slot = worker.lock().map_err(|_| ExecutionError::Cancelled)?;
+                if slot.is_none() {
+                    *slot = Some(Arc::new(SubprocessMonty::new_cancellable(
+                        config.as_ref().clone(),
+                        cancellation,
+                    )?));
+                }
+                let worker = Arc::clone(slot.as_ref().expect("initialized worker"));
+                drop(slot);
+                worker.execute_cancellable(code, filesystem, adapter, cancellation)
+            }
+            Self::InProcess(_) => InProcessMonty::new(adapter.clone()).execute(code, filesystem),
         }
     }
 }
@@ -449,6 +524,8 @@ pub struct Runtime {
     artifacts: BlobStore,
     pending: Mutex<PendingArtifacts>,
     startup_recovery: RecoveryReport,
+    #[cfg(feature = "bash")]
+    bash_execution: Mutex<Option<Arc<vsh_bash::SubprocessBash>>>,
 }
 
 #[derive(Default)]
@@ -463,6 +540,12 @@ struct EvaluatedDiff {
     metrics: RiskMetrics,
     diff_ns: u64,
     policy_ns: u64,
+}
+
+struct GuestOutcome {
+    output: ExecutionOutput,
+    stats: ExecutionStats,
+    denied_accesses: Vec<DeniedAccess>,
 }
 
 impl Runtime {
@@ -505,6 +588,8 @@ impl Runtime {
             artifacts,
             pending: Mutex::new(PendingArtifacts::default()),
             startup_recovery,
+            #[cfg(feature = "bash")]
+            bash_execution: Mutex::new(None),
         })
     }
 
@@ -522,60 +607,67 @@ impl Runtime {
     /// revalidation, commit, or recovery failures. Deterministic policy denial is a
     /// successful receipt and never reaches the committer.
     pub fn run(&self, request: RunRequest<'_>) -> Result<Receipt, VshError> {
+        self.run_cancellable(request, &ExecutionCancellation::default())
+    }
+
+    /// Execute with request-scoped cancellation, atomically arbitrated against commit.
+    ///
+    /// # Errors
+    /// Returns the same execution errors as [`Self::run`], or [`VshError::Cancelled`].
+    pub fn run_cancellable(
+        &self,
+        request: RunRequest<'_>,
+        cancellation: &ExecutionCancellation,
+    ) -> Result<Receipt, VshError> {
+        self.check_language(request.language)?;
+        check_cancellation(cancellation)?;
         validate_program_size(request.code, request.budget)?;
         let total_started = Instant::now();
         let (mut filesystem, base_snapshot, base_node_count, snapshot_ns) =
             self.snapshot_filesystem()?;
 
-        let monty_config = self.monty_config(request.budget);
-        let runtime_config = self.runtime_config_digest(&monty_config);
         let execute_started = Instant::now();
-        let ExecutionOutcome {
-            value,
-            stdout,
-            stats,
-            denied_accesses,
-        } = self
-            .execution
-            .execute(request.code, &mut filesystem, &monty_config)?;
-        validate_result_compatibility(&value, self.config.result_compatibility)?;
+        let (outcome, runtime_config) =
+            self.execute_request(request, &mut filesystem, cancellation)?;
+        check_cancellation(cancellation)?;
         let execute_ns = elapsed_ns(execute_started);
 
+        let evaluated =
+            self.evaluate_diff(&filesystem, &outcome.denied_accesses, base_node_count)?;
+        let bind_started = Instant::now();
+        let (mut binding, decision) = self.bind_candidate(
+            request,
+            &filesystem,
+            base_snapshot,
+            runtime_config,
+            &evaluated,
+        );
+        let evidence = filesystem.into_evidence()?;
+        let review = ReviewEvidence::capture(
+            request.intent,
+            evaluated.metrics,
+            evidence.effects,
+            self.config.artifact_limits,
+        )?;
+        self.seal_denied_evidence(&mut binding, &outcome, &review, &decision)?;
         let EvaluatedDiff {
             diff,
-            decision: policy_decision,
-            metrics: risk_metrics,
             diff_ns,
             policy_ns,
-        } = self.evaluate_diff(&filesystem, &denied_accesses, base_node_count)?;
-
-        let bind_started = Instant::now();
-        let binding = bind_transaction(TransactionIdentityInput {
-            base_snapshot,
-            diff: &diff,
-            read_set: filesystem.read_set(),
-            write_set: filesystem.write_set(),
-            program: request.code,
-            policy: &self.config.policy,
-            runtime_config,
-            intent: request.intent,
-        });
+            ..
+        } = evaluated;
         let transaction = binding.transaction_id();
-        let (decision, state, record) =
-            Self::policy_record(transaction, base_snapshot, policy_decision)?;
-        let changed_paths = diff.entries().len();
-        let changes = receipt_changes(request.detail, &diff);
+        let (state, record) = Self::policy_record(transaction, base_snapshot, &decision)?;
         let mut receipt = Receipt {
             transaction,
             base_snapshot,
             state,
             decision,
             diff: diff.digest(),
-            changed_paths,
-            changes,
-            value,
-            stdout,
-            execution: stats,
+            changed_paths: diff.entries().len(),
+            changes: receipt_changes(request.detail, &diff),
+            output: outcome.output,
+            execution: outcome.stats,
             timings: StageTimings {
                 snapshot_ns,
                 execute_ns,
@@ -588,25 +680,20 @@ impl Runtime {
             commit: None,
         };
 
+        check_cancellation(cancellation)?;
         if state == TransactionState::Denied {
+            check_cancellation(cancellation)?;
             self.store.create(record)?;
             receipt.timings.bind_and_store_ns = elapsed_ns(bind_started);
             receipt.timings.total_ns = elapsed_ns(total_started);
         } else {
             receipt = self.store_pending(
-                record,
                 PendingTransaction {
                     binding,
                     diff,
-                    read_set: filesystem.read_set().clone(),
-                    write_set: filesystem.write_set().clone(),
-                    review: ReviewEvidence {
-                        intent: request.intent.map(str::to_owned),
-                        metrics: risk_metrics,
-                        effects: filesystem.effects().to_vec(),
-                        complete: true,
-                        truncated: false,
-                    },
+                    read_set: evidence.read_set,
+                    write_set: evidence.write_set,
+                    review,
                     receipt,
                 },
                 request.mode,
@@ -615,8 +702,18 @@ impl Runtime {
             )?;
         }
 
+        if cancellation.is_cancelled() {
+            self.discard_cancelled(receipt.transaction)?;
+            return Err(VshError::Cancelled);
+        }
         if request.mode == RunMode::Auto && state == TransactionState::AutoApproved {
-            receipt = self.commit(transaction, 0)?;
+            receipt = match self.commit_cancellable(receipt.transaction, 0, cancellation) {
+                Err(VshError::Cancelled) => {
+                    self.discard_cancelled(receipt.transaction)?;
+                    return Err(VshError::Cancelled);
+                }
+                result => result?,
+            };
             receipt.timings.total_ns = elapsed_ns(total_started);
         }
         Ok(receipt)
@@ -645,6 +742,32 @@ impl Runtime {
             .map(|artifact| artifact.is_some())
     }
 
+    /// Drop a cancelled call's ephemeral receipt and revoke durable automatic approval.
+    ///
+    /// Durable records remain auditable; explicit approval or entered commits are not
+    /// rolled back. Call only for a receipt owned by the cancelled execution.
+    ///
+    /// # Errors
+    /// Returns store or lock errors when fail-closed cleanup cannot be completed.
+    pub fn discard_cancelled(&self, transaction: TransactionId) -> Result<(), VshError> {
+        let removed = self.discard_preview(transaction)?;
+        let record = match self.store.get(transaction) {
+            Ok(record) => record,
+            Err(TransactionStoreError::NotFound { id }) if removed && id == transaction => {
+                return Ok(());
+            }
+            Err(source) => return Err(source.into()),
+        };
+        if record.state() == TransactionState::AutoApproved {
+            self.store.compare_and_transition(
+                transaction,
+                TransactionState::AutoApproved,
+                TransactionState::PendingApproval,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Bind an independent, expiring approval to one exact pending transaction.
     ///
     /// # Errors
@@ -658,7 +781,8 @@ impl Runtime {
         issued_at_unix_ms: u64,
         expires_at_unix_ms: u64,
     ) -> Result<TransactionRecord, VshError> {
-        self.load_pending(transaction)?;
+        let artifact = self.load_pending(transaction)?;
+        self.validate_policy(&artifact)?;
         let grant = ApprovalGrant::new(
             transaction,
             principal,
@@ -683,11 +807,28 @@ impl Runtime {
         transaction: TransactionId,
         now_unix_ms: u64,
     ) -> Result<Receipt, VshError> {
+        self.commit_cancellable(transaction, now_unix_ms, &ExecutionCancellation::default())
+    }
+
+    /// Arbitrate cancellation before entering the commit/recovery protocol.
+    ///
+    /// # Errors
+    /// Returns the errors of [`Self::commit`] or cancellation before commit entry.
+    pub fn commit_cancellable(
+        &self,
+        transaction: TransactionId,
+        now_unix_ms: u64,
+        cancellation: &ExecutionCancellation,
+    ) -> Result<Receipt, VshError> {
+        check_cancellation(cancellation)?;
         if self.config.commit_hook.is_some() {
             let preparation = self.prepare_commit(transaction)?;
             if let Some(event) = preparation.event() {
                 return Err(VshError::HookRequired(Box::new(event.clone())));
             }
+        }
+        if !cancellation.enter_commit() {
+            return Err(VshError::Cancelled);
         }
         self.commit_exact(transaction, now_unix_ms)
     }
@@ -706,7 +847,8 @@ impl Runtime {
         transaction: TransactionId,
     ) -> Result<CommitPreparation, VshError> {
         let artifact = self.load_pending(transaction)?;
-        validate_result_compatibility(&artifact.receipt.value, self.config.result_compatibility)?;
+        self.validate_policy(&artifact)?;
+        self.validate_output(&artifact.receipt.output)?;
         self.persist_ephemeral(&artifact)?;
         let record = self.store.get(transaction)?;
         let state = record.state();
@@ -736,9 +878,30 @@ impl Runtime {
         decision: &HookDecision,
         now_unix_ms: u64,
     ) -> Result<CommitResolution, VshError> {
+        self.resolve_commit_cancellable(
+            preparation,
+            decision,
+            now_unix_ms,
+            &ExecutionCancellation::default(),
+        )
+    }
+
+    /// Resolve one hook decision with request-scoped cancellation arbitration.
+    ///
+    /// # Errors
+    /// Returns the errors of [`Self::resolve_commit`] or pre-commit cancellation.
+    pub fn resolve_commit_cancellable(
+        &self,
+        preparation: &CommitPreparation,
+        decision: &HookDecision,
+        now_unix_ms: u64,
+        cancellation: &ExecutionCancellation,
+    ) -> Result<CommitResolution, VshError> {
+        check_cancellation(cancellation)?;
         let transaction = preparation.transaction();
         let prepared_state = preparation.prepared_state();
         let artifact = self.load_pending(transaction)?;
+        self.validate_policy(&artifact)?;
         let event = self.validate_hook_preparation(preparation, decision, &artifact)?;
 
         let (verdict, reason) = match &decision {
@@ -755,6 +918,16 @@ impl Runtime {
                 maximum: hook.max_reason_bytes(),
             });
         }
+        let committing = matches!(decision, HookDecision::Approve { .. })
+            || (*decision == HookDecision::FollowPolicy
+                && matches!(
+                    prepared_state,
+                    TransactionState::AutoApproved | TransactionState::Approved
+                ));
+        if committing && !cancellation.enter_commit() {
+            return Err(VshError::Cancelled);
+        }
+        check_cancellation(cancellation)?;
         let receipt = self.apply_hook_decision(
             transaction,
             prepared_state,
@@ -930,7 +1103,8 @@ impl Runtime {
         now_unix_ms: u64,
     ) -> Result<Receipt, VshError> {
         let artifact = self.load_pending(transaction)?;
-        validate_result_compatibility(&artifact.receipt.value, self.config.result_compatibility)?;
+        self.validate_policy(&artifact)?;
+        self.validate_output(&artifact.receipt.output)?;
         self.persist_ephemeral(&artifact)?;
         let plan = CommitPlan::new(
             &artifact.binding,
@@ -989,9 +1163,7 @@ impl Runtime {
         state: TransactionState,
     ) -> Result<RequestEvent, VshError> {
         let transaction = artifact.binding.transaction_id();
-        if artifact.binding.policy != self.config.policy.digest() {
-            return Err(VshError::HookConfigurationChanged { transaction });
-        }
+        self.validate_policy(artifact)?;
         let (baseline, risk_flags) = match &artifact.receipt.decision {
             RuntimeDecision::AutoApproved => (HookBaseline::AutoApproved, Vec::new()),
             RuntimeDecision::PendingApproval(manifest) => {
@@ -1012,7 +1184,7 @@ impl Runtime {
             hook.max_content_bytes(),
         )?;
         Ok(RequestEvent {
-            schema_version: 1,
+            schema_version: 2,
             event_id: vsh_types::RequestEventId::derive(transaction, hook.id(), hook.scope().tag()),
             hook_id: hook.id(),
             transaction,
@@ -1034,6 +1206,23 @@ impl Runtime {
             canonical_diff: artifact.diff.entries().to_vec(),
             effects: artifact.review.effects.clone(),
             execution: artifact.receipt.execution,
+            execution_context: crate::hook::ExecutionContext {
+                language: artifact.receipt.output.language(),
+                profile: match &artifact.receipt.output {
+                    ExecutionOutput::Bash(result) => Some(result.profile.clone()),
+                    ExecutionOutput::Monty { .. } => None,
+                },
+                exit_code: match &artifact.receipt.output {
+                    ExecutionOutput::Bash(result) => Some(result.exit_code),
+                    ExecutionOutput::Monty { .. } => None,
+                },
+                complete: artifact.review.complete
+                    && !artifact.review.truncated
+                    && artifact.binding.execution_evidence.is_some(),
+                evidence: artifact.binding.execution_evidence,
+                stdout_bytes: artifact.receipt.output.stdout_bytes().len(),
+                stderr_bytes: artifact.receipt.output.stderr_bytes().len(),
+            },
             evidence_complete: artifact.review.complete,
             evidence_truncated: artifact.review.truncated,
             contents,
@@ -1073,7 +1262,8 @@ impl Runtime {
         {
             let started = Instant::now();
             let paths = diff.entries().iter().filter_map(|entry| {
-                (entry.before.is_some()
+                (entry.kind != vsh_types::DiffKind::MetadataChange
+                    && entry.before.is_some()
                     && self
                         .config
                         .policy
@@ -1120,9 +1310,7 @@ impl Runtime {
     }
 
     fn monty_config(&self, budget: ExecutionBudget) -> InProcessConfig {
-        InProcessConfig::new(self.config.virtual_root.clone())
-            .with_limits(budget)
-            .with_call_policy(self.config.policy.call_policy().clone())
+        self.execution.adapter().clone().with_limits(budget)
     }
 
     fn runtime_config_digest(&self, monty_config: &InProcessConfig) -> RuntimeConfigDigest {
@@ -1150,7 +1338,9 @@ impl Runtime {
         artifact: PendingTransaction,
         encoded_bytes: usize,
     ) -> Result<(), VshError> {
-        let transaction = artifact.binding.transaction_id();
+        // This is the fresh-seal insertion path; the creator already calculated
+        // and installed the final, evidence-bound receipt identity.
+        let transaction = artifact.receipt.transaction;
         let mut pending = self.pending()?;
         let entries = pending.entries.len();
         let retained_bytes = pending.encoded_bytes;
@@ -1189,23 +1379,25 @@ impl Runtime {
 
     fn persist_pending(
         &self,
-        record: TransactionRecord,
         mut artifact: PendingTransaction,
         bind_started: Instant,
         total_started: Instant,
     ) -> Result<Receipt, VshError> {
-        let encoded = encode_pending(&artifact, self.config.artifact_limits)?;
+        let encoded = seal_pending_and_encode(&mut artifact, self.config.artifact_limits)?;
+        let (_, record) = Self::policy_record(
+            artifact.receipt.transaction,
+            artifact.binding.base_snapshot,
+            &artifact.receipt.decision,
+        )?;
         let artifact_id = self.artifacts.put(&encoded)?;
         self.store.create(record.with_artifact(artifact_id))?;
         artifact.receipt.timings.bind_and_store_ns = elapsed_ns(bind_started);
         artifact.receipt.timings.total_ns = elapsed_ns(total_started);
-        let receipt = artifact.receipt.clone();
-        Ok(receipt)
+        Ok(artifact.receipt)
     }
 
     fn store_pending(
         &self,
-        record: TransactionRecord,
         artifact: PendingTransaction,
         mode: RunMode,
         bind_started: Instant,
@@ -1214,7 +1406,7 @@ impl Runtime {
         if mode == RunMode::Preview && artifact.receipt.state == TransactionState::AutoApproved {
             self.retain_ephemeral(artifact, bind_started, total_started)
         } else {
-            self.persist_pending(record, artifact, bind_started, total_started)
+            self.persist_pending(artifact, bind_started, total_started)
         }
     }
 
@@ -1224,11 +1416,11 @@ impl Runtime {
         bind_started: Instant,
         total_started: Instant,
     ) -> Result<Receipt, VshError> {
-        let encoded = encode_pending(&artifact, self.config.artifact_limits)?;
+        let encoded_bytes = seal_pending_and_size(&mut artifact, self.config.artifact_limits)?;
         artifact.receipt.timings.bind_and_store_ns = elapsed_ns(bind_started);
         artifact.receipt.timings.total_ns = elapsed_ns(total_started);
         let receipt = artifact.receipt.clone();
-        self.insert_pending(artifact, encoded.len())?;
+        self.insert_pending(artifact, encoded_bytes)?;
         Ok(receipt)
     }
 
@@ -1302,11 +1494,181 @@ impl Runtime {
         self.pending.lock().map_err(|_| VshError::PendingPoisoned)
     }
 
+    fn execute_request(
+        &self,
+        request: RunRequest<'_>,
+        filesystem: &mut VirtualFs,
+        cancellation: &ExecutionCancellation,
+    ) -> Result<(GuestOutcome, RuntimeConfigDigest), VshError> {
+        #[cfg(feature = "bash")]
+        if request.language == Language::Bash {
+            let config = self
+                .config
+                .bash
+                .as_ref()
+                .ok_or(VshError::LanguageUnavailable {
+                    language: Language::Bash,
+                })?;
+            let mut slot = self
+                .bash_execution
+                .lock()
+                .map_err(|_| VshError::PendingPoisoned)?;
+            if slot.is_none() {
+                *slot = Some(Arc::new(
+                    vsh_bash::SubprocessBash::new_cancellable(config.clone(), cancellation)
+                        .map_err(|source| VshError::Bash {
+                            source,
+                            changes: Vec::new(),
+                            changes_complete: true,
+                        })?,
+                ));
+            }
+            let worker = Arc::clone(slot.as_ref().expect("initialized Bash worker"));
+            drop(slot);
+            let result = worker.execute_cancellable(
+                request.code,
+                filesystem,
+                self.config.policy.call_policy(),
+                request.budget,
+                cancellation,
+            );
+            let outcome = result.map_err(|source| {
+                let diagnostic = filesystem.canonical_diff();
+                VshError::Bash {
+                    source,
+                    changes_complete: diagnostic.is_ok(),
+                    changes: diagnostic.map_or_else(
+                        |_| Vec::new(),
+                        |diff| receipt_changes(ReceiptDetail::Full, &diff),
+                    ),
+                }
+            })?;
+            let digest = aggregate_runtime_digest(
+                config.security_digest(request.budget),
+                self.config.snapshot_limits,
+                self.config.commit_config,
+                self.config.store_config,
+                self.config.artifact_limits,
+                self.config.result_compatibility,
+                self.config.commit_hook,
+            );
+            return Ok((
+                GuestOutcome {
+                    output: ExecutionOutput::Bash(BashResult {
+                        profile: vsh_bash::PROFILE_ID.to_owned(),
+                        exit_code: outcome.exit_code,
+                        stdout: outcome.stdout,
+                        stderr: outcome.stderr,
+                    }),
+                    stats: outcome.stats,
+                    denied_accesses: outcome.denied_accesses,
+                },
+                digest,
+            ));
+        }
+        let config = self.monty_config(request.budget);
+        let digest = self.runtime_config_digest(&config);
+        let outcome = self
+            .execution
+            .execute(request.code, filesystem, &config, cancellation)?;
+        validate_result_compatibility(&outcome.value, self.config.result_compatibility)?;
+        Ok((
+            GuestOutcome {
+                output: ExecutionOutput::Monty {
+                    value: outcome.value,
+                    stdout: outcome.stdout,
+                },
+                stats: outcome.stats,
+                denied_accesses: outcome.denied_accesses,
+            },
+            digest,
+        ))
+    }
+
+    fn check_language(&self, language: Language) -> Result<(), VshError> {
+        if language == Language::Monty {
+            return Ok(());
+        }
+        #[cfg(feature = "bash")]
+        if self.config.bash.is_some() {
+            if self.config.virtual_root.as_str() != "/workspace" {
+                return Err(VshError::Bash {
+                    source: vsh_bash::BashError::Configuration(
+                        "Bash requires the /workspace virtual root".into(),
+                    ),
+                    changes: Vec::new(),
+                    changes_complete: true,
+                });
+            }
+            return Ok(());
+        }
+        Err(VshError::LanguageUnavailable { language })
+    }
+
+    fn validate_policy(&self, artifact: &PendingTransaction) -> Result<(), VshError> {
+        if artifact.binding.policy != self.config.policy.digest() {
+            return Err(VshError::PolicyChanged {
+                transaction: artifact.binding.transaction_id(),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_output(&self, output: &ExecutionOutput) -> Result<(), VshError> {
+        if let Some(value) = output.monty_value() {
+            validate_result_compatibility(value, self.config.result_compatibility)?;
+        }
+        Ok(())
+    }
+
+    fn bind_candidate(
+        &self,
+        request: RunRequest<'_>,
+        filesystem: &VirtualFs,
+        base_snapshot: SnapshotId,
+        runtime_config: RuntimeConfigDigest,
+        evaluated: &EvaluatedDiff,
+    ) -> (vsh_types::TransactionBinding, RuntimeDecision) {
+        let decision = RuntimeDecision::from(evaluated.decision.clone());
+        let binding = bind_transaction(TransactionIdentityInput {
+            base_snapshot,
+            diff: &evaluated.diff,
+            read_set: filesystem.read_set(),
+            write_set: filesystem.write_set(),
+            program: request.code,
+            policy: &self.config.policy,
+            runtime_config,
+            intent: request.intent,
+        });
+        (binding, decision)
+    }
+
+    fn seal_denied_evidence(
+        &self,
+        binding: &mut vsh_types::TransactionBinding,
+        outcome: &GuestOutcome,
+        review: &ReviewEvidence,
+        decision: &RuntimeDecision,
+    ) -> Result<(), VshError> {
+        // Actionable artifacts are sealed in their single encode/count pass.
+        // A denied receipt has no pending artifact to encode.
+        if matches!(decision, RuntimeDecision::Denied(_)) {
+            binding.execution_evidence = Some(execution_evidence_digest(
+                &outcome.output,
+                outcome.stats,
+                review,
+                decision,
+                self.config.artifact_limits,
+            )?);
+        }
+        Ok(())
+    }
+
     fn policy_record(
         transaction: TransactionId,
         base_snapshot: SnapshotId,
-        decision: PolicyDecision,
-    ) -> Result<(RuntimeDecision, TransactionState, TransactionRecord), VshError> {
+        decision: &RuntimeDecision,
+    ) -> Result<(TransactionState, TransactionRecord), VshError> {
         let mut record = TransactionRecord::new(transaction, base_snapshot);
         record
             .transition(TransactionState::Running)
@@ -1314,33 +1676,35 @@ impl Runtime {
         record
             .transition(TransactionState::VirtualComplete)
             .map_err(TransactionStoreError::Transition)?;
-        let (decision, state) = match decision {
-            PolicyDecision::Deny(manifest) => {
+        let state = match decision {
+            RuntimeDecision::Denied(_) => {
                 record
                     .transition(TransactionState::Denied)
                     .map_err(TransactionStoreError::Transition)?;
-                (RuntimeDecision::Denied(manifest), TransactionState::Denied)
+                TransactionState::Denied
             }
-            PolicyDecision::AutoApprove => {
+            RuntimeDecision::AutoApproved => {
                 record
                     .transition(TransactionState::AutoApproved)
                     .map_err(TransactionStoreError::Transition)?;
-                (
-                    RuntimeDecision::AutoApproved,
-                    TransactionState::AutoApproved,
-                )
+                TransactionState::AutoApproved
             }
-            PolicyDecision::Escalate(manifest) => {
+            RuntimeDecision::PendingApproval(_) => {
                 record
                     .transition(TransactionState::PendingApproval)
                     .map_err(TransactionStoreError::Transition)?;
-                (
-                    RuntimeDecision::PendingApproval(manifest),
-                    TransactionState::PendingApproval,
-                )
+                TransactionState::PendingApproval
             }
         };
-        Ok((decision, state, record))
+        Ok((state, record))
+    }
+}
+
+fn check_cancellation(cancellation: &ExecutionCancellation) -> Result<(), VshError> {
+    if cancellation.is_cancelled() {
+        Err(VshError::Cancelled)
+    } else {
+        Ok(())
     }
 }
 
@@ -1523,6 +1887,23 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum VshError {
+    /// Cancellation won before the host commit boundary.
+    Cancelled,
+    /// The requested frontend was not enabled by the host.
+    LanguageUnavailable {
+        /// Frontend requested without host opt-in.
+        language: Language,
+    },
+    /// Noncommittable Bash diagnostics; there is deliberately no transaction ID.
+    #[cfg(feature = "bash")]
+    Bash {
+        /// Typed terminal execution failure.
+        source: vsh_bash::BashError,
+        /// Noncommittable virtual change diagnostics.
+        changes: Vec<DiffEntry>,
+        /// Whether a canonical diagnostic diff could be computed; never permission to commit.
+        changes_complete: bool,
+    },
     /// The durable data-directory capability could not be established safely.
     DataDirectory(DataDirectoryError),
     /// Immutable blob storage failed.
@@ -1556,6 +1937,11 @@ pub enum VshError {
         requested: TransactionId,
         /// Transaction recomputed from decoded artifact contents.
         decoded: TransactionId,
+    },
+    /// The pending transaction was evaluated under a different policy identity.
+    PolicyChanged {
+        /// Transaction that must be previewed again under the active policy.
+        transaction: TransactionId,
     },
     /// Startup recovery found ownership it could not prove and left it untouched.
     RecoveryConflicts(Box<RecoveryReport>),
@@ -1637,8 +2023,19 @@ pub enum VshError {
 }
 
 impl fmt::Display for VshError {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one exhaustive typed-error projection preserves the SDK error contract"
+    )]
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Cancelled => formatter.write_str("VSH request cancelled before commit"),
+            Self::LanguageUnavailable { language } => write!(
+                formatter,
+                "{language:?} execution is not enabled by the host"
+            ),
+            #[cfg(feature = "bash")]
+            Self::Bash { source, .. } => fmt::Display::fmt(source, formatter),
             Self::DataDirectory(source) => fmt::Display::fmt(source, formatter),
             Self::Blob(source) => fmt::Display::fmt(source, formatter),
             Self::Commit(source) => fmt::Display::fmt(source, formatter),
@@ -1661,6 +2058,10 @@ impl fmt::Display for VshError {
             Self::ArtifactBinding { requested, decoded } => write!(
                 formatter,
                 "pending artifact for {requested} decodes to transaction {decoded}"
+            ),
+            Self::PolicyChanged { transaction } => write!(
+                formatter,
+                "policy changed for transaction {transaction}; create a fresh preview"
             ),
             Self::RecoveryConflicts(report) => write!(
                 formatter,
@@ -1742,6 +2143,9 @@ impl fmt::Display for VshError {
 impl Error for VshError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Cancelled | Self::LanguageUnavailable { .. } => None,
+            #[cfg(feature = "bash")]
+            Self::Bash { source, .. } => Some(source),
             Self::DataDirectory(source) => Some(source),
             Self::Blob(source) => Some(source),
             Self::Commit(source) => Some(source),
@@ -1756,6 +2160,7 @@ impl Error for VshError {
             Self::RecoveryConflicts(_)
             | Self::UnsafeDataDirectory { .. }
             | Self::ArtifactBinding { .. }
+            | Self::PolicyChanged { .. }
             | Self::MissingPending { .. }
             | Self::DuplicatePending { .. }
             | Self::EphemeralCapacity { .. }
@@ -1847,9 +2252,9 @@ mod tests {
 
     use super::{
         ApprovalGrantError, ArtifactError, ArtifactLimits, BlobStoreError, CommitPlanError,
-        DataDirectory, ExecutionBudget, ExecutionError, ReceiptDetail, ResultCompatibility,
-        ResultCompatibilityError, RunMode, RunRequest, Runtime, RuntimeConfig, RuntimeDecision,
-        SnapshotLimits, TransactionStoreError, VfsError, VshError,
+        DataDirectory, ExecutionBudget, ExecutionError, InProcessConfig, ReceiptDetail,
+        ResultCompatibility, ResultCompatibilityError, RunMode, RunRequest, Runtime, RuntimeConfig,
+        RuntimeDecision, SnapshotLimits, TransactionStoreError, VfsError, VirtualRoot, VshError,
     };
     use crate::hook::{
         HookConfig, HookDecision, HookHandlerError, HookScope, HookVerdict, HookedRuntime,
@@ -1857,6 +2262,186 @@ mod tests {
     };
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(all(unix, feature = "bash"))]
+    fn bash_config() -> crate::BashConfig {
+        let executable = std::env::var_os("VSH_BASH_WORKER").map_or_else(
+            || {
+                std::env::current_exe()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join("vsh-bash-worker")
+            },
+            PathBuf::from,
+        );
+        assert!(
+            executable.is_file(),
+            "build vsh-bash-worker before public runtime tests"
+        );
+        crate::BashConfig::new(executable)
+    }
+
+    #[cfg(all(unix, feature = "bash"))]
+    #[test]
+    fn bash_preview_restart_hook_and_commit_use_one_canonical_pipeline() {
+        let workspace = TestDirectory::new("bash-public");
+        fs::write(workspace.path().join("input.txt"), "old\n").unwrap();
+        fs::write(workspace.path().join("binary.bin"), [0xff]).unwrap();
+        let config = RuntimeConfig::new(workspace.path())
+            .with_worker_path("/missing-monty-worker")
+            .with_bash(bash_config())
+            .with_commit_hook(HookConfig::new("bash-test").with_scope(HookScope::AllRequests));
+        let runtime = Runtime::open(config.clone()).unwrap();
+        let receipt = runtime
+            .preview(
+                RunRequest::new(
+                    "cat input.txt | sed 's/old/new/' > output.txt; cat binary.bin; printf err >&2",
+                )
+                .with_language(crate::Language::Bash)
+                .with_detail(ReceiptDetail::Full),
+            )
+            .unwrap();
+        assert_eq!(receipt.state, TransactionState::AutoApproved);
+        assert!(!workspace.path().join("output.txt").exists());
+        let crate::ExecutionOutput::Bash(result) = &receipt.output else {
+            panic!("expected Bash output")
+        };
+        assert_eq!(result.stdout, [0xff]);
+        assert_eq!(result.stderr, b"err");
+        let preparation = runtime.prepare_commit(receipt.transaction).unwrap();
+        let event = preparation.event().unwrap();
+        assert_eq!(event.execution_context.language, crate::Language::Bash);
+        assert!(event.execution_context.complete);
+        assert!(
+            event
+                .effects
+                .iter()
+                .any(|effect| effect.origin == crate::EffectOrigin::BashCall)
+        );
+        drop(runtime);
+        let reopened = Runtime::open(config).unwrap();
+        let regenerated = reopened.prepare_commit(receipt.transaction).unwrap();
+        assert_eq!(regenerated.event(), preparation.event());
+        let committed = reopened
+            .resolve_commit(
+                &regenerated,
+                &HookDecision::approve("checked actual diff"),
+                1,
+            )
+            .unwrap()
+            .receipt;
+        assert_eq!(committed.output, receipt.output);
+        assert_eq!(committed.state, TransactionState::Committed);
+        assert_eq!(
+            fs::read(workspace.path().join("output.txt")).unwrap(),
+            b"new\n"
+        );
+        assert!(reopened.commit(receipt.transaction, 2).is_err());
+    }
+
+    #[cfg(all(unix, feature = "bash"))]
+    #[test]
+    fn bash_auto_stale_nonzero_denial_and_disabled_paths_fail_closed() {
+        let workspace = TestDirectory::new("bash-failures");
+        fs::write(workspace.path().join("input.txt"), "initial").unwrap();
+        fs::write(workspace.path().join(".env"), "mock-secret").unwrap();
+        let config = RuntimeConfig::new(workspace.path())
+            .with_in_process_execution()
+            .with_bash(bash_config());
+        let runtime = Runtime::open(config).unwrap();
+        let receipt = runtime
+            .run(
+                RunRequest::new("printf success > created.txt")
+                    .with_language(crate::Language::Bash)
+                    .with_mode(RunMode::Auto),
+            )
+            .unwrap();
+        assert_eq!(receipt.state, TransactionState::Committed);
+        assert_eq!(
+            fs::read(workspace.path().join("created.txt")).unwrap(),
+            b"success"
+        );
+        let stale = runtime
+            .preview(
+                RunRequest::new("cat input.txt > stale.txt").with_language(crate::Language::Bash),
+            )
+            .unwrap();
+        fs::write(workspace.path().join("input.txt"), "external").unwrap();
+        assert!(matches!(
+            runtime.commit(stale.transaction, 0),
+            Err(VshError::Commit(CommitError::Stale { .. }))
+        ));
+        assert!(!workspace.path().join("stale.txt").exists());
+        let failed = runtime
+            .run(
+                RunRequest::new("printf partial > partial.txt; cat .env; exit 7")
+                    .with_language(crate::Language::Bash)
+                    .with_mode(RunMode::Auto),
+            )
+            .unwrap_err();
+        let VshError::Bash {
+            source:
+                crate::BashError::Exit {
+                    code,
+                    denied_accesses,
+                    ..
+                },
+            changes,
+            changes_complete,
+        } = failed
+        else {
+            panic!("expected typed nonzero failure")
+        };
+        assert_eq!(code, 7);
+        assert_eq!(denied_accesses.len(), 1);
+        assert_eq!(changes.len(), 1);
+        assert!(changes_complete);
+        assert!(!workspace.path().join("partial.txt").exists());
+        let denied = runtime
+            .run(
+                RunRequest::new("cat .env || true; printf denied > denied.txt")
+                    .with_language(crate::Language::Bash)
+                    .with_mode(RunMode::Auto),
+            )
+            .unwrap();
+        assert_eq!(denied.state, TransactionState::Denied);
+        assert!(!workspace.path().join("denied.txt").exists());
+        let disabled =
+            Runtime::open(RuntimeConfig::new(workspace.path()).with_in_process_execution())
+                .unwrap();
+        assert!(matches!(
+            disabled.preview(RunRequest::new("true").with_language(crate::Language::Bash)),
+            Err(VshError::LanguageUnavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn cancellation_before_execution_or_commit_cannot_mutate_host() {
+        let workspace = TestDirectory::new("cancel-public");
+        let runtime =
+            Runtime::open(RuntimeConfig::new(workspace.path()).with_in_process_execution())
+                .unwrap();
+        let token = crate::ExecutionCancellation::default();
+        assert!(token.cancel());
+        assert!(matches!(
+            runtime.run_cancellable(
+                RunRequest::new("vsh_write('cancelled.txt', 'no')").with_mode(RunMode::Auto),
+                &token
+            ),
+            Err(VshError::Cancelled)
+        ));
+        let receipt = runtime
+            .preview(RunRequest::new("vsh_write('cancelled.txt', 'no')"))
+            .unwrap();
+        assert!(matches!(
+            runtime.commit_cancellable(receipt.transaction, 0, &token),
+            Err(VshError::Cancelled)
+        ));
+        assert!(!workspace.path().join("cancelled.txt").exists());
+    }
 
     struct TestDirectory(PathBuf);
 
@@ -1879,6 +2464,58 @@ mod tests {
     impl Drop for TestDirectory {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn cached_monty_adapter_preserves_policy_namespace_and_request_limits() {
+        use vsh_policy::{AccessSet, CallPolicy, ProtectedRule, TransactionPolicy};
+
+        let directory = TestDirectory::new("monty-adapter-template");
+        let policy = TransactionPolicy::new(
+            PolicyProfile::Strict,
+            TransactionPolicy::default().thresholds(),
+            CallPolicy::new(vec![
+                ProtectedRule::new("private.txt", AccessSet::CONTENT_READ).unwrap(),
+            ]),
+        )
+        .unwrap();
+        let config = RuntimeConfig::new(directory.path())
+            .with_in_process_execution()
+            .with_virtual_root(VirtualRoot::new("/project").unwrap())
+            .with_policy(policy);
+        let budget = ExecutionBudget {
+            max_os_calls: 17,
+            max_evidence_records: 53,
+            ..ExecutionBudget::default()
+        };
+        let expected = InProcessConfig::new(config.virtual_root.clone())
+            .with_call_policy(config.policy.call_policy().clone())
+            .with_limits(budget);
+        let runtime = Runtime::open(config.clone()).unwrap();
+        assert_eq!(runtime.monty_config(budget), expected);
+        assert_eq!(
+            runtime.execution.adapter().limits(),
+            ExecutionBudget::default()
+        );
+        assert_ne!(
+            runtime.runtime_config_digest(&expected),
+            runtime.runtime_config_digest(&runtime.monty_config(ExecutionBudget::default()))
+        );
+
+        #[cfg(feature = "bash")]
+        {
+            let deferred = Runtime::open(
+                config
+                    .with_worker_path("/missing-monty-worker")
+                    .with_bash(crate::BashConfig::new("/missing-bash-worker")),
+            )
+            .unwrap();
+            assert_eq!(deferred.monty_config(budget), expected);
+            assert_eq!(
+                deferred.execution.adapter().limits(),
+                ExecutionBudget::default()
+            );
         }
     }
 
@@ -2039,6 +2676,150 @@ type({}.keys())
     }
 
     #[test]
+    fn changed_policy_blocks_every_pending_authority_path_after_restart() {
+        for (profile, hook, approved) in [
+            (PolicyProfile::Balanced, false, false),
+            (PolicyProfile::Strict, false, false),
+            (PolicyProfile::Strict, false, true),
+            (PolicyProfile::Balanced, true, false),
+            (PolicyProfile::Strict, true, false),
+        ] {
+            let directory = TestDirectory::new("changed-policy");
+            let mut config = RuntimeConfig::new(directory.path())
+                .with_policy_profile(profile)
+                .with_in_process_execution();
+            if hook {
+                config = config.with_commit_hook(
+                    HookConfig::new("policy-check").with_scope(HookScope::AllRequests),
+                );
+            }
+            let runtime = Runtime::open(config.clone()).unwrap();
+            let receipt = runtime
+                .preview(RunRequest::new(
+                    "vsh_write('/workspace/output.txt', 'blocked')",
+                ))
+                .unwrap();
+            if approved {
+                runtime
+                    .approve(
+                        receipt.transaction,
+                        PrincipalId::digest_label("reviewer"),
+                        1,
+                        100,
+                    )
+                    .unwrap();
+            }
+            // Also makes an auto-approved, process-local preview durable.
+            let prepared = runtime.prepare_commit(receipt.transaction).unwrap();
+            let before = runtime.transaction(receipt.transaction).unwrap();
+            drop(runtime);
+
+            let changed =
+                Runtime::open(config.clone().with_policy_profile(PolicyProfile::Paranoid)).unwrap();
+            for error in [
+                changed
+                    .approve(
+                        receipt.transaction,
+                        PrincipalId::digest_label("reviewer"),
+                        1,
+                        100,
+                    )
+                    .unwrap_err(),
+                changed.prepare_commit(receipt.transaction).unwrap_err(),
+                changed
+                    .resolve_commit(&prepared, &HookDecision::FollowPolicy, 2)
+                    .unwrap_err(),
+                changed.commit(receipt.transaction, 2).unwrap_err(),
+            ] {
+                assert!(
+                    matches!(error, VshError::PolicyChanged { transaction } if transaction == receipt.transaction)
+                );
+            }
+            assert_eq!(changed.transaction(receipt.transaction).unwrap(), before);
+            assert!(!directory.path().join("output.txt").exists());
+            // Inspection and journal recovery remain available after a policy change.
+            changed.load_pending(receipt.transaction).unwrap();
+            changed.recover().unwrap();
+            drop(changed);
+
+            let original = Runtime::open(config).unwrap();
+            let prepared = original.prepare_commit(receipt.transaction).unwrap();
+            if hook {
+                original
+                    .resolve_commit(&prepared, &HookDecision::approve("exact evidence"), 2)
+                    .unwrap();
+            } else {
+                if !approved && profile == PolicyProfile::Strict {
+                    original
+                        .approve(
+                            receipt.transaction,
+                            PrincipalId::digest_label("reviewer"),
+                            1,
+                            100,
+                        )
+                        .unwrap();
+                }
+                original.commit(receipt.transaction, 2).unwrap();
+            }
+            assert_eq!(
+                fs::read(directory.path().join("output.txt")).unwrap(),
+                b"blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn changed_policy_does_not_block_recovery_of_an_entered_commit() {
+        use vsh_commit::FaultPoint;
+        use vsh_store::TransactionStore;
+
+        for point in [
+            FaultPoint::OperationApplied(0),
+            FaultPoint::CommitMarkerSynced,
+        ] {
+            let directory = TestDirectory::new("policy-recovery");
+            fs::write(directory.path().join("file.txt"), b"before").unwrap();
+            let config = RuntimeConfig::new(directory.path()).with_in_process_execution();
+            let runtime = Runtime::open(config.clone()).unwrap();
+            let receipt = runtime
+                .preview(RunRequest::new("vsh_write('/workspace/file.txt', 'after')"))
+                .unwrap();
+            runtime.prepare_commit(receipt.transaction).unwrap();
+            let artifact = runtime.load_pending(receipt.transaction).unwrap();
+            let plan = super::CommitPlan::new(
+                &artifact.binding,
+                &artifact.diff,
+                &artifact.read_set,
+                &artifact.write_set,
+            )
+            .unwrap();
+            let reservation = runtime.store.reserve(receipt.transaction, 0).unwrap();
+            assert!(
+                runtime
+                    .committer
+                    .commit_with_faults(&runtime.store, reservation, &plan, &|candidate| candidate
+                        == point)
+                    .is_err()
+            );
+            drop(runtime);
+
+            let reopened =
+                Runtime::open(config.with_policy_profile(PolicyProfile::Paranoid)).unwrap();
+            let (state, bytes): (_, &[u8]) = if point == FaultPoint::CommitMarkerSynced {
+                (TransactionState::Committed, b"after")
+            } else {
+                (TransactionState::Failed, b"before")
+            };
+            assert_eq!(
+                reopened.transaction(receipt.transaction).unwrap().state(),
+                state
+            );
+            assert_eq!(fs::read(directory.path().join("file.txt")).unwrap(), bytes);
+            assert!(reopened.recover().unwrap().conflicts.is_empty());
+        }
+    }
+
+    #[test]
     fn approval_artifact_survives_runtime_restart() {
         let directory = TestDirectory::new("approval-restart");
         let config = RuntimeConfig::new(directory.path())
@@ -2056,6 +2837,10 @@ type({}.keys())
         assert_eq!(receipt.state, TransactionState::PendingApproval);
 
         let reopened = Runtime::open(config).unwrap();
+        let persisted = reopened.load_pending(receipt.transaction).unwrap();
+        assert!(persisted.binding.execution_evidence.is_some());
+        assert!(persisted.review.complete);
+        assert_eq!(persisted.receipt.output, receipt.output);
         reopened
             .approve(
                 receipt.transaction,
@@ -2067,7 +2852,10 @@ type({}.keys())
         let committed = reopened.commit(receipt.transaction, 101).unwrap();
 
         assert_eq!(committed.state, TransactionState::Committed);
-        assert_eq!(committed.value.py_repr(), "{'answer': 42}");
+        assert_eq!(
+            committed.output.monty_value().unwrap().py_repr(),
+            "{'answer': 42}"
+        );
         assert_eq!(committed.changes, receipt.changes);
         assert_eq!(
             fs::read(directory.path().join("restarted.txt")).unwrap(),
@@ -2626,6 +3414,7 @@ Path('/workspace/output.txt').write_text(value)
                 decoded: vsh_types::TransactionId::from_bytes([8; 32]),
             },
             VshError::RecoveryConflicts(Box::default()),
+            VshError::PolicyChanged { transaction },
             VshError::MissingPending { transaction },
             VshError::DuplicatePending { transaction },
             VshError::EphemeralCapacity {

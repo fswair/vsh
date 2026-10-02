@@ -6,7 +6,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from vsh import RunRequest, Runtime, __version__, engine_kind
+from vsh import BashConfig, BashResult, Language, RunRequest, Runtime, __version__, engine_kind
 
 
 def exercise_runtime(workspace: Path) -> None:
@@ -29,6 +29,19 @@ def exercise_runtime(workspace: Path) -> None:
         raise RuntimeError(f"unexpected commit state {committed.state!r}")
     if (workspace / "release-smoke.txt").read_text(encoding="utf-8") != "native-wheel":
         raise RuntimeError("native commit did not produce the expected host file")
+    if os.name == "posix":
+        (workspace / "binary.bin").write_bytes(b"\xff")
+        bash_runtime = Runtime.open(workspace, bash=BashConfig())
+        bash = bash_runtime.preview(
+            "printf 'bash-wheel' > bash-smoke.txt; cat binary.bin", language=Language.BASH
+        )
+        if not isinstance(bash.result, BashResult) or bash.result.stdout != b"\xff":
+            raise RuntimeError("bundled Bash worker did not preserve binary output")
+        if (workspace / "bash-smoke.txt").exists():
+            raise RuntimeError("Bash preview mutated the host")
+        bash_runtime.commit(bash.transaction, 0)
+        if (workspace / "bash-smoke.txt").read_bytes() != b"bash-wheel":
+            raise RuntimeError("Bash commit did not produce expected bytes")
 
 
 def main() -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 from collections.abc import Mapping
 from enum import Enum
 from os import PathLike
@@ -14,6 +15,109 @@ class VshRuntimeError(RuntimeError):
 
 class VshExecutionError(VshRuntimeError):
     """Monty compilation, execution, or hard-budget failure."""
+
+class VshBashError(VshExecutionError):
+    diagnostics: BashDiagnostics
+
+class Language(Enum):
+    MONTY: Language
+    BASH: Language
+
+class BashLimits:
+    def __init__(
+        self,
+        *,
+        max_work_units: int = ...,
+        max_aggregate_input_bytes: int = ...,
+        max_live_intermediate_bytes: int = ...,
+        max_commands: int = ...,
+        max_loop_iterations: int = ...,
+        max_total_loop_iterations: int = ...,
+        max_parser_operations: int = ...,
+    ) -> None: ...
+    @property
+    def max_work_units(self) -> int: ...
+    @property
+    def max_aggregate_input_bytes(self) -> int: ...
+    @property
+    def max_live_intermediate_bytes(self) -> int: ...
+    @property
+    def max_commands(self) -> int: ...
+    @property
+    def max_loop_iterations(self) -> int: ...
+    @property
+    def max_total_loop_iterations(self) -> int: ...
+    @property
+    def max_parser_operations(self) -> int: ...
+
+class BashConfig:
+    def __init__(
+        self,
+        *,
+        worker_path: str | PathLike[str] | None = ...,
+        limits: BashLimits | None = ...,
+        wall_timeout_ms: int | None = ...,
+        max_active_workers: int = ...,
+        max_idle_workers: int = ...,
+    ) -> None: ...
+    @property
+    def worker_path(self) -> PathLike[str] | None: ...
+    @property
+    def limits(self) -> BashLimits: ...
+    @property
+    def wall_timeout_ms(self) -> int | None: ...
+    @property
+    def max_active_workers(self) -> int: ...
+    @property
+    def max_idle_workers(self) -> int: ...
+
+class BashResult:
+    @property
+    def profile(self) -> str: ...
+    @property
+    def exit_code(self) -> int: ...
+    @property
+    def stdout(self) -> bytes: ...
+    @property
+    def stderr(self) -> bytes: ...
+
+class BashDiagnostics:
+    @property
+    def kind(self) -> str: ...
+    @property
+    def exit_code(self) -> int | None: ...
+    @property
+    def stdout(self) -> bytes: ...
+    @property
+    def stderr(self) -> bytes: ...
+    @property
+    def changes(self) -> list[CanonicalChange]: ...
+    @property
+    def changes_complete(self) -> bool: ...
+    @property
+    def denied_accesses(self) -> int: ...
+
+class ExecutionContext:
+    @property
+    def language(self) -> Language: ...
+    @property
+    def profile(self) -> str | None: ...
+    @property
+    def exit_code(self) -> int | None: ...
+    @property
+    def complete(self) -> bool: ...
+    @property
+    def evidence(self) -> str | None: ...
+    @property
+    def stdout_bytes(self) -> int: ...
+    @property
+    def stderr_bytes(self) -> int: ...
+
+class _Cancellation:
+    def __init__(self) -> None: ...
+    def cancel(self) -> bool: ...
+    @property
+    def commit_entered(self) -> bool: ...
 
 class VshStateError(VshRuntimeError):
     """Transaction lifecycle, approval, reservation, or replay failure."""
@@ -53,6 +157,8 @@ class ExecutionBudget:
         max_io_call_bytes: int | None = ...,
         max_path_bytes: int | None = ...,
         max_directory_entries: int | None = ...,
+        max_evidence_records: int | None = ...,
+        max_evidence_bytes: int | None = ...,
         max_output_bytes: int | None = ...,
         max_result_bytes: int | None = ...,
         max_exception_bytes: int | None = ...,
@@ -78,6 +184,10 @@ class ExecutionBudget:
     @property
     def max_directory_entries(self) -> int: ...
     @property
+    def max_evidence_records(self) -> int: ...
+    @property
+    def max_evidence_bytes(self) -> int: ...
+    @property
     def max_output_bytes(self) -> int: ...
     @property
     def max_result_bytes(self) -> int: ...
@@ -89,6 +199,7 @@ class RunRequest:
         self,
         code: str,
         *,
+        language: Language | None = ...,
         intent: str | None = ...,
         mode: RunMode | None = ...,
         detail: ReceiptDetail | None = ...,
@@ -96,6 +207,8 @@ class RunRequest:
     ) -> None: ...
     @property
     def code(self) -> str: ...
+    @property
+    def language(self) -> Language: ...
     @property
     def intent(self) -> str | None: ...
     @property
@@ -147,9 +260,11 @@ class ReviewContent:
     @property
     def blob(self) -> str: ...
     @property
-    def bytes(self) -> bytes: ...
+    def bytes(self) -> builtins.bytes: ...
 
 class RequestEvent:
+    @property
+    def execution_context(self) -> ExecutionContext: ...
     @property
     def contents(self) -> list[ReviewContent]: ...
     @property
@@ -265,6 +380,14 @@ class HookDecisionRecord:
 
 class Receipt:
     @property
+    def language(self) -> Language: ...
+    @property
+    def stderr(self) -> str: ...
+    @property
+    def stdout_bytes(self) -> bytes: ...
+    @property
+    def stderr_bytes(self) -> bytes: ...
+    @property
     def transaction(self) -> str: ...
     @property
     def base_snapshot(self) -> str: ...
@@ -338,11 +461,33 @@ class Runtime:
         data_directory: str | PathLike[str] | None = ...,
         policy: str = ...,
         worker_path: str | PathLike[str] | None = ...,
+        bash: BashConfig | None = ...,
         hook_id: str | None = ...,
         hook_scope: HookScope | None = ...,
         review_content_bytes: int = ...,
     ) -> Runtime: ...
     def run(self, request: RunRequest) -> Receipt: ...
+    def _run(self, request: RunRequest, cancellation: _Cancellation) -> Receipt: ...
+    def _preview(
+        self,
+        request: RunRequest | str,
+        cancellation: _Cancellation,
+        *,
+        language: Language | None = ...,
+        intent: str | None = ...,
+        detail: ReceiptDetail | None = ...,
+        budget: ExecutionBudget | None = ...,
+    ) -> Receipt: ...
+    def _commit(
+        self, transaction: str, now_unix_ms: int, cancellation: _Cancellation
+    ) -> Receipt: ...
+    def _resolve_commit(
+        self,
+        preparation: CommitPreparation,
+        decision: HookDecision,
+        now_unix_ms: int,
+        cancellation: _Cancellation,
+    ) -> CommitResolution: ...
     @overload
     def preview(self, request: RunRequest) -> Receipt: ...
     @overload
@@ -350,11 +495,13 @@ class Runtime:
         self,
         request: str,
         *,
+        language: Language | None = ...,
         intent: str | None = ...,
         detail: ReceiptDetail | None = ...,
         budget: ExecutionBudget | None = ...,
     ) -> Receipt: ...
     def discard_preview(self, transaction: str) -> bool: ...
+    def _cancel_receipt(self, transaction: str) -> None: ...
     def approve(
         self,
         transaction: str,

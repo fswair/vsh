@@ -36,6 +36,8 @@ denials, not approval prompts.
 | One I/O call | 4 MiB | single-frame allocation |
 | One path | 16 KiB | path/protocol abuse |
 | Directory entries | 100,000 | traversal fan-out |
+| Filesystem evidence records | 250,000 | effect/dependency retention |
+| Filesystem evidence storage | 64 MiB | parent-side owned paths and record storage |
 | Captured stdout | 1 MiB | output flooding |
 | Returned value | 1 MiB | host conversion |
 | Exception payload | 256 KiB | traceback/error flooding |
@@ -43,6 +45,24 @@ denials, not approval prompts.
 The supervised worker additionally enforces protocol frame and process boundaries.
 Snapshot, artifact, state-log, journal, plan, and commit paths have their own trusted
 host limits.
+
+`max_evidence_records` counts retained effects, read dependencies, write
+preconditions and adapter-retained policy denials together. Filtered/ignored
+traversal denials are not retained and do not consume this record count.
+`max_evidence_bytes` charges owned path bytes and
+conservative record/container costs; write preconditions also reserve their overlay
+slot and retained original paths after rename/chmod. Temporary directory/subtree
+paths, rebased copy destinations and traversal frontiers are checked against the
+available byte envelope before growth; they do not consume retained-record counts.
+Nested buffer scopes have independent checks, and canonical directory hashing uses
+bounded streaming scratch with unchanged identity. Repeated observations preserve
+ordered effects but reuse
+existing dependency keys. These limits do not inflate receipt file I/O or OS-call
+counters and are not a whole-process RSS, snapshot or blob-content cap.
+
+An evidence resource failure is terminal and sticky: it cannot be caught inside the
+guest to obtain a committable partial transaction. Native `VirtualFs::exists`
+returns `Result<bool, VfsError>` so a failed observation is not mistaken for absence.
 
 Duration is cumulative Monty **bytecode** time, not total request wall time. Worker
 heap is not parent-process or process-tree RSS. Parent-side high-level function work,

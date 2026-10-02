@@ -6,6 +6,11 @@ the SDK and writes a JSON receipt to stdout.
 
 ## Preview one program
 
+Monty is the default. To use the optional Unix Bash frontend, select both the host
+opt-in and guest language: `vsh run --enable-bash --language bash --workspace ./demo-workspace
+--code 'printf verified > report.txt'`. `--bash-worker` selects an explicit trusted
+executable; it does not enable host shell commands. See [bounded Bash](../integrations/bash.md).
+
 Choose an existing workspace and save supported Monty source in `transform.py`:
 
 ```python
@@ -27,6 +32,29 @@ Inspect `decision`, `changes`, `result_repr` and `commit.committed`, not only th
 process exit code. Policy denial or pending approval can be returned as a normal
 receipt. A runtime/compilation failure exits unsuccessfully instead of supplying a
 successful transaction receipt.
+
+### Bash failure diagnostics
+
+A Bash execution failure writes one JSON object to **stderr**, with no successful
+receipt on stdout and no committable transaction handle. `state` is `"failed"` and
+`committable` is `false`. `error.kind` distinguishes failure categories;
+`exit_code` preserves the guest status when available. The CLI exits with that status
+when it is between 1 and 255, otherwise with 1.
+
+The diagnostic `stdout` and `stderr` fields are base64 strings, each limited to
+65,536 raw bytes. Check `encoding` and `output_truncated` before decoding. `changes`
+describes virtual changes only; `changes_complete: false` means a complete diagnostic
+diff was unavailable, not that nothing changed in the simulation. No partial guest
+changes are committed when execution fails.
+
+```bash
+vsh run --enable-bash --language bash --workspace ./demo-workspace \
+  --mode auto --code 'printf diagnostic >&2; printf draft > report.txt; exit 7'
+```
+
+This exits with 7, reports the virtual `report.txt` change and leaves the host file
+unchanged. Ordinary receipt decisions such as pending approval still require inspecting
+the receipt; they are not Bash execution failures.
 
 ## Important cross-process limit
 

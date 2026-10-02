@@ -25,6 +25,7 @@ nav = [
     { "Efficient usage" = "guides/efficient-usage.md" },
     { "Troubleshooting" = "guides/troubleshooting.md" },
     { "Command line" = "guides/cli.md" },
+    { "Bounded Bash" = "integrations/bash.md" },
   ] },
   { "Tutorials" = [
     { "Pydantic AI: deterministic review" = "tutorials/pydantic-ai-deterministic.md" },

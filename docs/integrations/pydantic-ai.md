@@ -11,6 +11,15 @@ Use this page as the integration reference. For a guided build, continue with ei
 
 ## Choose the control layer
 
+The Bash options on this page describe the current source checkout, not the published
+0.5.0 packages. Follow the [Bash source setup](bash.md#enable-it-explicitly) to try them.
+
+Optional Unix Bash uses `VshCapability(workspace, bash=BashConfig(...))`. The same
+`vsh_run(code, intent, language="bash")` tool enters the shared native transaction
+pipeline; existing filesystem tools remain Monty-based. The language enum advertises
+only host-enabled frontends. Pending/rejected calls return feedback but withhold
+their result and both streams from the main agent. See [bounded Bash](bash.md).
+
 | Requirement | Configuration | Who may authorize commit? |
 |---|---|---|
 | Native policy is enough | `VshCapability(workspace, policy=...)` | Native VSH policy |
@@ -79,7 +88,7 @@ Pydantic AI agent
 VshCapability ── one RunRequest ──► native VSH runtime
                                       │
                                       ├─ immutable base snapshot
-                                      ├─ Monty + virtual filesystem
+                                      ├─ Monty or enabled Bash + virtual filesystem
                                       ├─ canonical diff + policy
                                       ├─ optional commit hook
                                       └─ revalidate + commit, or keep pending
@@ -102,6 +111,7 @@ VshCapability(
     data_directory=None,
     policy="balanced",
     worker_path=None,
+    bash=None,
     hook_handler=None,
     hook_scope=HookScope.REVIEW_REQUIRED,
     hook_id="vsh.pydantic-ai",
@@ -117,6 +127,7 @@ VshCapability(
 | `data_directory` | Trusted VSH state location; it must not overlap the workspace |
 | `policy` | Native transaction profile, normally `balanced` or `strict` |
 | `worker_path` | Explicit matching Monty worker, mainly useful from a source checkout |
+| `bash` | Optional `BashConfig`; explicitly enables the bounded Unix Bash frontend |
 | `hook_handler` | Sync or async application-owned `RequestEvent -> HookDecision` handler |
 | `hook_scope` | Review only policy-pending work, or every non-denied request |
 | `hook_id` | Stable identity bound into hook evidence and approvals |
@@ -144,7 +155,7 @@ tool calls; never put a host absolute path into model instructions.
 | `vsh_glob` | `(pattern, path="/workspace", max_results=1000)` | Bounded path matching |
 | `vsh_search` | `(query, path="/workspace", case_sensitive=True, max_results=100)` | Bounded literal text search |
 | `vsh_patch` | `(path, old, new, count=1)` | Exact text replacement |
-| `vsh_run` | `(code, intent)` | Dependent work in one atomic transaction |
+| `vsh_run` | `(code, intent, language="monty")` | Dependent work in one atomic transaction; Bash only when host-enabled |
 
 ### One tool or one compound transaction?
 
@@ -180,9 +191,11 @@ vsh_write('/workspace/config/change-note.txt', 'timeout: 10 -> 30\n')
 )
 ```
 
-Code passed to `vsh_run` is Python syntax executed by Monty, but it can call only the
-ten listed `vsh_*` filesystem functions. `read_file` and `write_file` do not exist.
-Pass normal Python arguments—do not pass one JSON object as a positional argument.
+By default (`language="monty"`), `vsh_run` accepts Python syntax executed by Monty;
+its filesystem functions are the ten listed `vsh_*` calls. `read_file` and `write_file`
+do not exist. Pass normal Python arguments, not one JSON positional object.
+When the host opts into Bash, `language="bash"` accepts bounded shell source instead;
+see the [Bash profile and guided workflow](bash.md). Both languages use the same commit gate.
 The `intent` is useful context for policy and review, never authority or proof.
 
 ## Agent-visible results
@@ -194,6 +207,9 @@ transaction: str
 state: str
 result: JSON-compatible value
 changed_paths: int
+language: str
+stdout: str
+stderr: str
 hook_verdict: str | None
 feedback: str | None
 requires_review: bool
@@ -210,9 +226,14 @@ requires_review: bool
 strings, tuples become arrays, mappings are normalized recursively, and bytes use
 `{"encoding": "base64", "data": "..."}`.
 
-Guest results are withheld until commit when a hook is attached. Review feedback can
-therefore describe a simulated read or write without releasing its guest return value.
+Guest results and both streams are withheld for every noncommitted result, whether
+or not a hook is attached. Review feedback can therefore describe a simulated read
+or write without releasing its guest return value.
 This does not erase reads already performed inside the isolated virtual execution.
+
+For committed Bash work, `result` contains `exit_code`, `profile`, and base64-wrapped
+`stdout`/`stderr` bytes. The top-level string streams are convenient display text,
+not authoritative binary evidence; use the encoded result streams for exact bytes.
 
 Give the main agent an explicit response rule:
 

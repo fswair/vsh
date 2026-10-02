@@ -1,16 +1,21 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use monty_proto::{MAX_FRAME_LEN, PROTOCOL_VERSION, decode_frame, pb, write_frame};
+#[cfg(test)]
+use monty_proto::write_frame;
+use monty_proto::{MAX_FRAME_LEN, PROTOCOL_VERSION, decode_frame, pb};
 use monty_types::MontyException;
+use vsh_execution::ExecutionCancellation;
 use vsh_types::RuntimeConfigDigest;
 use vsh_vfs::{EffectOrigin, VirtualFs};
+
+use crate::worker_input::WorkerInput;
 
 use super::{
     Budget, DeniedAccess, ExecutionError, ExecutionLimitExceeded, ExecutionOutcome,
@@ -127,6 +132,17 @@ impl SubprocessMonty {
     ///
     /// Returns a worker spawn error unless the executable reports exact Monty 0.0.22.
     pub fn new(config: SubprocessConfig) -> Result<Self, ExecutionError> {
+        Self::new_cancellable(config, &ExecutionCancellation::default())
+    }
+
+    /// Validate the binary with request-scoped cancellation during lazy startup.
+    ///
+    /// # Errors
+    /// Returns the errors of [`Self::new`] or cancellation.
+    pub fn new_cancellable(
+        config: SubprocessConfig,
+        cancellation: &ExecutionCancellation,
+    ) -> Result<Self, ExecutionError> {
         if config
             .wall_timeout_override
             .is_some_and(|timeout| timeout.is_zero())
@@ -136,7 +152,7 @@ impl SubprocessMonty {
                 "worker wall timeout must be greater than zero",
             ));
         }
-        verify_worker_version(&config.worker_path)?;
+        verify_worker_version(&config.worker_path, cancellation)?;
         Ok(Self {
             config,
             idle: Mutex::new(Vec::new()),
@@ -184,26 +200,54 @@ impl SubprocessMonty {
         filesystem: &mut VirtualFs,
         adapter: &InProcessConfig,
     ) -> Result<ExecutionOutcome, ExecutionError> {
-        let code = code.into();
-        let program_bytes = u64::try_from(code.len()).unwrap_or(u64::MAX);
-        let max_program_bytes = u64::try_from(adapter.limits.max_program_bytes).unwrap_or(u64::MAX);
-        if program_bytes > max_program_bytes {
-            return Err(limit_error(ExecutionLimitExceeded::ProgramBytes {
-                limit: max_program_bytes,
-                attempted: program_bytes,
-            }));
-        }
+        self.execute_cancellable(code, filesystem, adapter, &ExecutionCancellation::default())
+    }
 
+    /// Execute with cooperative cancellation and retire a cancelled worker.
+    ///
+    /// # Errors
+    /// Returns the execution failures of [`Self::execute`] or cancellation.
+    pub fn execute_cancellable(
+        &self,
+        code: impl Into<String>,
+        filesystem: &mut VirtualFs,
+        adapter: &InProcessConfig,
+        cancellation: &ExecutionCancellation,
+    ) -> Result<ExecutionOutcome, ExecutionError> {
+        if cancellation.is_cancelled() {
+            return Err(ExecutionError::Cancelled);
+        }
+        let code = code.into();
+        adapter
+            .limits
+            .check_program_bytes(code.len())
+            .map_err(limit_error)?;
+
+        filesystem.limit_evidence(adapter.limits.evidence_limits());
+        filesystem
+            .check_evidence()
+            .map_err(|source| ExecutionError::InternalVfs(Box::new(source)))?;
         let mut worker = self.checkout()?;
+        worker.cancellation = Some(cancellation.clone());
         let wall_timeout = self.config.wall_timeout(adapter);
-        let result = worker.execute(&code, filesystem, adapter, wall_timeout);
+        let result = worker.execute(code, filesystem, adapter, wall_timeout);
+        if cancellation.is_cancelled() {
+            return Err(ExecutionError::Cancelled);
+        }
         let session_is_reusable = matches!(
             result,
             Ok(_)
                 | Err(ExecutionError::Monty { .. } | ExecutionError::UnsupportedSuspension { .. })
         );
         if session_is_reusable && worker.reset(wall_timeout).is_ok() {
+            if cancellation.is_cancelled() {
+                return Err(ExecutionError::Cancelled);
+            }
+            worker.cancellation = None;
             self.checkin(worker)?;
+        }
+        if cancellation.is_cancelled() {
+            return Err(ExecutionError::Cancelled);
         }
         result
     }
@@ -355,27 +399,33 @@ impl WorkerFrameLimits {
 #[derive(Debug)]
 struct Worker {
     process: Child,
-    stdin: ChildStdin,
+    stdin: WorkerInput,
     events: Option<Receiver<WorkerMessage>>,
     reader: Option<JoinHandle<()>>,
     frame_limits: Arc<WorkerFrameLimits>,
+    cancellation: Option<ExecutionCancellation>,
+    write_deadline: Option<Instant>,
 }
 
 impl Worker {
     fn spawn(path: &Path) -> Result<Self, ExecutionError> {
-        let mut process = Command::new(path)
+        let mut command = Command::new(path);
+        command
             .arg("subprocess")
             .env_clear()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|source| {
-                worker_error(
-                    WorkerFailureKind::Spawn,
-                    format!("cannot start {}: {source}", path.display()),
-                )
-            })?;
+            .stderr(Stdio::null());
+        #[cfg(coverage)]
+        if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+            command.env("LLVM_PROFILE_FILE", profile);
+        }
+        let mut process = command.spawn().map_err(|source| {
+            worker_error(
+                WorkerFailureKind::Spawn,
+                format!("cannot start {}: {source}", path.display()),
+            )
+        })?;
         let Some(stdin) = process.stdin.take() else {
             terminate_spawn(&mut process);
             return Err(worker_error(
@@ -389,6 +439,13 @@ impl Worker {
                 WorkerFailureKind::Spawn,
                 "spawned worker has no stdout pipe",
             ));
+        };
+        let stdin = match WorkerInput::new(stdin) {
+            Ok(input) => input,
+            Err(source) => {
+                terminate_spawn(&mut process);
+                return Err(worker_error(WorkerFailureKind::Spawn, source.to_string()));
+            }
         };
         let (sender, events) = mpsc::sync_channel(64);
         let frame_limits = Arc::new(WorkerFrameLimits::new());
@@ -434,6 +491,8 @@ impl Worker {
             events: Some(events),
             reader: Some(reader),
             frame_limits,
+            cancellation: None,
+            write_deadline: None,
         })
     }
 
@@ -443,7 +502,7 @@ impl Worker {
     )]
     fn execute(
         &mut self,
-        code: &str,
+        code: String,
         filesystem: &mut VirtualFs,
         adapter: &InProcessConfig,
         wall_timeout: Duration,
@@ -454,7 +513,7 @@ impl Worker {
             .ok_or_else(|| worker_error(WorkerFailureKind::Timeout, "worker deadline overflow"))?;
         self.configure(adapter, deadline)?;
         self.send(pb::parent_request::Kind::Feed(pb::Feed {
-            code: code.to_owned(),
+            code,
             inputs: monty_tool_inputs(),
             skip_type_check: true,
         }))?;
@@ -505,7 +564,7 @@ impl Worker {
                         .map_err(|source| {
                             worker_error(WorkerFailureKind::Protocol, source.to_string())
                         })?;
-                    let mut stats = budget.stats;
+                    let mut stats = budget.stats();
                     stats.output_bytes = stdout.len();
                     stats.result_bytes = measure_result(&value, adapter.limits.max_result_bytes)
                         .map_err(limit_error)?;
@@ -558,6 +617,7 @@ impl Worker {
         adapter: &InProcessConfig,
         deadline: Instant,
     ) -> Result<(), ExecutionError> {
+        self.write_deadline = Some(deadline);
         self.send(pb::parent_request::Kind::Configure(pb::Configure {
             script_name: adapter.script_name.clone(),
             limits: Some(pb::ResourceLimits {
@@ -601,7 +661,7 @@ impl Worker {
         let result = filesystem.with_effect_origin(EffectOrigin::MontyOsCall, |filesystem| {
             dispatch_call(&typed_call, filesystem, config, budget)
         });
-        let result = call_result(result, budget, denied_accesses)?;
+        let result = call_result(result, filesystem, budget, denied_accesses)?;
         self.send(pb::parent_request::Kind::ResumeCall(pb::ResumeCall {
             call_id: call.call_id,
             result: Some(result.into()),
@@ -633,7 +693,7 @@ impl Worker {
                 budget,
             )
         });
-        let result = call_result(result, budget, denied_accesses)?;
+        let result = call_result(result, filesystem, budget, denied_accesses)?;
         self.send(pb::parent_request::Kind::ResumeCall(pb::ResumeCall {
             call_id: call.call_id,
             result: Some(result.into()),
@@ -644,6 +704,7 @@ impl Worker {
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or_else(|| worker_error(WorkerFailureKind::Timeout, "reset deadline overflow"))?;
+        self.write_deadline = Some(deadline);
         self.send(pb::parent_request::Kind::Reset(pb::Reset {}))?;
         self.expect_ok(deadline, "reset")
     }
@@ -667,81 +728,119 @@ impl Worker {
     }
 
     fn send(&mut self, kind: pb::parent_request::Kind) -> Result<(), ExecutionError> {
-        write_frame(
-            &mut self.stdin,
-            &pb::ParentRequest {
-                trace_parent: None,
-                kind: Some(kind),
-            },
-        )
-        .map_err(|source| worker_error(WorkerFailureKind::Transport, source.to_string()))
+        let deadline = self.write_deadline.ok_or_else(|| {
+            worker_error(WorkerFailureKind::Protocol, "write deadline is unavailable")
+        })?;
+        self.stdin
+            .send(
+                pb::ParentRequest {
+                    trace_parent: None,
+                    kind: Some(kind),
+                },
+                deadline,
+                self.cancellation.as_ref(),
+            )
+            .map_err(|source| {
+                if self
+                    .cancellation
+                    .as_ref()
+                    .is_some_and(ExecutionCancellation::is_cancelled)
+                {
+                    ExecutionError::Cancelled
+                } else {
+                    let kind = if source.kind() == std::io::ErrorKind::TimedOut {
+                        WorkerFailureKind::Timeout
+                    } else {
+                        WorkerFailureKind::Transport
+                    };
+                    worker_error(kind, source.to_string())
+                }
+            })
     }
 
     fn receive(&mut self, deadline: Instant) -> Result<pb::ChildEvent, ExecutionError> {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            let _ = self.process.kill();
-            return Err(worker_error(
-                WorkerFailureKind::Timeout,
-                "worker wall-clock deadline exceeded",
-            ));
-        }
-        let events = self.events.as_ref().ok_or_else(|| {
-            worker_error(WorkerFailureKind::Crashed, "worker reader is unavailable")
-        })?;
-        match events.recv_timeout(remaining) {
-            Ok(WorkerMessage::Event(event)) => Ok(event),
-            Ok(WorkerMessage::Eof) => Err(worker_error(
-                WorkerFailureKind::Crashed,
-                "worker exited before a turn-ending event",
-            )),
-            Ok(WorkerMessage::ReadError(detail)) => {
-                Err(worker_error(WorkerFailureKind::Transport, detail))
-            }
-            Ok(WorkerMessage::FrameLimit {
-                kind,
-                length,
-                limit,
-            }) => {
-                let attempted = u64::from(length);
-                match (kind, self.frame_limits.semantic_limit(kind)) {
-                    (Some(1), Some(limit)) => {
-                        Err(limit_error(ExecutionLimitExceeded::OutputBytes {
-                            limit,
-                            attempted,
-                        }))
-                    }
-                    (Some(6), Some(limit)) => {
-                        Err(limit_error(ExecutionLimitExceeded::ResultBytes {
-                            limit,
-                            attempted,
-                        }))
-                    }
-                    (Some(7), Some(limit)) => {
-                        Err(limit_error(ExecutionLimitExceeded::ExceptionBytes {
-                            limit,
-                            attempted,
-                        }))
-                    }
-                    _ => Err(worker_error(
-                        WorkerFailureKind::Transport,
-                        format!(
-                            "worker event kind {kind:?} has {length} wire bytes; request maximum is {limit}"
-                        ),
-                    )),
-                }
-            }
-            Err(RecvTimeoutError::Timeout) => {
+        loop {
+            if self
+                .cancellation
+                .as_ref()
+                .is_some_and(ExecutionCancellation::is_cancelled)
+            {
                 let _ = self.process.kill();
-                Err(worker_error(
+                return Err(ExecutionError::Cancelled);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                let _ = self.process.kill();
+                return Err(worker_error(
                     WorkerFailureKind::Timeout,
                     "worker wall-clock deadline exceeded",
-                ))
+                ));
             }
-            Err(RecvTimeoutError::Disconnected) => Err(worker_error(
-                WorkerFailureKind::Crashed,
-                "worker reader disconnected",
-            )),
+            let events = self.events.as_ref().ok_or_else(|| {
+                worker_error(WorkerFailureKind::Crashed, "worker reader is unavailable")
+            })?;
+            let wait = if self.cancellation.is_some() {
+                remaining.min(Duration::from_millis(20))
+            } else {
+                remaining
+            };
+            return match events.recv_timeout(wait) {
+                Ok(WorkerMessage::Event(event)) => Ok(event),
+                Ok(WorkerMessage::Eof) => Err(worker_error(
+                    WorkerFailureKind::Crashed,
+                    "worker exited before a turn-ending event",
+                )),
+                Ok(WorkerMessage::ReadError(detail)) => {
+                    Err(worker_error(WorkerFailureKind::Transport, detail))
+                }
+                Ok(WorkerMessage::FrameLimit {
+                    kind,
+                    length,
+                    limit,
+                }) => {
+                    let attempted = u64::from(length);
+                    match (kind, self.frame_limits.semantic_limit(kind)) {
+                        (Some(1), Some(limit)) => {
+                            Err(limit_error(ExecutionLimitExceeded::OutputBytes {
+                                limit,
+                                attempted,
+                            }))
+                        }
+                        (Some(6), Some(limit)) => {
+                            Err(limit_error(ExecutionLimitExceeded::ResultBytes {
+                                limit,
+                                attempted,
+                            }))
+                        }
+                        (Some(7), Some(limit)) => {
+                            Err(limit_error(ExecutionLimitExceeded::ExceptionBytes {
+                                limit,
+                                attempted,
+                            }))
+                        }
+                        _ => Err(worker_error(
+                            WorkerFailureKind::Transport,
+                            format!(
+                                "worker event kind {kind:?} has {length} wire bytes; request maximum is {limit}"
+                            ),
+                        )),
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if wait < remaining {
+                        continue;
+                    }
+                    let _ = self.process.kill();
+                    Err(worker_error(
+                        WorkerFailureKind::Timeout,
+                        "worker wall-clock deadline exceeded",
+                    ))
+                }
+                Err(RecvTimeoutError::Disconnected) => Err(worker_error(
+                    WorkerFailureKind::Crashed,
+                    "worker reader disconnected",
+                )),
+            };
         }
     }
 }
@@ -757,17 +856,16 @@ fn read_worker_event(
     limits: &WorkerFrameLimits,
 ) -> Result<Option<pb::ChildEvent>, WorkerReadError> {
     let mut length = [0_u8; 4];
-    loop {
-        match reader.read(&mut length[..1]) {
+    let prefix_read = loop {
+        match reader.read(&mut length) {
             Ok(0) => return Ok(None),
-            Ok(1) => break,
-            Ok(_) => unreachable!("one-byte read returned more than one byte"),
+            Ok(count) => break count,
             Err(source) if source.kind() == std::io::ErrorKind::Interrupted => {}
             Err(source) => return Err(format!("frame prefix read failed: {source}").into()),
         }
-    }
+    };
     reader
-        .read_exact(&mut length[1..])
+        .read_exact(&mut length[prefix_read..])
         .map_err(|source| format!("worker exited during frame prefix: {source}"))?;
     let length = u32::from_le_bytes(length);
     let hard_limit = limits.hard();
@@ -874,13 +972,20 @@ impl Drop for Worker {
         self.events.take();
         let _ = self.process.kill();
         let _ = self.process.wait();
+        self.stdin.close();
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
     }
 }
 
-fn verify_worker_version(path: &Path) -> Result<(), ExecutionError> {
+fn verify_worker_version(
+    path: &Path,
+    cancellation: &ExecutionCancellation,
+) -> Result<(), ExecutionError> {
+    if cancellation.is_cancelled() {
+        return Err(ExecutionError::Cancelled);
+    }
     let mut process = Command::new(path)
         .arg("--version")
         .env_clear()
@@ -898,6 +1003,10 @@ fn verify_worker_version(path: &Path) -> Result<(), ExecutionError> {
         .checked_add(VERSION_CHECK_TIMEOUT)
         .ok_or_else(|| worker_error(WorkerFailureKind::Spawn, "version deadline overflow"))?;
     let status = loop {
+        if cancellation.is_cancelled() {
+            terminate_spawn(&mut process);
+            return Err(ExecutionError::Cancelled);
+        }
         match process.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
@@ -1093,6 +1202,83 @@ mod tests {
         assert_eq!(limits.semantic_limit(Some(3)), None);
         assert_eq!(limits.hard(), frame_cap(29));
         assert_eq!(frame_cap(usize::MAX), MAX_FRAME_LEN);
+    }
+
+    #[test]
+    fn framed_reader_handles_fragmentation_without_extra_prefix_reads() {
+        struct FragmentedReader<'a> {
+            remaining: &'a [u8],
+            chunk_size: usize,
+            interrupt_next: bool,
+            interrupt_alternately: bool,
+            reads: usize,
+        }
+
+        impl Read for FragmentedReader<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if buffer.is_empty() {
+                    return Ok(0);
+                }
+                self.reads += 1;
+                if self.interrupt_next {
+                    self.interrupt_next = false;
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                self.interrupt_next = self.interrupt_alternately;
+                let count = buffer.len().min(self.chunk_size);
+                self.remaining.read(&mut buffer[..count])
+            }
+        }
+
+        let limits = WorkerFrameLimits::new();
+        let event = pb::ChildEvent {
+            kind: Some(pb::child_event::Kind::Ok(pb::Ok {})),
+            ..pb::ChildEvent::default()
+        };
+        let mut encoded = Vec::new();
+        write_frame(&mut encoded, &event).unwrap();
+        let frame_size = encoded.len();
+        write_frame(&mut encoded, &event).unwrap();
+
+        for chunk_size in [1, 2, 3, 4, usize::MAX] {
+            for interrupt in [false, true] {
+                let mut reader = FragmentedReader {
+                    remaining: &encoded,
+                    chunk_size,
+                    interrupt_next: interrupt,
+                    interrupt_alternately: interrupt,
+                    reads: 0,
+                };
+                for frame in 1..=2 {
+                    assert!(matches!(
+                        read_worker_event(&mut reader, &limits),
+                        Ok(Some(decoded)) if decoded == event
+                    ));
+                    assert_eq!(reader.remaining.len(), encoded.len() - frame * frame_size);
+                    if chunk_size == usize::MAX && !interrupt {
+                        // A complete frame needs one prefix read and one body read.
+                        assert_eq!(reader.reads, frame * 2);
+                    }
+                }
+                assert!(matches!(read_worker_event(&mut reader, &limits), Ok(None)));
+            }
+        }
+
+        for length in 1..4 {
+            assert!(matches!(
+                read_worker_event(&mut &encoded[..length], &limits),
+                Err(WorkerReadError::Detail(detail)) if detail.contains("during frame prefix")
+            ));
+        }
+
+        let mut oversized = Vec::from(u32::MAX.to_le_bytes());
+        oversized.extend_from_slice(b"unread body");
+        let mut reader = oversized.as_slice();
+        assert!(matches!(
+            read_worker_event(&mut reader, &limits),
+            Err(WorkerReadError::Detail(detail)) if detail.contains("exceeds request maximum")
+        ));
+        assert_eq!(reader, b"unread body");
     }
 
     #[test]

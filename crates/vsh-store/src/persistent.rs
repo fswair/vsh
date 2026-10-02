@@ -816,9 +816,11 @@ fn write_record_frame(
     config: FileStoreConfig,
 ) -> Result<u64, TransactionStoreError> {
     validate_record(record, offset)?;
-    let payload = encode_record(record);
+    let mut frame = Vec::with_capacity(4 + MAX_PAYLOAD_BYTES + DIGEST_BYTES);
+    frame.extend_from_slice(&[0; 4]);
+    encode_record(record, &mut frame);
     let payload_length =
-        u32::try_from(payload.len()).map_err(|_| TransactionStoreError::PersistentCorrupt {
+        u32::try_from(frame.len() - 4).map_err(|_| TransactionStoreError::PersistentCorrupt {
             offset,
             reason: "state record cannot be framed",
         })?;
@@ -832,17 +834,17 @@ fn write_record_frame(
             maximum: config.max_log_bytes,
         });
     }
+    let checksum = BlobId::digest(&frame[4..]);
+    frame[..4].copy_from_slice(&payload_length.to_le_bytes());
+    frame.extend_from_slice(checksum.as_bytes());
     log.seek(SeekFrom::Start(offset))
         .map_err(|source| persistent_io("seek state append", source))?;
-    log.write_all(&payload_length.to_le_bytes())
-        .and_then(|()| log.write_all(&payload))
-        .and_then(|()| log.write_all(BlobId::digest(&payload).as_bytes()))
+    log.write_all(&frame)
         .map_err(|source| persistent_io("append state frame", source))?;
     Ok(observed)
 }
 
-fn encode_record(record: &TransactionRecord) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(MAX_PAYLOAD_BYTES);
+fn encode_record(record: &TransactionRecord, payload: &mut Vec<u8>) {
     payload.extend_from_slice(record.id().as_bytes());
     payload.extend_from_slice(record.base_snapshot().as_bytes());
     payload.push(state_tag(record.state()));
@@ -862,7 +864,6 @@ fn encode_record(record: &TransactionRecord) -> Vec<u8> {
             payload.extend_from_slice(&grant.expires_at_unix_ms().to_le_bytes());
         }
     }
-    payload
 }
 
 fn decode_record(payload: &[u8], offset: u64) -> Result<TransactionRecord, TransactionStoreError> {
@@ -1289,6 +1290,78 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn coalesced_frames_preserve_exact_record_bytes_and_limits() {
+        let directory = TestDirectory::new("frame-bytes");
+        for with_artifact in [false, true] {
+            for with_approval in [false, true] {
+                let mut record = TransactionRecord::new(id(1), snapshot(2));
+                if with_artifact {
+                    record = record.with_artifact(BlobId::from_bytes([3; 32]));
+                }
+                if with_approval {
+                    record.transition(TransactionState::Running).unwrap();
+                    record
+                        .transition(TransactionState::VirtualComplete)
+                        .unwrap();
+                    record
+                        .transition(TransactionState::PendingApproval)
+                        .unwrap();
+                    record.approval = Some(
+                        ApprovalGrant::new(id(1), PrincipalId::from_bytes([4; 32]), 10, 20)
+                            .unwrap(),
+                    );
+                    record.transition(TransactionState::Approved).unwrap();
+                }
+                let mut payload = Vec::new();
+                payload.extend_from_slice(record.id().as_bytes());
+                payload.extend_from_slice(record.base_snapshot().as_bytes());
+                payload.push(if with_approval { 7 } else { 1 });
+                payload.push(u8::from(with_artifact));
+                if with_artifact {
+                    payload.extend_from_slice(&[3; 32]);
+                }
+                payload.push(u8::from(with_approval));
+                if with_approval {
+                    payload.extend_from_slice(&[4; 32]);
+                    payload.extend_from_slice(&10_u64.to_le_bytes());
+                    payload.extend_from_slice(&20_u64.to_le_bytes());
+                }
+                let mut expected = u32::try_from(payload.len()).unwrap().to_le_bytes().to_vec();
+                expected.extend_from_slice(&payload);
+                expected.extend_from_slice(BlobId::digest(&payload).as_bytes());
+                let file_path = directory
+                    .path()
+                    .join(format!("{with_artifact}-{with_approval}"));
+                let mut file = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&file_path)
+                    .unwrap();
+                let maximum = u64::try_from(expected.len()).unwrap();
+                let too_small = FileStoreConfig {
+                    max_log_bytes: maximum - 1,
+                    ..FileStoreConfig::default()
+                };
+                assert!(matches!(
+                    super::write_record_frame(&mut file, &record, 0, too_small),
+                    Err(TransactionStoreError::PersistentLogLimit { .. })
+                ));
+                assert_eq!(file.metadata().unwrap().len(), 0);
+                let exact = FileStoreConfig {
+                    max_log_bytes: maximum,
+                    ..FileStoreConfig::default()
+                };
+                assert_eq!(
+                    super::write_record_frame(&mut file, &record, 0, exact).unwrap(),
+                    maximum
+                );
+                assert_eq!(fs::read(&file_path).unwrap(), expected);
+                assert_eq!(super::decode_record(&payload, 0).unwrap(), record);
+            }
+        }
     }
 
     #[test]

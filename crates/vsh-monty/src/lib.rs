@@ -21,17 +21,22 @@ use monty_types::{
 };
 pub use monty_types::{MontyObject, MontyType, OsFunctionCall};
 use vsh_policy::{AccessKind, CallPolicy, DeniedAccess};
-use vsh_types::{ContentVersion, NodeKind, NodeState, RuntimeConfigDigest, VPath, VPathError};
+use vsh_types::{ContentVersion, NodeKind, NodeState, RuntimeConfigDigest, VPath};
 use vsh_vfs::{EffectOrigin, VfsError, VirtualFs};
 
 mod tools;
 mod worker;
+mod worker_input;
 
 pub use tools::MONTY_VSH_TOOL_NAMES;
 pub use worker::{SubprocessConfig, SubprocessMonty};
 
-/// Canonical absolute path exposed to sandboxed code for the workspace root.
-pub const DEFAULT_VIRTUAL_ROOT: &str = "/workspace";
+use vsh_execution::ExecutionBudget as Budget;
+pub use vsh_execution::{
+    DEFAULT_VIRTUAL_ROOT, ExecutionLimitExceeded, ExecutionLimits, ExecutionStats,
+    VirtualPathError, VirtualRoot, VirtualRootError,
+};
+use vsh_execution::{FsGateway, GatewayError, OpenMode};
 const MAX_PYTHON_RESULT_DEPTH: usize = 200;
 
 /// Host surface whose value-conversion contract must accept an execution result.
@@ -190,233 +195,6 @@ fn python_type_object_is_supported(kind: &MontyType) -> bool {
     }
 }
 
-/// Per-execution limits enforced independently from Monty's bytecode tracker.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ExecutionLimits {
-    /// Maximum UTF-8 bytes accepted as one program.
-    pub max_program_bytes: usize,
-    /// Cumulative time Monty may spend executing bytecode.
-    pub max_duration: Duration,
-    /// Maximum Python call-stack depth.
-    pub max_recursion_depth: usize,
-    /// Maximum interpreter heap bytes enforced by the supervised worker allocator.
-    /// The process-local correctness harness cannot install a per-call global allocator.
-    pub max_memory_bytes: usize,
-    /// Maximum typed OS calls and high-level VSH tool calls serviced by the host adapter.
-    pub max_os_calls: u64,
-    /// Maximum cumulative bytes materialized by read and append operations.
-    pub max_read_bytes: u64,
-    /// Maximum cumulative bytes submitted by write and append operations.
-    pub max_write_bytes: u64,
-    /// Maximum payload bytes materialized by one typed read or write call.
-    pub max_io_call_bytes: usize,
-    /// Maximum UTF-8 bytes accepted in one Monty-visible path.
-    pub max_path_bytes: usize,
-    /// Maximum cumulative directory entries returned to Monty.
-    pub max_directory_entries: u64,
-    /// Maximum UTF-8 bytes retained from `print()` output.
-    pub max_output_bytes: usize,
-    /// Maximum deep host footprint of the returned Monty value.
-    pub max_result_bytes: usize,
-    /// Maximum retained exception message, traceback and structured payload bytes.
-    pub max_exception_bytes: usize,
-}
-
-impl Default for ExecutionLimits {
-    fn default() -> Self {
-        Self {
-            max_program_bytes: 1024 * 1024,
-            max_duration: Duration::from_secs(1),
-            max_recursion_depth: 512,
-            max_memory_bytes: 256 * 1024 * 1024,
-            max_os_calls: 10_000,
-            max_read_bytes: 64 * 1024 * 1024,
-            max_write_bytes: 64 * 1024 * 1024,
-            max_io_call_bytes: 4 * 1024 * 1024,
-            max_path_bytes: 16 * 1024,
-            max_directory_entries: 100_000,
-            max_output_bytes: 1024 * 1024,
-            max_result_bytes: 1024 * 1024,
-            max_exception_bytes: 256 * 1024,
-        }
-    }
-}
-
-/// A validated absolute namespace prefix exposed to Monty.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VirtualRoot {
-    absolute: String,
-}
-
-impl VirtualRoot {
-    /// Validate and construct a synthetic absolute workspace root.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`VirtualRootError`] unless `absolute` is a normalized POSIX-style
-    /// absolute path without NUL, parent, platform-prefix, or backslash components.
-    pub fn new(absolute: impl Into<String>) -> Result<Self, VirtualRootError> {
-        let absolute = absolute.into();
-        if absolute.contains('\0') {
-            return Err(VirtualRootError::NulByte);
-        }
-        if !absolute.starts_with('/') {
-            return Err(VirtualRootError::NotAbsolute);
-        }
-        if absolute.contains('\\') {
-            return Err(VirtualRootError::PlatformSeparator);
-        }
-
-        let mut components = Vec::new();
-        for component in absolute.split('/') {
-            match component {
-                "" | "." => {}
-                ".." => return Err(VirtualRootError::ParentComponent),
-                value if is_windows_prefix(value) => {
-                    return Err(VirtualRootError::PlatformPrefix);
-                }
-                value => components.push(value),
-            }
-        }
-        let absolute = if components.is_empty() {
-            "/".to_owned()
-        } else {
-            format!("/{}", components.join("/"))
-        };
-        Ok(Self { absolute })
-    }
-
-    /// Return the canonical absolute virtual prefix.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.absolute
-    }
-
-    /// Map a Monty-visible path into the relative VSH namespace.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`VirtualPathError`] when the input is malformed or outside this root.
-    pub fn map_path(&self, input: &str) -> Result<VPath, VirtualPathError> {
-        if input.is_empty() {
-            return Err(VirtualPathError::Empty);
-        }
-        if input.contains('\0') {
-            return Err(VirtualPathError::NulByte);
-        }
-
-        let portable = input.replace('\\', "/");
-        if portable.starts_with('/') {
-            let absolute = normalize_absolute(&portable)?;
-            let relative = if self.absolute == "/" {
-                absolute.strip_prefix('/').unwrap_or(&absolute)
-            } else if absolute == self.absolute {
-                ""
-            } else {
-                absolute
-                    .strip_prefix(&self.absolute)
-                    .and_then(|suffix| suffix.strip_prefix('/'))
-                    .ok_or(VirtualPathError::OutsideRoot)?
-            };
-            if relative.is_empty() {
-                Ok(VPath::root())
-            } else {
-                VPath::parse(relative).map_err(VirtualPathError::InvalidRelative)
-            }
-        } else {
-            VPath::parse(&portable).map_err(VirtualPathError::InvalidRelative)
-        }
-    }
-
-    fn present(&self, path: &VPath) -> String {
-        if path.is_root() {
-            return self.absolute.clone();
-        }
-        if self.absolute == "/" {
-            format!("/{}", path.as_str())
-        } else {
-            format!("{}/{}", self.absolute, path.as_str())
-        }
-    }
-}
-
-impl Default for VirtualRoot {
-    fn default() -> Self {
-        Self {
-            absolute: DEFAULT_VIRTUAL_ROOT.to_owned(),
-        }
-    }
-}
-
-/// Invalid synthetic-root configuration.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum VirtualRootError {
-    /// The configured root was relative.
-    NotAbsolute,
-    /// The root contained a parent component.
-    ParentComponent,
-    /// The root contained a NUL byte.
-    NulByte,
-    /// The root used a platform-specific separator.
-    PlatformSeparator,
-    /// The root contained a drive-style component.
-    PlatformPrefix,
-}
-
-impl fmt::Display for VirtualRootError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::NotAbsolute => "virtual root must be absolute",
-            Self::ParentComponent => "virtual root contains a parent component",
-            Self::NulByte => "virtual root contains a NUL byte",
-            Self::PlatformSeparator => "virtual root contains a platform separator",
-            Self::PlatformPrefix => "virtual root contains a platform prefix",
-        })
-    }
-}
-
-impl Error for VirtualRootError {}
-
-/// A Monty path that cannot name a node in the configured virtual root.
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum VirtualPathError {
-    /// The supplied path was empty.
-    Empty,
-    /// The supplied path contained a NUL byte.
-    NulByte,
-    /// Absolute normalization attempted to move above `/`.
-    EscapesAbsoluteRoot,
-    /// The normalized absolute path was outside the configured VSH root.
-    OutsideRoot,
-    /// Relative VSH path validation rejected the value.
-    InvalidRelative(VPathError),
-}
-
-impl fmt::Display for VirtualPathError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty => formatter.write_str("virtual path must not be empty"),
-            Self::NulByte => formatter.write_str("virtual path contains a NUL byte"),
-            Self::EscapesAbsoluteRoot => formatter.write_str("virtual path escapes absolute root"),
-            Self::OutsideRoot => formatter.write_str("virtual path is outside /workspace"),
-            Self::InvalidRelative(source) => {
-                write!(formatter, "invalid relative virtual path: {source}")
-            }
-        }
-    }
-}
-
-impl Error for VirtualPathError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::InvalidRelative(source) => Some(source),
-            Self::Empty | Self::NulByte | Self::EscapesAbsoluteRoot | Self::OutsideRoot => None,
-        }
-    }
-}
-
 /// Configuration for the process-local Monty correctness harness.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InProcessConfig {
@@ -493,9 +271,10 @@ impl InProcessConfig {
     #[must_use]
     pub fn security_digest(&self) -> RuntimeConfigDigest {
         let mut canonical = Vec::new();
-        encode_string("vsh-monty-config-v3", &mut canonical);
+        encode_string("vsh-monty-config-v5", &mut canonical);
         encode_string(env!("CARGO_PKG_VERSION"), &mut canonical);
         encode_string("monty-0.0.22", &mut canonical);
+        encode_string(vsh_execution::FS_GATEWAY_VERSION, &mut canonical);
         encode_string(self.virtual_root.as_str(), &mut canonical);
         encode_string(&self.script_name, &mut canonical);
         encode_u64(self.limits.max_program_bytes, &mut canonical);
@@ -508,6 +287,8 @@ impl InProcessConfig {
         encode_u64(self.limits.max_io_call_bytes, &mut canonical);
         encode_u64(self.limits.max_path_bytes, &mut canonical);
         canonical.extend_from_slice(&self.limits.max_directory_entries.to_le_bytes());
+        canonical.extend_from_slice(&self.limits.max_evidence_records.to_le_bytes());
+        canonical.extend_from_slice(&self.limits.max_evidence_bytes.to_le_bytes());
         encode_u64(self.limits.max_output_bytes, &mut canonical);
         encode_u64(self.limits.max_result_bytes, &mut canonical);
         encode_u64(self.limits.max_exception_bytes, &mut canonical);
@@ -534,110 +315,6 @@ impl Default for InProcessConfig {
         Self::new(VirtualRoot::default())
     }
 }
-
-/// Why execution stopped before a normal Monty result was produced.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum ExecutionLimitExceeded {
-    /// Program source exceeded its input cap before compilation.
-    ProgramBytes {
-        /// Configured maximum.
-        limit: u64,
-        /// Submitted UTF-8 byte count.
-        attempted: u64,
-    },
-    /// Typed OS-call count exceeded its cap.
-    OsCalls {
-        /// Configured maximum.
-        limit: u64,
-        /// Count the next call would have reached.
-        attempted: u64,
-    },
-    /// Cumulative materialized read bytes exceeded their cap.
-    ReadBytes {
-        /// Configured maximum.
-        limit: u64,
-        /// Byte count the operation would have reached.
-        attempted: u64,
-    },
-    /// Cumulative submitted write bytes exceeded their cap.
-    WriteBytes {
-        /// Configured maximum.
-        limit: u64,
-        /// Byte count the operation would have reached.
-        attempted: u64,
-    },
-    /// One typed read payload exceeded its per-call materialization cap.
-    ReadCallBytes {
-        /// Configured maximum.
-        limit: u64,
-        /// Bytes the call would materialize.
-        attempted: u64,
-    },
-    /// One typed write payload exceeded its per-call decode cap.
-    WriteCallBytes {
-        /// Configured maximum.
-        limit: u64,
-        /// Submitted bytes in this call.
-        attempted: u64,
-    },
-    /// One Monty-visible path exceeded its UTF-8 byte cap.
-    PathBytes {
-        /// Configured maximum.
-        limit: u64,
-        /// Submitted path bytes.
-        attempted: u64,
-    },
-    /// Cumulative returned directory entries exceeded their cap.
-    DirectoryEntries {
-        /// Configured maximum.
-        limit: u64,
-        /// Entry count the operation would have reached.
-        attempted: u64,
-    },
-    /// Streamed print output exceeded its retained UTF-8 byte cap.
-    OutputBytes {
-        /// Configured maximum.
-        limit: u64,
-        /// Bytes observed before stopping.
-        attempted: u64,
-    },
-    /// A completed return value exceeded its deep host-footprint cap.
-    ResultBytes {
-        /// Configured maximum.
-        limit: u64,
-        /// Deep bytes visited before stopping.
-        attempted: u64,
-    },
-    /// An escaping exception exceeded its host-output cap.
-    ExceptionBytes {
-        /// Configured maximum.
-        limit: u64,
-        /// Retained exception bytes.
-        attempted: u64,
-    },
-}
-
-impl fmt::Display for ExecutionLimitExceeded {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (name, limit, attempted) = match *self {
-            Self::ProgramBytes { limit, attempted } => ("program bytes", limit, attempted),
-            Self::OsCalls { limit, attempted } => ("OS calls", limit, attempted),
-            Self::ReadBytes { limit, attempted } => ("read bytes", limit, attempted),
-            Self::WriteBytes { limit, attempted } => ("write bytes", limit, attempted),
-            Self::ReadCallBytes { limit, attempted } => ("read call bytes", limit, attempted),
-            Self::WriteCallBytes { limit, attempted } => ("write call bytes", limit, attempted),
-            Self::PathBytes { limit, attempted } => ("path bytes", limit, attempted),
-            Self::DirectoryEntries { limit, attempted } => ("directory entries", limit, attempted),
-            Self::OutputBytes { limit, attempted } => ("output bytes", limit, attempted),
-            Self::ResultBytes { limit, attempted } => ("result bytes", limit, attempted),
-            Self::ExceptionBytes { limit, attempted } => ("exception bytes", limit, attempted),
-        };
-        write!(formatter, "{name} limit exceeded: {attempted} > {limit}")
-    }
-}
-
-impl Error for ExecutionLimitExceeded {}
 
 /// Phase in which Monty raised an exception outside sandboxed exception handling.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -689,6 +366,8 @@ impl Error for WorkerFailure {}
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ExecutionError {
+    /// Host cancellation won before commit entry.
+    Cancelled,
     /// Monty compilation or runtime failed.
     Monty {
         /// Failure phase.
@@ -714,6 +393,7 @@ pub enum ExecutionError {
 impl fmt::Display for ExecutionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Cancelled => formatter.write_str("execution cancelled"),
             Self::Monty { phase, source } => write!(formatter, "Monty {phase:?} failure: {source}"),
             Self::Limit(source) => write!(formatter, "execution budget failure: {source}"),
             Self::InternalVfs(source) => write!(formatter, "internal VFS failure: {source}"),
@@ -732,29 +412,10 @@ impl Error for ExecutionError {
             Self::Monty { source, .. } => Some(source),
             Self::Limit(source) => Some(source),
             Self::InternalVfs(source) => Some(source),
-            Self::UnsupportedSuspension { .. } => None,
+            Self::UnsupportedSuspension { .. } | Self::Cancelled => None,
             Self::Worker(source) => Some(source),
         }
     }
-}
-
-/// Host-side counters from one execution.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ExecutionStats {
-    /// Typed OS calls and high-level VSH tool calls serviced.
-    pub os_calls: u64,
-    /// File bytes materialized for reads or copy-on-write append.
-    pub read_bytes: u64,
-    /// Payload bytes submitted to writes or appends.
-    pub write_bytes: u64,
-    /// Directory entries returned to Monty.
-    pub directory_entries: u64,
-    /// UTF-8 output bytes retained after completion.
-    pub output_bytes: usize,
-    /// Protected capability attempts denied before any VFS access.
-    pub denied_accesses: u64,
-    /// Deep host footprint of the final returned value.
-    pub result_bytes: u64,
 }
 
 /// Successful result of a process-local Monty execution.
@@ -799,15 +460,14 @@ impl InProcessMonty {
         filesystem: &mut VirtualFs,
     ) -> Result<ExecutionOutcome, ExecutionError> {
         let code = code.into();
-        let program_bytes = u64::try_from(code.len()).unwrap_or(u64::MAX);
-        let max_program_bytes =
-            u64::try_from(self.config.limits.max_program_bytes).unwrap_or(u64::MAX);
-        if program_bytes > max_program_bytes {
-            return Err(limit_error(ExecutionLimitExceeded::ProgramBytes {
-                limit: max_program_bytes,
-                attempted: program_bytes,
-            }));
-        }
+        self.config
+            .limits
+            .check_program_bytes(code.len())
+            .map_err(limit_error)?;
+        filesystem.limit_evidence(self.config.limits.evidence_limits());
+        filesystem
+            .check_evidence()
+            .map_err(|source| ExecutionError::InternalVfs(Box::new(source)))?;
         let (input_names, input_values) = tools::inputs();
         let run = MontyRun::new(
             code,
@@ -834,7 +494,7 @@ impl InProcessMonty {
         loop {
             progress = match progress {
                 RunProgress::Complete(value) => {
-                    let mut stats = budget.stats;
+                    let mut stats = budget.stats();
                     stats.output_bytes = stdout.len();
                     stats.result_bytes =
                         measure_result(&value, self.config.limits.max_result_bytes)
@@ -857,7 +517,8 @@ impl InProcessMonty {
                                 &mut budget,
                             )
                         });
-                    let result = call_result(result, &mut budget, &mut denied_accesses)?;
+                    let result =
+                        call_result(result, filesystem, &mut budget, &mut denied_accesses)?;
                     call.resume(result, self.print_writer(&mut stdout))
                         .map_err(|source| self.monty_error(MontyFailurePhase::Runtime, source))?
                 }
@@ -883,7 +544,8 @@ impl InProcessMonty {
                                 &mut budget,
                             )
                         });
-                    let result = call_result(result, &mut budget, &mut denied_accesses)?;
+                    let result =
+                        call_result(result, filesystem, &mut budget, &mut denied_accesses)?;
                     call.resume(result, self.print_writer(&mut stdout))
                         .map_err(|source| self.monty_error(MontyFailurePhase::Runtime, source))?
                 }
@@ -921,6 +583,7 @@ fn limit_error(source: ExecutionLimitExceeded) -> ExecutionError {
 
 fn call_result(
     result: Result<MontyObject, CallFailure>,
+    filesystem: &mut VirtualFs,
     budget: &mut Budget,
     denied_accesses: &mut Vec<DeniedAccess>,
 ) -> Result<ExtFunctionResult, ExecutionError> {
@@ -928,105 +591,18 @@ fn call_result(
         Ok(value) => Ok(ExtFunctionResult::Return(value)),
         Err(CallFailure::Python(exception)) => Ok(ExtFunctionResult::Error(exception)),
         Err(CallFailure::Policy(denial)) => {
-            budget.stats.denied_accesses = budget.stats.denied_accesses.saturating_add(1);
+            budget.record_denial();
             let exception = permission_denied(denial.path.as_str());
-            denied_accesses.push(denial);
+            vsh_execution::retain_denial(filesystem, budget.limits(), denied_accesses, denial)
+                .map_err(|source| match source {
+                    GatewayError::Limit(source) => limit_error(source),
+                    GatewayError::Filesystem(source) => ExecutionError::InternalVfs(source),
+                    _ => unreachable!("denial retention only checks evidence resources"),
+                })?;
             Ok(ExtFunctionResult::Error(exception))
         }
         Err(CallFailure::Limit(source)) => Err(limit_error(source)),
         Err(CallFailure::InternalVfs(source)) => Err(ExecutionError::InternalVfs(Box::new(source))),
-    }
-}
-
-struct Budget {
-    limits: ExecutionLimits,
-    stats: ExecutionStats,
-}
-
-impl Budget {
-    const fn new(limits: ExecutionLimits) -> Self {
-        Self {
-            limits,
-            stats: ExecutionStats {
-                os_calls: 0,
-                read_bytes: 0,
-                write_bytes: 0,
-                directory_entries: 0,
-                output_bytes: 0,
-                denied_accesses: 0,
-                result_bytes: 0,
-            },
-        }
-    }
-
-    fn charge_os_call(&mut self) -> Result<(), ExecutionLimitExceeded> {
-        charge(
-            &mut self.stats.os_calls,
-            1,
-            self.limits.max_os_calls,
-            |limit, attempted| ExecutionLimitExceeded::OsCalls { limit, attempted },
-        )
-    }
-
-    fn charge_read(&mut self, bytes: u64) -> Result<(), CallFailure> {
-        let call_limit = u64::try_from(self.limits.max_io_call_bytes).unwrap_or(u64::MAX);
-        if bytes > call_limit {
-            return Err(CallFailure::Limit(ExecutionLimitExceeded::ReadCallBytes {
-                limit: call_limit,
-                attempted: bytes,
-            }));
-        }
-        charge(
-            &mut self.stats.read_bytes,
-            bytes,
-            self.limits.max_read_bytes,
-            |limit, attempted| ExecutionLimitExceeded::ReadBytes { limit, attempted },
-        )
-        .map_err(CallFailure::Limit)
-    }
-
-    fn charge_write(&mut self, bytes: usize) -> Result<(), CallFailure> {
-        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
-        let call_limit = u64::try_from(self.limits.max_io_call_bytes).unwrap_or(u64::MAX);
-        if bytes > call_limit {
-            return Err(CallFailure::Limit(ExecutionLimitExceeded::WriteCallBytes {
-                limit: call_limit,
-                attempted: bytes,
-            }));
-        }
-        charge(
-            &mut self.stats.write_bytes,
-            bytes,
-            self.limits.max_write_bytes,
-            |limit, attempted| ExecutionLimitExceeded::WriteBytes { limit, attempted },
-        )
-        .map_err(CallFailure::Limit)
-    }
-
-    fn charge_directory_entries(&mut self, entries: usize) -> Result<(), CallFailure> {
-        let entries = u64::try_from(entries).unwrap_or(u64::MAX);
-        charge(
-            &mut self.stats.directory_entries,
-            entries,
-            self.limits.max_directory_entries,
-            |limit, attempted| ExecutionLimitExceeded::DirectoryEntries { limit, attempted },
-        )
-        .map_err(CallFailure::Limit)
-    }
-}
-
-fn charge<E>(
-    used: &mut u64,
-    amount: u64,
-    limit: u64,
-    error: impl FnOnce(u64, u64) -> E,
-) -> Result<(), E> {
-    let attempted = used.saturating_add(amount);
-    if attempted > limit {
-        Err(error(limit, attempted))
-    } else {
-        *used = attempted;
-        Ok(())
     }
 }
 
@@ -1115,6 +691,34 @@ enum CallFailure {
     InternalVfs(VfsError),
 }
 
+impl From<ExecutionLimitExceeded> for CallFailure {
+    fn from(source: ExecutionLimitExceeded) -> Self {
+        Self::Limit(source)
+    }
+}
+
+impl From<GatewayError> for CallFailure {
+    fn from(source: GatewayError) -> Self {
+        let raw = match &source {
+            GatewayError::Policy(source) => source.path.to_string(),
+            GatewayError::Filesystem(source) => match source.as_ref() {
+                VfsError::NotFound { path }
+                | VfsError::AlreadyExists { path }
+                | VfsError::NotDirectory { path, .. }
+                | VfsError::NotFile { path, .. }
+                | VfsError::NotSymlink { path, .. }
+                | VfsError::IsDirectory { path }
+                | VfsError::DirectoryNotEmpty { path } => path.to_string(),
+                VfsError::InvalidRename { from, .. }
+                | VfsError::RenameTypeMismatch { from, .. } => from.to_string(),
+                _ => "<virtual filesystem>".to_owned(),
+            },
+            _ => "<virtual filesystem>".to_owned(),
+        };
+        classify_gateway(source, &raw)
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "keeping the exhaustive typed Monty boundary in one match makes new upstream variants fail compilation"
@@ -1127,22 +731,22 @@ fn dispatch_call(
 ) -> Result<MontyObject, CallFailure> {
     match call {
         OsFunctionCall::Exists(path) => {
-            bool_query(call, path.as_str(), filesystem, config, |state| {
+            bool_query(call, path.as_str(), filesystem, config, budget, |state| {
                 state.is_some()
             })
         }
         OsFunctionCall::IsFile(path) => {
-            bool_query(call, path.as_str(), filesystem, config, |state| {
+            bool_query(call, path.as_str(), filesystem, config, budget, |state| {
                 state.is_some_and(|state| state.kind() == NodeKind::File)
             })
         }
         OsFunctionCall::IsDir(path) => {
-            bool_query(call, path.as_str(), filesystem, config, |state| {
+            bool_query(call, path.as_str(), filesystem, config, budget, |state| {
                 state.is_some_and(|state| state.kind() == NodeKind::Directory)
             })
         }
         OsFunctionCall::IsSymlink(path) => {
-            bool_query(call, path.as_str(), filesystem, config, |state| {
+            bool_query(call, path.as_str(), filesystem, config, budget, |state| {
                 state.is_some_and(|state| state.kind() == NodeKind::Symlink)
             })
         }
@@ -1152,7 +756,7 @@ fn dispatch_call(
         OsFunctionCall::ReadBytes(path) => {
             read_bytes(call, path.as_str(), filesystem, config, budget)
         }
-        OsFunctionCall::Stat(path) => stat(call, path.as_str(), filesystem, config),
+        OsFunctionCall::Stat(path) => stat(call, path.as_str(), filesystem, config, budget),
         OsFunctionCall::Iterdir(path) => {
             read_directory(call, path.as_str(), filesystem, config, budget)
         }
@@ -1160,27 +764,32 @@ fn dispatch_call(
             absolute_path(call, path.as_str(), config)
         }
         OsFunctionCall::WriteText(args) => {
-            budget.charge_write(args.data.len())?;
             write_bytes(
                 call,
                 args.path.as_str(),
                 args.data.as_bytes(),
                 filesystem,
                 config,
+                budget,
             )?;
             Ok(MontyObject::Int(
                 i64::try_from(args.data.chars().count()).unwrap_or(i64::MAX),
             ))
         }
         OsFunctionCall::WriteBytes(args) => {
-            budget.charge_write(args.data.len())?;
-            write_bytes(call, args.path.as_str(), &args.data, filesystem, config)?;
+            write_bytes(
+                call,
+                args.path.as_str(),
+                &args.data,
+                filesystem,
+                config,
+                budget,
+            )?;
             Ok(MontyObject::Int(
                 i64::try_from(args.data.len()).unwrap_or(i64::MAX),
             ))
         }
         OsFunctionCall::AppendText(args) => {
-            budget.charge_write(args.data.len())?;
             append_bytes(
                 call,
                 args.path.as_str(),
@@ -1194,7 +803,6 @@ fn dispatch_call(
             ))
         }
         OsFunctionCall::AppendBytes(args) => {
-            budget.charge_write(args.data.len())?;
             append_bytes(
                 call,
                 args.path.as_str(),
@@ -1207,9 +815,14 @@ fn dispatch_call(
                 i64::try_from(args.data.len()).unwrap_or(i64::MAX),
             ))
         }
-        OsFunctionCall::Open(args) => {
-            open_file(call, args.path.as_str(), args.mode, filesystem, config)
-        }
+        OsFunctionCall::Open(args) => open_file(
+            call,
+            args.path.as_str(),
+            args.mode,
+            filesystem,
+            config,
+            budget,
+        ),
         OsFunctionCall::Mkdir(args) => mkdir(
             call,
             args.path.as_str(),
@@ -1217,17 +830,20 @@ fn dispatch_call(
             args.exist_ok,
             filesystem,
             config,
+            budget,
         ),
         OsFunctionCall::Unlink(path) => {
-            let mapped =
-                map_authorized_path(call, path.as_str(), false, config, &[AccessKind::Delete])?;
-            vfs(filesystem.unlink(&mapped), path.as_str())?;
+            let mapped = map_call_path(call, path.as_str(), false, config)?;
+            gateway(filesystem, config, budget)
+                .unlink(&mapped)
+                .map_err(|source| classify_gateway(source, path.as_str()))?;
             Ok(MontyObject::None)
         }
         OsFunctionCall::Rmdir(path) => {
-            let mapped =
-                map_authorized_path(call, path.as_str(), false, config, &[AccessKind::Delete])?;
-            vfs(filesystem.rmdir(&mapped), path.as_str())?;
+            let mapped = map_call_path(call, path.as_str(), false, config)?;
+            gateway(filesystem, config, budget)
+                .rmdir(&mapped)
+                .map_err(|source| classify_gateway(source, path.as_str()))?;
             Ok(MontyObject::None)
         }
         OsFunctionCall::Rename(args) => {
@@ -1245,7 +861,9 @@ fn dispatch_call(
                 config,
                 &[AccessKind::RenameDestination],
             )?;
-            vfs(filesystem.rename(&source, &destination), args.src.as_str())?;
+            gateway(filesystem, config, budget)
+                .rename(&source, &destination)
+                .map_err(|source| classify_gateway(source, args.src.as_str()))?;
             Ok(MontyObject::None)
         }
         OsFunctionCall::Getenv(args) => Ok(config.environment.get(&args.key).map_or_else(
@@ -1276,20 +894,19 @@ fn bool_query(
     raw: &str,
     filesystem: &mut VirtualFs,
     config: &InProcessConfig,
+    budget: &mut Budget,
     predicate: impl FnOnce(Option<NodeState>) -> bool,
 ) -> Result<MontyObject, CallFailure> {
     check_path_bytes(raw, config)?;
     let Ok(path) = config.virtual_root.map_path(raw) else {
         return Ok(MontyObject::Bool(false));
     };
-    config
-        .call_policy
-        .authorize(&path, AccessKind::MetadataRead)
-        .map_err(CallFailure::Policy)?;
-    let state = match filesystem.metadata(&path) {
+    let state = match gateway(filesystem, config, budget).metadata(&path) {
         Ok(state) => Some(state),
-        Err(VfsError::NotFound { .. }) => None,
-        Err(source) => return Err(classify_vfs(source, raw)),
+        Err(GatewayError::Filesystem(source)) if matches!(*source, VfsError::NotFound { .. }) => {
+            None
+        }
+        Err(source) => return Err(classify_gateway(source, raw)),
     };
     let _ = call;
     Ok(MontyObject::Bool(predicate(state)))
@@ -1344,13 +961,10 @@ fn read_file(
     config: &InProcessConfig,
     budget: &mut Budget,
 ) -> Result<Vec<u8>, CallFailure> {
-    let path = map_authorized_path(call, raw, false, config, &[AccessKind::ContentRead])?;
-    let state = vfs(filesystem.metadata(&path), raw)?;
-    if state.kind() != NodeKind::File {
-        return Err(not_regular(raw, state.kind()));
-    }
-    budget.charge_read(state.size())?;
-    vfs(filesystem.read(&path), raw)
+    let path = map_call_path(call, raw, false, config)?;
+    gateway(filesystem, config, budget)
+        .read(&path)
+        .map_err(|source| classify_gateway(source, raw))
 }
 
 fn write_bytes(
@@ -1359,15 +973,12 @@ fn write_bytes(
     bytes: &[u8],
     filesystem: &mut VirtualFs,
     config: &InProcessConfig,
+    budget: &mut Budget,
 ) -> Result<(), CallFailure> {
-    let path = map_authorized_path(
-        call,
-        raw,
-        false,
-        config,
-        &[AccessKind::Create, AccessKind::Modify],
-    )?;
-    vfs(filesystem.write(&path, bytes), raw)
+    let path = map_call_path(call, raw, false, config)?;
+    gateway(filesystem, config, budget)
+        .write(&path, bytes)
+        .map_err(|source| classify_gateway(source, raw))
 }
 
 fn append_bytes(
@@ -1378,22 +989,10 @@ fn append_bytes(
     config: &InProcessConfig,
     budget: &mut Budget,
 ) -> Result<(), CallFailure> {
-    let path = map_authorized_path(
-        call,
-        raw,
-        false,
-        config,
-        &[AccessKind::Create, AccessKind::Modify],
-    )?;
-    match filesystem.metadata(&path) {
-        Ok(state) if state.kind() == NodeKind::File => {
-            budget.charge_read(state.size())?;
-            vfs(filesystem.append(&path, bytes), raw)
-        }
-        Ok(state) => Err(not_regular(raw, state.kind())),
-        Err(VfsError::NotFound { .. }) => vfs(filesystem.write(&path, bytes), raw),
-        Err(source) => Err(classify_vfs(source, raw)),
-    }
+    let path = map_call_path(call, raw, false, config)?;
+    gateway(filesystem, config, budget)
+        .append(&path, bytes)
+        .map_err(|source| classify_gateway(source, raw))
 }
 
 fn read_directory(
@@ -1403,18 +1002,13 @@ fn read_directory(
     config: &InProcessConfig,
     budget: &mut Budget,
 ) -> Result<MontyObject, CallFailure> {
-    let path = map_authorized_path(call, raw, false, config, &[AccessKind::DirectoryRead])?;
-    let children = vfs(filesystem.read_dir(&path), raw)?;
-    budget.charge_directory_entries(children.len())?;
+    let path = map_call_path(call, raw, false, config)?;
+    let children = gateway(filesystem, config, budget)
+        .read_dir(&path)
+        .map_err(|source| classify_gateway(source, raw))?;
     Ok(MontyObject::List(
         children
             .iter()
-            .filter(|child| {
-                config
-                    .call_policy
-                    .authorize(child, AccessKind::MetadataRead)
-                    .is_ok()
-            })
             .map(|child| MontyObject::Path(config.virtual_root.present(child)))
             .collect(),
     ))
@@ -1425,9 +1019,12 @@ fn stat(
     raw: &str,
     filesystem: &mut VirtualFs,
     config: &InProcessConfig,
+    budget: &mut Budget,
 ) -> Result<MontyObject, CallFailure> {
-    let path = map_authorized_path(call, raw, false, config, &[AccessKind::MetadataRead])?;
-    let state = vfs(filesystem.metadata(&path), raw)?;
+    let path = map_call_path(call, raw, false, config)?;
+    let state = gateway(filesystem, config, budget)
+        .metadata(&path)
+        .map_err(|source| classify_gateway(source, raw))?;
     let mtime = match state.content() {
         Some(ContentVersion::Stamp(stamp)) => u64::try_from(stamp.mtime_ns)
             .map(Duration::from_nanos)
@@ -1458,34 +1055,20 @@ fn open_file(
     mode: FileMode,
     filesystem: &mut VirtualFs,
     config: &InProcessConfig,
+    budget: &mut Budget,
 ) -> Result<MontyObject, CallFailure> {
-    let accesses: &[AccessKind] = match mode {
-        FileMode::Read(_) => &[AccessKind::ContentRead],
-        FileMode::ReadUpdate(_) | FileMode::WriteUpdate(_) | FileMode::AppendUpdate(_) => &[
-            AccessKind::ContentRead,
-            AccessKind::Create,
-            AccessKind::Modify,
-        ],
-        FileMode::Write(_) | FileMode::Append(_) => &[AccessKind::Create, AccessKind::Modify],
+    let action = match mode {
+        FileMode::Read(_) => OpenMode::Read,
+        FileMode::ReadUpdate(_) => OpenMode::ReadUpdate,
+        FileMode::Write(_) => OpenMode::Write,
+        FileMode::WriteUpdate(_) => OpenMode::WriteUpdate,
+        FileMode::Append(_) => OpenMode::Append,
+        FileMode::AppendUpdate(_) => OpenMode::AppendUpdate,
     };
-    let path = map_authorized_path(call, raw, false, config, accesses)?;
-    match mode {
-        FileMode::Read(_) | FileMode::ReadUpdate(_) => {
-            let state = vfs(filesystem.metadata(&path), raw)?;
-            if state.kind() != NodeKind::File {
-                return Err(not_regular(raw, state.kind()));
-            }
-        }
-        FileMode::Write(_) | FileMode::WriteUpdate(_) => {
-            vfs(filesystem.write(&path, &[]), raw)?;
-        }
-        FileMode::Append(_) | FileMode::AppendUpdate(_) => match filesystem.metadata(&path) {
-            Ok(state) if state.kind() == NodeKind::File => {}
-            Ok(state) => return Err(not_regular(raw, state.kind())),
-            Err(VfsError::NotFound { .. }) => vfs(filesystem.write(&path, &[]), raw)?,
-            Err(source) => return Err(classify_vfs(source, raw)),
-        },
-    }
+    let path = map_call_path(call, raw, false, config)?;
+    gateway(filesystem, config, budget)
+        .prepare_open(&path, action)
+        .map_err(|source| classify_gateway(source, raw))?;
     Ok(MontyObject::FileHandle(MontyFileHandle {
         path: config.virtual_root.present(&path),
         mode,
@@ -1500,53 +1083,12 @@ fn mkdir(
     exist_ok: bool,
     filesystem: &mut VirtualFs,
     config: &InProcessConfig,
+    budget: &mut Budget,
 ) -> Result<MontyObject, CallFailure> {
     let path = map_call_path(call, raw, false, config)?;
-    authorize_path(config, &path, &[AccessKind::Create, AccessKind::Modify])?;
-    if parents {
-        let mut ancestor = path.parent();
-        while let Some(candidate) = ancestor {
-            if candidate.is_root() {
-                break;
-            }
-            authorize_path(
-                config,
-                &candidate,
-                &[AccessKind::Create, AccessKind::Modify],
-            )?;
-            ancestor = candidate.parent();
-        }
-    }
-    match filesystem.metadata(&path) {
-        Ok(state) if exist_ok && state.kind() == NodeKind::Directory => {
-            return Ok(MontyObject::None);
-        }
-        Ok(_) => return Err(already_exists(raw)),
-        Err(VfsError::NotFound { .. }) => {}
-        Err(source) => return Err(classify_vfs(source, raw)),
-    }
-
-    if !parents {
-        vfs(filesystem.mkdir(&path, 0o755), raw)?;
-        return Ok(MontyObject::None);
-    }
-
-    let mut missing = vec![path.clone()];
-    let mut cursor = path.parent();
-    while let Some(parent) = cursor {
-        match filesystem.metadata(&parent) {
-            Ok(state) if state.kind() == NodeKind::Directory => break,
-            Ok(_) => return Err(not_directory(raw)),
-            Err(VfsError::NotFound { .. }) => {
-                cursor = parent.parent();
-                missing.push(parent);
-            }
-            Err(source) => return Err(classify_vfs(source, raw)),
-        }
-    }
-    for directory in missing.iter().rev() {
-        vfs(filesystem.mkdir(directory, 0o755), raw)?;
-    }
+    gateway(filesystem, config, budget)
+        .mkdir_options(&path, 0o755, parents, exist_ok)
+        .map_err(|source| classify_gateway(source, raw))?;
     Ok(MontyObject::None)
 }
 
@@ -1570,16 +1112,7 @@ fn map_call_path(
 }
 
 fn check_path_bytes(raw: &str, config: &InProcessConfig) -> Result<(), CallFailure> {
-    let attempted = u64::try_from(raw.len()).unwrap_or(u64::MAX);
-    let limit = u64::try_from(config.limits.max_path_bytes).unwrap_or(u64::MAX);
-    if attempted > limit {
-        Err(CallFailure::Limit(ExecutionLimitExceeded::PathBytes {
-            limit,
-            attempted,
-        }))
-    } else {
-        Ok(())
-    }
+    vsh_execution::check_path_bytes(raw, config.limits).map_err(CallFailure::Limit)
 }
 
 fn map_authorized_path(
@@ -1599,17 +1132,28 @@ fn authorize_path(
     path: &VPath,
     accesses: &[AccessKind],
 ) -> Result<(), CallFailure> {
-    for access in accesses {
-        config
-            .call_policy
-            .authorize(path, *access)
-            .map_err(CallFailure::Policy)?;
-    }
-    Ok(())
+    vsh_execution::authorize_path(&config.call_policy, path, accesses).map_err(CallFailure::Policy)
 }
 
-fn vfs<T>(result: Result<T, VfsError>, raw: &str) -> Result<T, CallFailure> {
-    result.map_err(|source| classify_vfs(source, raw))
+fn gateway<'a>(
+    filesystem: &'a mut VirtualFs,
+    config: &'a InProcessConfig,
+    budget: &'a mut Budget,
+) -> FsGateway<'a> {
+    let origin = filesystem.effect_origin();
+    FsGateway::new(filesystem, &config.call_policy, budget, origin)
+}
+
+fn classify_gateway(source: GatewayError, raw: &str) -> CallFailure {
+    match source {
+        source @ GatewayError::InvalidOperation { .. } => CallFailure::Python(MontyException::new(
+            ExcType::ValueError,
+            Some(format!("vsh_copy() {source}")),
+        )),
+        GatewayError::Policy(source) => CallFailure::Policy(*source),
+        GatewayError::Limit(source) => CallFailure::Limit(source),
+        GatewayError::Filesystem(source) => classify_vfs(*source, raw),
+    }
 }
 
 fn classify_vfs(source: VfsError, raw: &str) -> CallFailure {
@@ -1656,23 +1200,11 @@ fn file_not_found(raw: &str) -> MontyException {
     )
 }
 
-fn already_exists(raw: &str) -> CallFailure {
-    CallFailure::Python(already_exists_exception(raw))
-}
-
 fn already_exists_exception(raw: &str) -> MontyException {
     MontyException::new(
         ExcType::FileExistsError,
         Some(format!("[Errno 17] File exists: {}", StringRepr(raw))),
     )
-}
-
-fn not_regular(raw: &str, kind: NodeKind) -> CallFailure {
-    if kind == NodeKind::Directory {
-        CallFailure::Python(is_directory_exception(raw))
-    } else {
-        CallFailure::Python(permission_denied(raw))
-    }
 }
 
 fn is_directory_exception(raw: &str) -> MontyException {
@@ -1698,31 +1230,6 @@ fn permission_denied(raw: &str) -> MontyException {
         ExcType::PermissionError,
         Some(format!("[Errno 13] Permission denied: {}", StringRepr(raw))),
     )
-}
-
-fn normalize_absolute(input: &str) -> Result<String, VirtualPathError> {
-    let mut components = Vec::new();
-    for component in input.split('/') {
-        match component {
-            "" | "." => {}
-            ".." => {
-                if components.pop().is_none() {
-                    return Err(VirtualPathError::EscapesAbsoluteRoot);
-                }
-            }
-            value => components.push(value),
-        }
-    }
-    if components.is_empty() {
-        Ok("/".to_owned())
-    } else {
-        Ok(format!("/{}", components.join("/")))
-    }
-}
-
-fn is_windows_prefix(component: &str) -> bool {
-    let bytes = component.as_bytes();
-    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
 #[cfg(test)]
@@ -1942,7 +1449,11 @@ vsh_remove('/workspace/copied/nested', recursive=True)
                 .unwrap(),
             b"Found one\n"
         );
-        assert!(!filesystem.exists(&VPath::parse("copied/nested").unwrap()));
+        assert!(
+            !filesystem
+                .exists(&VPath::parse("copied/nested").unwrap())
+                .unwrap()
+        );
     }
 
     #[test]
@@ -2022,6 +1533,41 @@ hits = vsh_search('needle', max_results=1)
             panic!("expected a Monty exception")
         };
         assert_eq!(source.exc_type(), ExcType::PermissionError);
+    }
+
+    #[test]
+    fn active_evidence_limits_abort_caught_reads_and_denials_before_complete_output() {
+        for (code, limits) in [
+            (
+                "from pathlib import Path\nfor i in range(4):\n    try:\n        Path('/workspace/missing').stat()\n    except OSError:\n        pass\n'done'",
+                ExecutionLimits {
+                    max_evidence_records: 3,
+                    ..ExecutionLimits::default()
+                },
+            ),
+            (
+                "from pathlib import Path\nfor i in range(4):\n    try:\n        Path('/workspace/.env').read_text()\n    except PermissionError:\n        pass\n'done'",
+                ExecutionLimits {
+                    max_evidence_records: 2,
+                    ..ExecutionLimits::default()
+                },
+            ),
+            (
+                "from pathlib import Path\nPath('/workspace/missing').exists()",
+                ExecutionLimits {
+                    max_evidence_bytes: 0,
+                    ..ExecutionLimits::default()
+                },
+            ),
+        ] {
+            let (_directory, mut filesystem) = filesystem(&[]);
+            let engine = InProcessMonty::new(InProcessConfig::default().with_limits(limits));
+            assert!(
+                matches!(engine.execute(code, &mut filesystem), Err(ExecutionError::Limit(source)) if matches!(*source, ExecutionLimitExceeded::EvidenceRecords { .. } | ExecutionLimitExceeded::EvidenceBytes { .. }))
+            );
+            assert!(filesystem.canonical_diff().is_err());
+            assert!(engine.execute("42", &mut filesystem).is_err());
+        }
     }
 
     #[test]
@@ -2188,6 +1734,21 @@ vsh_list('/workspace')
             changed_environment.security_digest()
         );
         assert_ne!(base.security_digest(), changed_limit.security_digest());
+        for limits in [
+            ExecutionLimits {
+                max_evidence_records: base.limits().max_evidence_records - 1,
+                ..base.limits()
+            },
+            ExecutionLimits {
+                max_evidence_bytes: base.limits().max_evidence_bytes - 1,
+                ..base.limits()
+            },
+        ] {
+            assert_ne!(
+                base.security_digest(),
+                base.clone().with_limits(limits).security_digest()
+            );
+        }
         assert_eq!(
             base.security_digest(),
             InProcessConfig::default().security_digest()
@@ -2428,8 +1989,16 @@ except PermissionError:
         assert_eq!(outcome.stats.denied_accesses, 1);
         assert_eq!(outcome.denied_accesses[0].path.as_str(), "tree/blocked");
         assert!(filesystem.canonical_diff().unwrap().is_empty());
-        assert!(filesystem.exists(&VPath::parse("tree/safe.txt").unwrap()));
-        assert!(filesystem.exists(&VPath::parse("tree/blocked/secret.txt").unwrap()));
+        assert!(
+            filesystem
+                .exists(&VPath::parse("tree/safe.txt").unwrap())
+                .unwrap()
+        );
+        assert!(
+            filesystem
+                .exists(&VPath::parse("tree/blocked/secret.txt").unwrap())
+                .unwrap()
+        );
     }
 
     #[test]

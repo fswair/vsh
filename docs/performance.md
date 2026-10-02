@@ -1,5 +1,296 @@
 # Performance and optimization evidence
 
+## Stable integration decision — 2026-10-02
+
+The latest local candidate also avoids an unsuccessful `mkdir` for every existing
+blob shard. It inspects the entry without following links and creates only missing
+directories. Opened/named identity checks, hash verification, locking and disk
+synchronization are unchanged. A separate shared-path representation experiment
+was rejected because it regressed reads and changed evidence-budget accounting.
+
+This series compares the **pre-Bash reference** with the current integration,
+not with the intermediate optimization checkout below. Both use the same worker,
+release-profile harness and permissions on macOS arm64: 500 ms warm-up, 100 retained
+samples per workload per run, ABBA ordering, 200 observations per side and
+`ceil((n - 1) * p)` quantiles. Builds, tests and profilers ran separately.
+
+| Workload | Reference p50 / p95, ms | Candidate p50 / p95, ms |
+| --- | ---: | ---: |
+| No-op | 0.143 / 0.167 | 0.138 / 0.151 |
+| Read 10 files | 0.821 / 0.966 | 0.807 / 0.894 |
+| Edit 20 files | 1.720 / 1.883 | 1.687 / 1.805 |
+| Search 10K files | 49.528 / 57.786 | 43.103 / 47.061 |
+| VSH glob 10K files | 58.187 / 73.602 | 52.800 / 56.197 |
+| Rename subtree 100 | 56.984 / 81.198 | 55.170 / 71.938 |
+| Delete subtree 100 | 46.982 / 67.767 | 43.967 / 55.095 |
+| VSH remove subtree 100 | 44.216 / 58.995 | 42.009 / 45.923 |
+| Delete 5K files | 134.083 / 155.528 | 129.465 / 164.458 |
+
+All receipt states and changed-path counts agree. Eight workloads satisfy the 5%
+p50/p95 target. Delete-5K improves p50 by 3.44%, but p95 regresses **5.74%**:
+8.930 ms above the reference, or 1.154 ms beyond the allowed 5% boundary.
+The project owner accepted **this measured performance exception** for integration
+on 2026-10-02. It is not a passing benchmark, a general threshold increase, a
+security/CI waiver, or a cross-platform performance guarantee. No release is implied.
+
+Reference tails vary materially between series. These end-to-end comparisons do
+not isolate the directory-opening change or prove it caused each improvement.
+Earlier unfavorable runs remain below and in the evidence plan; unchanged code
+was not repeatedly measured until a favorable result appeared. Raw runs and binary
+identities are recorded in `target/stable-readiness-evidence/` and
+`plans/policy_fix_and_latency_2026_10_02.md`. The Python/Bash table below predates
+the last directory-opening change; it is not a new measurement of that change.
+
+## Wildcard correction and canonical-diff work — 2026-10-02
+
+This follow-up fixes protected wildcard matching for literal-star filenames and
+binds the corrected semantics to policy v3. It also borrows canonical-diff candidate
+paths, expands each deleted subtree once, avoids temporary node/origin clones,
+short-circuits exact missing/tombstoned node lookups, and writes each durable state
+frame in one call instead of three. Checksums, locks, `sync_all`, snapshot freshness,
+evidence bounds and commit revalidation remain in place. Old pending authority
+requires a [fresh preview under the current policy](security.md#policy-changes-invalidate-pending-authority).
+
+The final native series compares the preceding optimized checkout with this
+candidate. It retains 100 observations per workload per invocation, 500 ms warm-up,
+and before/after/after/before ordering: 200 samples per side, using the ceil-index
+quantiles described below. Both versions use the same worker and harness, outside
+the filesystem sandbox. No builds, tests or profilers overlapped these runs.
+
+| Workload | Before p50 / p95, ms | After p50 / p95, ms |
+| --- | ---: | ---: |
+| No-op | 0.139 / 0.158 | 0.139 / 0.155 |
+| Read 10 files | 0.818 / 1.048 | 0.793 / 0.959 |
+| Edit 20 files | 1.747 / 2.149 | 1.666 / 1.770 |
+| Search 10K files | 43.863 / 49.429 | 43.246 / 51.042 |
+| VSH glob 10K files | 50.527 / 55.151 | 50.290 / 58.673 |
+| Rename subtree 100 | 53.922 / 58.338 | 53.967 / 63.354 |
+| Delete subtree 100 | 43.071 / 47.997 | 43.011 / 46.932 |
+| VSH remove subtree 100 | 42.050 / 46.201 | 43.093 / 52.906 |
+| Delete 5K files | 128.000 / 145.404 | 129.942 / 150.507 |
+
+The targeted delete-5K **diff stage** fell from per-run medians of 5.290/5.220 ms to
+3.333/3.281 ms, approximately 37%. This is not a 37% reduction in total request
+latency: its end-to-end median rose 1.52%. Read-10 and edit-20 medians improved
+3.15% and 4.64%, but **the 5% all-case p95 gate still fails** for glob (+6.39%),
+rename (+8.60%) and VSH remove-100 (+14.51%). Every receipt state and changed-path
+count agrees. No release or merge-readiness claim follows from these measurements.
+
+The final parent peak RSS observations were 33,783,808 / 32,653,312 bytes before and
+31,948,800 / 32,096,256 after. This series is lower, but the earlier candidate's
+ranges overlapped; there is no demonstrated uniform process-tree memory reduction.
+Workers are excluded from these parent figures.
+
+### Final Python/Bash series
+
+The unchanged public harness uses the old/new release-profile native extensions
+and one identical worker, again in ABBA order: 100 warm samples per side and 40
+cold opens. Median and floor-index p95 are used. All state/path/call/byte counters
+agree, and the new extension was restored after measurement.
+
+| Workload | Before p50 / p95, ms | After p50 / p95, ms |
+| --- | ---: | ---: |
+| No-op | 0.186 / 0.239 | 0.187 / 0.237 |
+| Read 10 files | 0.961 / 1.171 | 0.988 / 1.137 |
+| Pipeline 1 MiB | 7.987 / 8.418 | 7.972 / 8.372 |
+| Edit 20 files | 1.802 / 2.088 | 1.815 / 1.978 |
+| Copy 1 MiB | 3.511 / 3.664 | 3.511 / 3.683 |
+| Chmod 20 files | 13.003 / 14.110 | 12.946 / 15.366 |
+| Cold open + first preview | 5.824 / 6.063 | 5.882 / 9.880 |
+
+Chmod bind/store median is essentially unchanged: 11.884 → 11.842 ms. Fewer write
+calls did not establish a durable-I/O speedup; its p95 and the cold-start p95 worsened.
+The first complete candidate series also had unfavorable Bash tails and a native
+remove-100 tail failure. It is retained, not replaced by an unchanged-code retry.
+The second candidate changes point lookup; both series and exact binary identities
+are documented in `plans/policy_fix_and_latency_2026_10_02.md`. Raw evidence is under
+`target/policy-latency-evidence/`. Confirm tail latency on an isolated runner with
+adequate free disk space before treating it as an acceptance pass. No durability
+guarantee should be weakened to meet a latency target.
+
+## Earlier core optimization checkout — 2026-10-02
+
+This earlier local comparison starts from the already implemented Bash integration,
+not from the pre-Bash release. It removes repeated path copies, builds snapshot
+child indexes as sorted vectors, shares ancestor validation across directory
+siblings, and compiles policy component shapes once. Authorization also extracts
+the basename once per path, not once per rule. No dependency, public API, policy
+threshold, snapshot freshness check or durability guarantee changed.
+
+The native comparison uses the same release-profile harness and worker on both
+sides: 500 ms warm-up per workload, 100 retained samples per run, ordered
+before/after/after/before, pooling 200 observations per version. Quantiles select
+`ceil((n - 1) * p)`. Builds, tests and profilers ran separately. Both versions ran
+outside the filesystem sandbox because macOS process-memory accounting required it.
+Absolute timings must not be mixed with earlier sandboxed measurements.
+
+| Workload | Before p50 / p95, ms | After p50 / p95, ms | Median change |
+| --- | ---: | ---: | ---: |
+| No-op | 0.141 / 0.165 | 0.137 / 0.168 | -2.89% |
+| Read 10 files | 0.822 / 1.004 | 0.800 / 0.893 | -2.69% |
+| Edit 20 files | 1.706 / 2.000 | 1.677 / 1.861 | -1.69% |
+| Search 10K files | 48.130 / 63.493 | 42.546 / 45.540 | -11.60% |
+| VSH glob 10K files | 53.915 / 58.061 | 49.733 / 51.877 | -7.76% |
+| Rename subtree 100 | 55.037 / 62.616 | 53.012 / 72.885 | -3.68% |
+| Delete subtree 100 | 45.983 / 52.952 | 42.960 / 48.587 | -6.57% |
+| VSH remove subtree 100 | 44.081 / 53.078 | 42.060 / 47.081 | -4.58% |
+| Delete 5K files | 164.618 / 204.871 | 157.002 / 216.532 | -4.63% |
+
+All receipt states and changed-path counts agree. All nine medians improved, but
+**the 5% all-case tail gate still fails**: rename p95 rose 16.40%, delete-5K p95
+rose 5.69%. Earlier unsuccessful optimization attempts and unfavorable runs were
+retained. These are checkout measurements, not release or merge-readiness claims.
+
+The policy microbenchmark's median dropped 28.94% (5.231 → 3.717 ms per 10K
+authorizations); its p95 rose 22.12%. It uses three complete ABBA blocks with 60
+samples per side and verifies exactly 1,000 denied paths per invocation. This
+microbenchmark does not replace end-to-end measurements.
+
+Parent-process peak RSS was 33,423,360 / 33,308,672 bytes before and
+31,506,432 / 33,865,728 bytes after. These ranges overlap: there is **no demonstrated
+uniform memory reduction**. The unchanged worker's memory is excluded. This shared
+macOS arm64 machine also had less than 1 GiB free; durable-I/O tail behavior needs
+confirmation on a dedicated runner. Raw data is under
+`target/optimization-evidence/`; implementation decisions, rejected attempts,
+correctness evidence and remaining costs are recorded in
+`plans/performance_optimization_2026_10_02.md` in the checkout.
+
+### Updated public Python/Bash comparison
+
+The unchanged Bash harness also ran before/after/after/before using the old and
+rebuilt native extension, with one identical worker. Each side pools 100 warm
+samples per workload and 40 cold opens. Bash uses the median and the
+`floor((n - 1) * 0.95)` tail index. State, changed-path count, OS calls and byte
+accounting agree in every sample.
+
+| Workload | Before p50 / p95, ms | After p50 / p95, ms |
+| --- | ---: | ---: |
+| No-op | 0.197 / 0.249 | 0.193 / 0.291 |
+| Read 10 files | 1.096 / 1.393 | 1.109 / 2.276 |
+| Pipeline 1 MiB | 8.093 / 10.351 | 8.049 / 8.586 |
+| Edit 20 files | 2.104 / 3.832 | 1.987 / 2.243 |
+| Copy 1 MiB | 3.772 / 4.391 | 3.581 / 4.359 |
+| Chmod 20 files | 13.018 / 18.214 | 14.006 / 19.322 |
+| Cold open + first preview | 9.401 / 10.907 | 9.520 / 11.602 |
+
+Editing and copying medians improved by 5.55% and 5.07%. This does **not** imply
+every Bash workload improved: chmod regressed 7.59% in median and 6.08% in p95,
+and read/no-op tails worsened. Chmod's measured execution, snapshot and policy
+stages decreased, while its bind/store median increased from 11.880 to 12.783 ms.
+Required durable storage remains a substantial cost; no synchronization or
+integrity check was removed to improve these numbers.
+
+## Bash integration checkout — 2026-10-01–02
+
+These are local macOS arm64 **checkout** measurements, not a published release or
+cross-platform latency guarantee. Optimized native builds use exact Bashkit 0.18.2,
+Monty 0.0.22 and matching supervised workers. All timed calls are previews, not commits.
+
+### Public Python Bash surface
+
+`benchmarks/bash_runtime.py` uses a disposable 21-file workspace, including one
+1 MiB binary file. Each warm case retains 50 samples after one discarded warmup;
+20 independent cold runtime/first-call samples measure startup separately. Each call
+still captures a fresh snapshot; process reuse does not reuse interpreter state.
+Bash p50 is the sample median; p95 selects sorted index `floor((n - 1) * 0.95)`.
+
+| Workload | p50 / p95, ms | Policy outcome |
+| --- | ---: | --- |
+| No-op | 0.271 / 0.318 | Auto-approved |
+| Read 10 files | 1.037 / 1.322 | Auto-approved |
+| 1 MiB `cat` → `wc` pipeline | 7.660 / 7.943 | Auto-approved |
+| Edit 20 files | 1.927 / 2.084 | Auto-approved |
+| Copy a 1 MiB binary file | 3.585 / 3.641 | Auto-approved |
+| Change modes on 20 files | 17.996 / 21.721 | Pending approval; includes durable I/O |
+| Cold open + first Bash preview | 10.156 / 17.854 | Auto-approved |
+
+A separate 20 ms process-tree sampler observed **40.45 MiB parent peak** and
+**54.64 MiB summed tree peak**, with at most two processes, on this same small fixture.
+The 53 samples can miss shorter peaks, and summed RSS double-counts shared pages.
+Sampler-perturbed latency is excluded. This is not a memory ceiling, allocation-peak
+measurement, or evidence that larger snapshots have the same footprint.
+
+The final checkout CPython 3.14 macOS arm64 wheel is 9,069,044 bytes and bundles both workers.
+No before/after wheel-size or RSS saving is claimed without a matching baseline.
+The default Rust SDK and Python parent dependency graphs exclude Bashkit/Tokio;
+only the independent Bash worker links them.
+
+### Monty regression assessment
+
+Preserved baseline and candidate native binaries used identical policies, fixtures,
+release settings and the same worker. After the adapter-template/program-copy fixes,
+an earlier counterbalanced candidate/baseline/baseline/candidate series retained 100
+samples per run: 200 per side per workload.
+Quantiles below use sorted pooled raw samples, index `ceil((n - 1) * p)`; pooling is
+descriptive, not proof of a causal speedup. Earlier measurements remain retained too.
+
+| Workload | Baseline p50 / p95, ms | Candidate p50 / p95, ms |
+| --- | ---: | ---: |
+| No-op | 0.179 / 0.228 | 0.173 / 0.206 |
+| Read 10 files | 0.942 / 1.704 | 0.932 / 1.322 |
+| Edit 20 files | 1.915 / 4.560 | 1.871 / 3.454 |
+| Filter filenames in 10,000-file tree | 61.535 / 64.581 | 59.334 / 61.284 |
+| Generic glob in 10,000-file tree | 66.229 / 70.684 | 66.652 / 68.730 |
+| Rename 100-file subtree | 69.126 / 87.405 | 68.865 / 71.021 |
+| Remove 100-file subtree | 57.978 / 63.377 | 57.955 / 59.052 |
+| `vsh_remove` of 100-file subtree | 56.988 / 60.911 | 56.036 / 58.031 |
+| Delete 5,000 files + 50 directories | 145.581 / 152.873 | 158.627 / 197.006 |
+
+**The proposed 5% all-case median/tail non-regression gate is not closed.** That
+pooled large-delete median rose 8.96% and p95 rose 28.87%. Its two candidate-run
+medians were 172.077 and 150.888 ms: the slower run is retained, not discarded to
+make the gate green. Bind/store time includes bounded encoding, sealing and durable
+I/O; a broad CPU/pipe attribution is not established. Other pooled cases in that series remain
+within the target, including the no-op regression identified in earlier runs.
+
+#### Completion check: symmetric warm-up and bounded transport
+
+Subsequent runs exposed nonstationary small-call timings. Both archived baseline
+and candidate therefore received the same 500 ms per-workload warm-up, with no
+changes to timed work, expected state, durability or the 5% gate. The first complete
+warm comparison still failed no-op and glob p95. Those results remain retained.
+
+The latest candidate also eliminates one redundant read of each available Monty
+message prefix. Fragmented input, interrupted reads, exact frame boundaries and
+pre-allocation/pre-decode limits remain tested. Fewer reads do **not** establish
+lower end-to-end latency: the complete follow-up below still fails the gate.
+
+The predeclared baseline/candidate/candidate/baseline order retains 100 samples per
+run, pooled to 200 per side with the same ceiling-index quantiles. Both binaries use
+default crate features, identical benchmark source and the same worker. No builds,
+tests or RSS sampler ran alongside the series. This tests the default Rust Monty
+path; it is not an all-feature or Python performance guarantee.
+
+| Workload | Baseline p50 / p95, ms | Candidate p50 / p95, ms |
+| --- | ---: | ---: |
+| No-op | 0.173 / 0.185 | 0.181 / 0.351 |
+| Read 10 files | 0.913 / 1.002 | 1.001 / 2.022 |
+| Edit 20 files | 1.869 / 1.937 | 2.076 / 2.822 |
+| Filter filenames in 10,000-file tree | 62.587 / 67.136 | 64.252 / 92.318 |
+| Generic glob in 10,000-file tree | 68.321 / 91.532 | 70.218 / 84.097 |
+| Rename 100-file subtree | 70.863 / 74.554 | 71.020 / 99.029 |
+| Remove 100-file subtree | 58.993 / 68.009 | 58.914 / 62.147 |
+| `vsh_remove` of 100-file subtree | 57.986 / 61.224 | 57.978 / 65.077 |
+| Delete 5,000 files + 50 directories | 144.307 / 159.536 | 150.741 / 173.210 |
+
+Read/edit medians and several tails exceed 5%; large deletion is +4.46% median and
++8.57% p95. Sample state and changed-path counts agree in all four runs. No slow run
+was removed, and no CPU/storage cause or overall speedup is claimed. The machine
+also experienced severe disk-space pressure during this investigation. Clean,
+controlled follow-up measurements are required; a favorable subset is not approval.
+
+The implementation removes evidence-set/effect-buffer cloning, redundant durable
+receipt cloning, repeated default-policy construction, a second program-string copy,
+redundant fresh cache-identity hashing and a second fresh artifact sealing pass.
+These are ownership/work reductions with correctness tests, **not** a claim that the entire integration is
+faster. Active evidence bounds, output sealing and cancellation remain enabled.
+Further profiling and clean hosted/platform evidence are required before declaring
+the complete performance/release gate passed. Raw measurements and command logs live
+under ignored `target/bashkit-evidence/p7/`; the engineering summary is
+`plans/bashkit_p7_p9_evidence.md` in the checkout.
+
+## Historical optimization — VSH 0.4.0, 2026-09-05
+
 The 2026-09-05 release-profile measurements show roughly **25–30% lower median latency**
 for the large filename-discovery, glob and bulk-delete workloads after this optimization.
 The strongest repeatable gain is less CPU and allocation work inside execution—not

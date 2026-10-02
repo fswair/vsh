@@ -12,7 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 RUST_PACKAGES = {
     "vbash",
     "vsh",
+    "vsh-bash",
     "vsh-commit",
+    "vsh-execution",
     "vsh-monty",
     "vsh-monty-worker",
     "vsh-policy",

@@ -200,12 +200,18 @@ impl PartialEq for DataDirectory {
 impl Eq for DataDirectory {}
 
 pub(crate) fn open_or_create_real_dir(parent: &Dir, name: &str) -> io::Result<Dir> {
-    match parent.create_dir(name) {
-        Ok(()) => {}
-        Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
+    let before = match parent.symlink_metadata(name) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            match parent.create_dir(name) {
+                Ok(()) => {}
+                Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(source) => return Err(source),
+            }
+            parent.symlink_metadata(name)?
+        }
         Err(source) => return Err(source),
-    }
-    let before = parent.symlink_metadata(name)?;
+    };
     if !before.is_dir() || before.is_symlink() {
         return Err(not_real_directory_error());
     }
@@ -376,6 +382,46 @@ mod tests {
         let directory = Dir::open_ambient_dir(workspace.path(), ambient_authority()).unwrap();
 
         sync_directory(&directory).unwrap();
+    }
+
+    #[test]
+    fn real_child_creation_and_reuse_preserve_existing_contents() {
+        let workspace = TestDirectory::new("reuse-child");
+        let data = DataDirectory::open_workspace(workspace.path()).unwrap();
+        let first = data.open_real_child("shard").unwrap();
+        first.directory().write("marker", b"preserved").unwrap();
+        let reopened = data.open_real_child("shard").unwrap();
+        assert_eq!(reopened.directory().read("marker").unwrap(), b"preserved");
+
+        data.directory().write("file", b"not a directory").unwrap();
+        assert_eq!(
+            data.open_real_child("file").unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(data.directory().read("file").unwrap(), b"not a directory");
+    }
+
+    #[test]
+    fn concurrent_child_creation_returns_the_same_real_directory() {
+        let workspace = TestDirectory::new("concurrent-child");
+        let data = DataDirectory::open_workspace(workspace.path()).unwrap();
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            let handles = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        data.open_real_child("shared").unwrap()
+                    })
+                })
+                .collect::<Vec<_>>();
+            for handle in handles {
+                let child = handle.join().unwrap();
+                assert!(child.directory().dir_metadata().unwrap().is_dir());
+                assert_eq!(child.path(), data.path().join("shared"));
+            }
+        });
+        assert_eq!(data.directory().entries().unwrap().count(), 1);
     }
 
     #[test]

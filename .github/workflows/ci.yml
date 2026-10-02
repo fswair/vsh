@@ -47,6 +47,7 @@ jobs:
       - run: >-
           uv run ty check
           src/vsh/__init__.py
+          src/vsh/_async.py
           src/vsh/_version.py
           src/vsh/cli.py
           src/vsh/hooks.py
@@ -64,7 +65,9 @@ jobs:
           tests/test_commit_judge.py
           tests/test_pydantic_ai_capability.py
           tests/test_python_surface.py
+          benchmarks/bash_runtime.py
           benchmarks/native_pyo3.py
+          release/check_execution_features.py
           release/check_versions.py
           release/smoke_wheel.py
           release/validate_artifacts.py
@@ -103,6 +106,12 @@ jobs:
           rustup toolchain install 1.95.0 --profile minimal
           --component rustfmt,clippy,llvm-tools-preview
       - run: cargo fmt --all -- --check
+      - name: Check isolated default SDK, Bash host and worker features
+        run: |
+          cargo check -p vsh --locked
+          cargo check -p vsh --features bash --locked
+          cargo check -p vsh-bash --no-default-features --features worker --bin vsh-bash-worker --locked
+          python3 release/check_execution_features.py
       - name: Verify a fresh downstream vbash resolution and vsh import
         run: >-
           CARGO_TARGET_DIR=target/consumer-smoke cargo check
@@ -111,7 +120,8 @@ jobs:
       - name: Enforce stable Rust core coverage floors
         run: >-
           cargo llvm-cov
-          --workspace --all-features --all-targets --locked --summary-only
+          --workspace --all-features --all-targets --locked --json --summary-only
+          --output-path target/rust-coverage.json
           --ignore-filename-regex '(vsh-python|vsh-worker)'
           --fail-under-lines 79
           --fail-under-functions 70
@@ -122,6 +132,7 @@ jobs:
           --no-deps --locked --exclude vsh-runtime
       - run: cargo install cargo-audit --version 0.22.2 --locked
       - run: cargo audit --file Cargo.lock
+      - run: cargo audit --file release/rust-consumer-smoke/Cargo.lock
       - run: cargo install cargo-deny --version 0.20.2 --locked
       - run: cargo deny --all-features --locked check
       - run: uv sync --frozen --all-groups --extra mcp

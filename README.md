@@ -12,12 +12,20 @@ Special thanks to [Artyom Pavlov](https://github.com/newpavlov) for generously
 donating the `vsh` crate name to this project.
 
 ```text
-Monty program → immutable snapshot → Rust VirtualFs → canonical diff → policy
+Monty / bounded Bash → immutable snapshot → Rust VirtualFs → canonical diff → policy
               → dependency revalidation → recoverable commit → verified receipt
 ```
 
-VSH is not a POSIX shell and never gives Monty a host filesystem mount, subprocess,
-network, or ambient environment capability.
+VSH is not a host POSIX shell. Monty and the opt-in bounded Bashkit frontend never
+receive a host filesystem mount, process-spawn, network, or ambient environment capability.
+
+The checkout adds `Runtime.open(workspace, bash=BashConfig())` with
+`runtime.preview(source, language=Language.BASH)`. Rust uses the optional `bash`
+feature and `RuntimeConfig::with_bash`. Both use the same canonical diff, policy,
+review, stale checking and recoverable commit pipeline. See the
+[Bash compatibility guide](docs/integrations/bash.md) for explicit limitations and
+binary-safe examples. These additions require a new release; they do not alter an
+already published wheel/crate.
 
 ## Python
 

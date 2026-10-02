@@ -14,6 +14,7 @@ use vsh::{RunRequest, Runtime, RuntimeConfig, StageTimings, TransactionState, VE
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const PARALLEL_TRANSACTIONS_PER_RUNTIME: usize = 20;
+const WARMUP_DURATION: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug)]
 struct Sample {
@@ -218,13 +219,21 @@ fn run_case(
     iterations: usize,
     expected_state: TransactionState,
 ) -> Result<CaseSummary, Box<dyn Error>> {
-    let warmup = sample(runtime, code, &format!("{name}-warmup"))?;
-    if warmup.state != expected_state {
-        return Err(io::Error::other(format!(
-            "{name} warmup returned {:?}, expected {expected_state:?}",
-            warmup.state
-        ))
-        .into());
+    let warmup_started = Instant::now();
+    let mut warmup_index = 0_u64;
+    loop {
+        let warmup = sample(runtime, code, &format!("{name}-warmup-{warmup_index}"))?;
+        if warmup.state != expected_state {
+            return Err(io::Error::other(format!(
+                "{name} warmup returned {:?}, expected {expected_state:?}",
+                warmup.state
+            ))
+            .into());
+        }
+        warmup_index += 1;
+        if warmup_started.elapsed() >= WARMUP_DURATION {
+            break;
+        }
     }
     let samples = (0..iterations)
         .map(|index| sample(runtime, code, &format!("{name}-{index}")))
@@ -618,6 +627,12 @@ fn json_report(report: ReportInput<'_>) -> String {
     } = report;
     let mut output = String::with_capacity(32 * 1024);
     output.push_str("{\n  \"schema\":\"vsh-native-rust-benchmark-v2\",\n");
+    writeln!(
+        output,
+        "  \"warmup_per_case_ms\":{},",
+        WARMUP_DURATION.as_millis()
+    )
+    .expect("writing to String cannot fail");
     write!(
         output,
         "  \"captured_at_unix_ms\":{},\n  \"environment\":{{\"vsh_version\":",

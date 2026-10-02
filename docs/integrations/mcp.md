@@ -1,7 +1,8 @@
 # MCP server
 
 VSH exposes one normal MCP tool, `vsh_run`. Its `code` argument is a complete Monty
-program: one snapshot, one active overlay, one canonical change set and one policy
+program or explicitly host-enabled bounded Bash program: one snapshot, one active
+overlay, one canonical change set and one policy
 decision. The Python adapter constructs a native request and projects the receipt;
 it does not implement a separate filesystem simulator.
 
@@ -21,6 +22,11 @@ vsh-codemode
 
 The ten in-program VSH functions and the existing `pathlib` surface are included in
 the current release. See [source installation](../development.md) when developing from a checkout.
+
+The Bash selector, `VSH_ENABLE_BASH`, and binary stream fields described below are
+source-checkout additions, **not included in the published 0.5.0 installation above**.
+Use the [Bash source setup](bash.md#enable-it-explicitly) for those features; the
+published installation remains Monty-only.
 
 ## Connect a client
 
@@ -50,6 +56,7 @@ budget arguments. Constrain those in a trusted wrapper for an untrusted client.
 vsh_run(
     code: str | None = None,
     *,
+    language: "monty" | "bash" = "monty",
     transaction: str | None = None,
     workspace_root: str | None = None,
     intent: str | None = None,
@@ -59,6 +66,12 @@ vsh_run(
     budget: BudgetOverrides | None = None,
 ) -> dict[str, object]
 ```
+
+Bash is disabled by default. Start the server with `VSH_ENABLE_BASH=1` (and an
+optional host-only `VSH_BASH_WORKER` path) to advertise `"bash"` in the tool schema.
+The guest cannot enable it by passing a language argument. The receipt includes
+language, exit/profile and bounded base64 streams with explicit truncation markers.
+See [bounded Bash](bash.md) for the supported Unix profile and noncommittable failures.
 
 For new work pass `code`. For promotion pass `transaction`, no code, and `mode="auto"`.
 Resolve the same workspace/profile/worker identity as the preview. Promotion does not
@@ -100,7 +113,8 @@ proposal and review, not a forced replay.
 | Top-level identity | `transaction`, `base_snapshot`, `diff` digest |
 | Top-level decision | `state`, `decision`, `risk_flags`, `deny_reason` |
 | Top-level changes | `changed_paths`, `changes: [{path, kind}]` in full detail |
-| Top-level guest output | `result_repr`, `result_truncated`, `stdout`, `stdout_truncated` |
+| Top-level guest output | `language`, `result_repr`, `result_truncated`, `stdout`, `stdout_truncated`, `stderr`, `stderr_truncated` |
+| `bash` | `None` for Monty; otherwise `profile`, `exit_code`, `encoding="base64"`, encoded `stdout`/`stderr` and `output_truncated` |
 | `execution` | `os_calls`, `read_bytes`, `write_bytes`, `directory_entries`, `output_bytes`, `denied_accesses`, `result_bytes` |
 | `commit` | `committed`, `operations`, `verified_paths`, `cleanup_pending` |
 | `timings_ns` | `snapshot`, `execute`, `diff`, `policy`, `bind_and_store`, `commit`, `total` |
@@ -110,11 +124,30 @@ that representation. `diff` is not a textual diff; request bounded before/after 
 when reviewing a transformation.
 
 The adapter retains **65,536 Python characters plus an ellipsis** independently for
-result representation and stdout. This is not 64 KiB of UTF-8, a whole-envelope cap or
+result representation, stdout and stderr. This is not 64 KiB of UTF-8, a whole-envelope cap or
 a token limit. JSON escaping and full change lists add transport bytes. Truncation
 happens after constructing the representation; return small results in the first place.
+The separate `bash` object encodes at most 65,536 **raw bytes** per stream before
+base64 conversion and marks `output_truncated` if either stream exceeds that bound.
+Do not use the top-level lossy display text for binary comparison or approval.
 
 ## Lifetime and retention limits
+
+### Cancellation
+
+The registered MCP tool offloads blocking native work without detaching it. An MCP
+`notifications/cancelled` notification received before native commit entry cancels
+execution and joins cleanup. Unseen previews are discarded or their durable automatic
+approval is revoked. The synchronous Python helper `vsh.mcp.vsh_run` remains available
+for ordinary local calls; the server registers a cancellation-aware async adapter.
+
+Clients must send the protocol cancellation notification. Abandoning a local await or
+closing a UI does not necessarily notify the server. Once native commit entry wins the
+race, the commit completes with its actual outcome; cancellation does not roll it back.
+A cancelled transport may no longer deliver that result, so reconcile transaction
+state through your trusted host instead of assuming host files were untouched.
+
+### Runtime retention
 
 The adapter's process-local LRU holds 16 runtimes, keyed by resolved workspace, profile
 and worker identity. Each runtime caps auto-approved previews at 64 entries or 128 MiB

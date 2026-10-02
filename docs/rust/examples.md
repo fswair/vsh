@@ -73,7 +73,7 @@ auto-approved artifact after consuming it:
 
 ```rust
 let receipt = runtime.preview(RunRequest::new("{'answer': 42}"))?;
-println!("{:?}", receipt.value);
+println!("{:?}", receipt.output.monty_value());
 runtime.discard_preview(receipt.transaction)?;
 ```
 

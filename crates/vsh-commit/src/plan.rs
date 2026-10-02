@@ -4,12 +4,13 @@ use std::fmt;
 
 use vsh_policy::{read_set_digest, write_set_digest};
 use vsh_types::{
-    BlobId, ContentVersion, FileStamp, NodeKind, NodeState, PlatformFileId, SnapshotId,
+    BlobId, ContentVersion, DiffKind, FileStamp, NodeKind, NodeState, PlatformFileId, SnapshotId,
     TransactionBinding, TransactionId, VPath,
 };
 use vsh_vfs::{CanonicalDiff, ReadObservation, WritePrecondition};
 
 const PLAN_MAGIC: &[u8; 8] = b"VSHCMT01";
+const PLAN_MAGIC_V2: &[u8; 8] = b"VSHCMT02";
 
 /// Borrowed exact transaction artifact accepted by the trusted committer.
 pub struct CommitPlan<'a> {
@@ -99,9 +100,36 @@ impl<'a> CommitPlan<'a> {
             if let Some(after) = entry.after
                 && after.kind() != NodeKind::Directory
                 && !matches!(after.content(), Some(ContentVersion::Blob(_)))
+                && !entry.before.is_some_and(|before| {
+                    before.kind() == NodeKind::File && before.content_equivalent(after)
+                })
             {
                 return Err(CommitPlanError::UnmaterializedAfterState {
                     path: entry.path.clone(),
+                });
+            }
+            let inaccessible_after = entry.after.is_some_and(inaccessible_commit_state);
+            let inaccessible_before = entry.kind == DiffKind::MetadataChange
+                && entry.before.is_some_and(inaccessible_commit_state);
+            let inaccessible_created_directory = entry.after.is_some_and(|state| {
+                state.kind() == NodeKind::Directory && state.mode() & 0o700 != 0o700
+            }) && entry
+                .before
+                .is_none_or(|state| state.kind() != NodeKind::Directory);
+            if inaccessible_after || inaccessible_before || inaccessible_created_directory {
+                return Err(CommitPlanError::UnsupportedMetadataMode {
+                    path: entry.path.clone(),
+                });
+            }
+            if let Some(after) = entry.after
+                && entry
+                    .before
+                    .is_some_and(|before| before.mode() != after.mode())
+                && after.mode() & !0o777 != 0
+            {
+                return Err(CommitPlanError::UnsupportedMode {
+                    path: entry.path.clone(),
+                    mode: after.mode(),
                 });
             }
         }
@@ -188,6 +216,20 @@ pub enum CommitPlanError {
         /// Affected path.
         path: VPath,
     },
+    /// A final permission change requests unsupported special bits.
+    UnsupportedMode {
+        /// Changed path.
+        path: VPath,
+        /// Requested mode.
+        mode: u32,
+    },
+    /// File commits need reopenable owner access; blob proofs need read access.
+    /// Directories need read/search; newly installed directories also need write access.
+    /// Such transitions are rejected before any host mutation, pending a platform-safe pin.
+    UnsupportedMetadataMode {
+        /// Changed path.
+        path: VPath,
+    },
     /// Lowered operation count exceeds the configured maximum.
     TooManyOperations {
         /// Observed count.
@@ -235,6 +277,15 @@ impl fmt::Display for CommitPlanError {
             Self::UnmaterializedAfterState { path } => {
                 write!(formatter, "commit after-state at {path} is not blob-backed")
             }
+            Self::UnsupportedMode { path, mode } => {
+                write!(formatter, "unsupported committed mode {mode:o} at {path}")
+            }
+            Self::UnsupportedMetadataMode { path } => {
+                write!(
+                    formatter,
+                    "commit at {path} requires reopenable owner access; directories need owner read/search, new directories need owner read/write/search, and blob-backed evidence needs owner read"
+                )
+            }
             Self::TooManyOperations { observed, maximum } => write!(
                 formatter,
                 "commit has {observed} operations; maximum is {maximum}"
@@ -251,6 +302,18 @@ impl fmt::Display for CommitPlanError {
 }
 
 impl Error for CommitPlanError {}
+
+fn inaccessible_commit_state(state: NodeState) -> bool {
+    match state.kind() {
+        NodeKind::Directory => state.mode() & 0o500 != 0o500,
+        NodeKind::File => {
+            state.mode() & 0o600 == 0
+                || (matches!(state.content(), Some(ContentVersion::Blob(_)))
+                    && state.mode() & 0o400 == 0)
+        }
+        NodeKind::Symlink => false,
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Operation {
@@ -278,6 +341,11 @@ pub(crate) enum Operation {
         expected: NodeState,
         after_mode: u32,
     },
+    SetFileMode {
+        path: VPath,
+        expected: NodeState,
+        after_mode: u32,
+    },
 }
 
 impl Operation {
@@ -287,7 +355,8 @@ impl Operation {
             | Self::CreateDirectory { path, .. }
             | Self::InstallFile { path, .. }
             | Self::InstallSymlink { path, .. }
-            | Self::SetDirectoryMode { path, .. } => path,
+            | Self::SetDirectoryMode { path, .. }
+            | Self::SetFileMode { path, .. } => path,
         }
     }
 }
@@ -315,7 +384,10 @@ impl PreparedPlan {
             let destructive_change = match entry.after {
                 None => true,
                 Some(after) if after.kind() != before.kind() => true,
-                Some(after) => matches!(after.kind(), NodeKind::File | NodeKind::Symlink),
+                Some(after) => {
+                    after.kind() == NodeKind::Symlink
+                        || (after.kind() == NodeKind::File && !before.content_equivalent(after))
+                }
             };
             if destructive_change {
                 destructive.push(entry.path.clone());
@@ -375,12 +447,27 @@ impl PreparedPlan {
             operations.push(Operation::CreateDirectory { path, after });
         }
 
+        let mut directory_access = Vec::new();
+        let mut directory_modes = Vec::new();
         for entry in plan.diff.entries() {
             let Some(after) = entry.after else {
                 continue;
             };
             match after.kind() {
                 NodeKind::File => {
+                    if entry
+                        .before
+                        .is_some_and(|before| before.content_equivalent(after))
+                    {
+                        operations.push(Operation::SetFileMode {
+                            path: entry.path.clone(),
+                            expected: plan.write_set[&entry.path]
+                                .expected
+                                .expect("file metadata change has a precondition"),
+                            after_mode: after.mode(),
+                        });
+                        continue;
+                    }
                     operations.push(Operation::InstallFile {
                         path: entry.path.clone(),
                         after,
@@ -405,17 +492,38 @@ impl PreparedPlan {
                         && before.kind() == NodeKind::Directory
                         && before.mode() != after.mode()
                     {
-                        operations.push(Operation::SetDirectoryMode {
+                        let operation = Operation::SetDirectoryMode {
                             path: entry.path.clone(),
                             expected: plan.write_set[&entry.path]
                                 .expected
                                 .expect("directory metadata change has a precondition"),
                             after_mode: after.mode(),
-                        });
+                        };
+                        if before.mode() & 0o200 == 0 && after.mode() & 0o200 != 0 {
+                            directory_access.push(operation);
+                        } else {
+                            directory_modes.push(operation);
+                        }
                     }
                 }
             }
         }
+
+        // Approved access grants must precede child installation. Restrictions
+        // run afterward, so reverse-order rollback can still traverse parents.
+        directory_access.sort_unstable_by(|left, right| {
+            component_depth(left.path())
+                .cmp(&component_depth(right.path()))
+                .then_with(|| left.path().cmp(right.path()))
+        });
+        directory_modes.sort_unstable_by(|left, right| {
+            component_depth(right.path())
+                .cmp(&component_depth(left.path()))
+                .then_with(|| left.path().cmp(right.path()))
+        });
+        directory_access.append(&mut operations);
+        directory_access.extend(directory_modes);
+        let operations = directory_access;
 
         if operations.len() > max_operations {
             return Err(CommitPlanError::TooManyOperations {
@@ -460,7 +568,17 @@ impl PreparedPlan {
         let final_count = u32::try_from(self.final_states.len())
             .map_err(|_| CommitPlanError::OperationCountOverflow)?;
         let mut output = Vec::new();
-        output.extend_from_slice(PLAN_MAGIC);
+        output.extend_from_slice(
+            if self
+                .operations
+                .iter()
+                .any(|operation| matches!(operation, Operation::SetFileMode { .. }))
+            {
+                PLAN_MAGIC_V2
+            } else {
+                PLAN_MAGIC
+            },
+        );
         output.extend_from_slice(self.transaction.as_bytes());
         output.extend_from_slice(self.base_snapshot.as_bytes());
         output.extend_from_slice(&operation_count.to_le_bytes());
@@ -490,7 +608,8 @@ impl PreparedPlan {
             return Err(PlanDecodeError::Checksum);
         }
         let mut reader = Reader::new(payload);
-        if reader.take(8)? != PLAN_MAGIC {
+        let magic = reader.take(8)?;
+        if magic != PLAN_MAGIC && magic != PLAN_MAGIC_V2 {
             return Err(PlanDecodeError::Magic);
         }
         let transaction = TransactionId::from_bytes(reader.array()?);
@@ -501,7 +620,11 @@ impl PreparedPlan {
         }
         let mut operations = Vec::with_capacity(operation_count);
         for _ in 0..operation_count {
-            operations.push(decode_operation(&mut reader, max_path_bytes)?);
+            let operation = decode_operation(&mut reader, max_path_bytes)?;
+            if magic == PLAN_MAGIC && matches!(operation, Operation::SetFileMode { .. }) {
+                return Err(PlanDecodeError::Tag);
+            }
+            operations.push(operation);
         }
         let final_count = reader.u32()? as usize;
         if final_count > max_operations {
@@ -510,7 +633,7 @@ impl PreparedPlan {
         let mut final_states = Vec::with_capacity(final_count);
         for _ in 0..final_count {
             let path = decode_path(&mut reader, max_path_bytes)?;
-            let state = decode_optional_state(&mut reader)?;
+            let state = decode_optional_state(&mut reader, magic == PLAN_MAGIC_V2)?;
             final_states.push((path, state));
         }
         if !reader.is_empty() {
@@ -588,6 +711,16 @@ fn encode_operation(operation: &Operation, output: &mut Vec<u8>) -> Result<(), C
             encode_state(*expected, output);
             output.extend_from_slice(&after_mode.to_le_bytes());
         }
+        Operation::SetFileMode {
+            path,
+            expected,
+            after_mode,
+        } => {
+            output.push(6);
+            encode_path(path, output)?;
+            encode_state(*expected, output);
+            output.extend_from_slice(&after_mode.to_le_bytes());
+        }
     }
     Ok(())
 }
@@ -623,6 +756,18 @@ fn decode_operation(
             expected: decode_state(reader)?,
             after_mode: reader.u32()?,
         }),
+        6 => {
+            let expected = decode_state(reader)?;
+            let after_mode = reader.u32()?;
+            if expected.kind() != NodeKind::File || after_mode & !0o777 != 0 {
+                return Err(PlanDecodeError::Tag);
+            }
+            Ok(Operation::SetFileMode {
+                path,
+                expected,
+                after_mode,
+            })
+        }
         _ => Err(PlanDecodeError::Tag),
     }
 }
@@ -657,10 +802,13 @@ fn encode_optional_state(state: Option<NodeState>, output: &mut Vec<u8>) {
     }
 }
 
-fn decode_optional_state(reader: &mut Reader<'_>) -> Result<Option<NodeState>, PlanDecodeError> {
+fn decode_optional_state(
+    reader: &mut Reader<'_>,
+    metadata_mode: bool,
+) -> Result<Option<NodeState>, PlanDecodeError> {
     match reader.u8()? {
         0 => Ok(None),
-        1 => decode_state(reader).map(Some),
+        1 => decode_state_with_mode(reader, metadata_mode).map(Some),
         _ => Err(PlanDecodeError::Tag),
     }
 }
@@ -684,6 +832,13 @@ fn encode_state(state: NodeState, output: &mut Vec<u8>) {
 }
 
 fn decode_state(reader: &mut Reader<'_>) -> Result<NodeState, PlanDecodeError> {
+    decode_state_with_mode(reader, false)
+}
+
+fn decode_state_with_mode(
+    reader: &mut Reader<'_>,
+    metadata_mode: bool,
+) -> Result<NodeState, PlanDecodeError> {
     let kind = decode_kind(reader.u8()?)?;
     let size = reader.u64()?;
     let mode = reader.u32()?;
@@ -699,10 +854,14 @@ fn decode_state(reader: &mut Reader<'_>) -> Result<NodeState, PlanDecodeError> {
         }
         2 => {
             let stamp = decode_stamp(reader)?;
-            if stamp.kind != kind || stamp.size != size || stamp.mode != mode {
+            if stamp.kind != kind
+                || stamp.size != size
+                || (stamp.mode != mode
+                    && (!metadata_mode || kind != NodeKind::File || mode & !0o777 != 0))
+            {
                 return Err(PlanDecodeError::State);
             }
-            Ok(NodeState::from_stamp(stamp))
+            Ok(NodeState::from_stamp(stamp).with_mode(mode))
         }
         _ => Err(PlanDecodeError::State),
     }

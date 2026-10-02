@@ -8,12 +8,15 @@ from collections.abc import Awaitable, Callable
 from os import PathLike
 from typing import TypeAlias, overload
 
+from ._async import native_call
 from ._native import (
+    BashConfig,
     CommitPreparation,
     CommitResolution,
     ExecutionBudget,
     HookDecision,
     HookScope,
+    Language,
     Receipt,
     ReceiptDetail,
     RecoveryReport,
@@ -21,6 +24,7 @@ from ._native import (
     RunMode,
     RunRequest,
     Runtime,
+    _Cancellation,
 )
 
 HookResult: TypeAlias = HookDecision | Awaitable[HookDecision]
@@ -48,6 +52,7 @@ class HookedRuntime:
         data_directory: str | PathLike[str] | None = None,
         policy: str = "balanced",
         worker_path: str | PathLike[str] | None = None,
+        bash: BashConfig | None = None,
     ) -> HookedRuntime:
         """Open a runtime whose direct native commit path enforces the hook."""
 
@@ -56,6 +61,7 @@ class HookedRuntime:
             data_directory=data_directory,
             policy=policy,
             worker_path=worker_path,
+            bash=bash,
             hook_id=hook_id,
             hook_scope=hook_scope,
             review_content_bytes=review_content_bytes,
@@ -76,6 +82,7 @@ class HookedRuntime:
         self,
         request: str,
         *,
+        language: Language | None = None,
         intent: str | None = None,
         detail: ReceiptDetail | None = None,
         budget: ExecutionBudget | None = None,
@@ -85,6 +92,7 @@ class HookedRuntime:
         self,
         request: RunRequest | str,
         *,
+        language: Language | None = None,
         intent: str | None = None,
         detail: ReceiptDetail | None = None,
         budget: ExecutionBudget | None = None,
@@ -92,8 +100,24 @@ class HookedRuntime:
         """Simulate without invoking the hook or changing workspace files."""
 
         if isinstance(request, RunRequest):
+            if any(value is not None for value in (language, intent, detail, budget)):
+                raise TypeError(
+                    "language, intent, detail, and budget are only valid when preview() receives source code"
+                )
             return self._runtime.preview(request)
-        return self._runtime.preview(request, intent=intent, detail=detail, budget=budget)
+        return self._runtime.preview(
+            request, language=language, intent=intent, detail=detail, budget=budget
+        )
+
+    async def apreview(self, request: RunRequest) -> Receipt:
+        """Preview off the event loop with native request cancellation."""
+
+        token = _Cancellation()
+        return await native_call(
+            lambda: self._runtime._preview(request, token),
+            token,
+            on_cancel=lambda receipt: self._runtime._cancel_receipt(receipt.transaction),
+        )
 
     def run(self, request: RunRequest, *, now_unix_ms: int | None = None) -> Receipt:
         """Run synchronously; AUTO invokes a synchronous handler when in scope."""
@@ -106,7 +130,7 @@ class HookedRuntime:
     async def arun(self, request: RunRequest, *, now_unix_ms: int | None = None) -> Receipt:
         """Run with support for either synchronous or awaitable hook results."""
 
-        receipt = self._runtime.preview(request)
+        receipt = await self.apreview(request)
         if request.mode is not RunMode.AUTO or receipt.state not in _ACTIONABLE_STATES:
             return receipt
         resolution = await self.acommit(receipt.transaction, now_unix_ms=now_unix_ms)
@@ -150,7 +174,9 @@ class HookedRuntime:
     ) -> CommitResolution:
         """Await a handler when needed, then resolve the exact prepared event."""
 
-        preparation = self._runtime.prepare_commit(transaction)
+        preparation = await native_call(
+            lambda: self._runtime.prepare_commit(transaction), on_cancel=self._fail_closed
+        )
         event = preparation.event
         if event is None:
             decision = HookDecision.follow_policy()
@@ -161,13 +187,20 @@ class HookedRuntime:
                     result = await result
                 decision = self._require_decision(result)
             except BaseException:
-                self._fail_closed(preparation)
+                await native_call(lambda: self._fail_closed(preparation))
                 raise
-        return self._runtime.resolve_commit(
-            preparation,
-            decision,
-            self._now(now_unix_ms),
-        )
+        token = _Cancellation()
+        try:
+            return await native_call(
+                lambda: self._runtime._resolve_commit(
+                    preparation, decision, self._now(now_unix_ms), token
+                ),
+                token,
+            )
+        except BaseException:
+            if not token.commit_entered:
+                await native_call(lambda: self._fail_closed(preparation))
+            raise
 
     def approve(
         self,

@@ -13,6 +13,8 @@ CRATES = (
     "vsh-store",
     "vsh-vfs",
     "vsh-policy",
+    "vsh-execution",
+    "vsh-bash",
     "vsh-commit",
     "vsh-monty",
     "vsh-runtime",
@@ -61,7 +63,16 @@ def validate_primary_wheel(path: Path, version: str) -> None:
         names = archive.namelist()
         reject_generated_files(names, path.name)
         workers = [
-            name for name in names if name.endswith(("/vsh-monty-worker", "/vsh-monty-worker.exe"))
+            name
+            for name in names
+            if name.endswith(
+                (
+                    "/vsh-monty-worker",
+                    "/vsh-monty-worker.exe",
+                    "/vsh-bash-worker",
+                    "/vsh-bash-worker.exe",
+                )
+            )
         ]
         extensions = [
             name
@@ -71,15 +82,24 @@ def validate_primary_wheel(path: Path, version: str) -> None:
         ]
         metadata = [name for name in names if name.endswith(".dist-info/METADATA")]
         notices = [name for name in names if name.endswith("THIRD_PARTY_NOTICES.md")]
-        if len(workers) != 1 or len(extensions) != 1 or len(metadata) != 1 or len(notices) != 1:
+        expected_workers = {"vsh-monty-worker", "vsh-bash-worker"}
+        worker_names = {name.rsplit("/", 1)[-1].removesuffix(".exe") for name in workers}
+        if (
+            len(workers) != 2
+            or worker_names != expected_workers
+            or len(extensions) != 1
+            or len(metadata) != 1
+            or len(notices) != 1
+        ):
             raise RuntimeError(
                 f"{path.name} missing exact native payload: workers={workers}, "
                 f"extensions={extensions}, notices={notices}"
             )
-        if not workers[0].endswith(".exe"):
-            mode = archive.getinfo(workers[0]).external_attr >> 16
-            if mode & 0o111 == 0:
-                raise RuntimeError(f"{path.name} worker is not executable")
+        for worker in workers:
+            if not worker.endswith(".exe"):
+                mode = archive.getinfo(worker).external_attr >> 16
+                if mode & 0o111 == 0:
+                    raise RuntimeError(f"{path.name} worker is not executable: {worker}")
         payload = archive.read(metadata[0]).decode("utf-8")
         if (
             f"Name: {PRIMARY_PYTHON_NAME}\n" not in payload
@@ -104,6 +124,12 @@ def validate_primary_sdist(path: Path, version: str) -> None:
         f"{prefix}crates/vsh-worker/src/child.rs",
         f"{prefix}crates/vsh-worker/src/lib.rs",
         f"{prefix}crates/vsh-worker/src/main.rs",
+        f"{prefix}crates/vsh-bash/Cargo.toml",
+        f"{prefix}crates/vsh-bash/src/main.rs",
+        f"{prefix}crates/vsh-bash/src/guest.rs",
+        f"{prefix}crates/vsh-bash/src/host.rs",
+        f"{prefix}crates/vsh-execution/Cargo.toml",
+        f"{prefix}crates/vsh-execution/src/gateway.rs",
         f"{prefix}rust-toolchain.toml",
         f"{prefix}scripts/vsh_build_backend.py",
     }
@@ -117,7 +143,13 @@ def validate_primary_sdist(path: Path, version: str) -> None:
         if manifest is None:
             raise RuntimeError(f"{path.name} does not contain the workspace manifest")
         workspace_manifest = manifest.read()
-        required_members = (b'"crates/vbash"', b'"crates/vsh"', b'"crates/vsh-worker"')
+        required_members = (
+            b'"crates/vbash"',
+            b'"crates/vsh"',
+            b'"crates/vsh-worker"',
+            b'"crates/vsh-bash"',
+            b'"crates/vsh-execution"',
+        )
         if any(member not in workspace_manifest for member in required_members):
             raise RuntimeError(f"{path.name} does not retain the required workspace members")
         if b'get-size2 = { version = "=0.10.3"' not in workspace_manifest:

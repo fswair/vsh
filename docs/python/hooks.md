@@ -47,7 +47,9 @@ unhookable.
 - transaction, event, hook, base snapshot, program, policy, runtime configuration,
   diff, read-set and write-set identities;
 - the complete path-ordered canonical diff used by commit;
-- ordered VFS/Monty effect observations and execution counters;
+- ordered VFS/Monty/Bash effect observations and execution counters;
+- `execution_context` with language, profile/status, completeness, evidence digest,
+  and authoritative stdout/stderr byte lengths (event schema version 2);
 - deterministic risk metrics and sorted risk flags;
 - bounded raw intent plus its transaction-bound digest;
 - explicit `evidence_complete` and `evidence_truncated` markers.

@@ -16,5 +16,9 @@ publish = ["crates-io"]
 [dependencies]
 vsh-runtime-core = { package = "vsh-runtime", path = "../vbash", version = "=0.5.0" }
 
+[features]
+default = []
+bash = ["vsh-runtime-core/bash"]
+
 [lints]
 workspace = true

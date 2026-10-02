@@ -32,6 +32,7 @@ let config = RuntimeConfig::new(workspace_root)
 | `new(workspace_root)` | Balanced configuration with protected `.vsh-runtime/data` |
 | `with_data_directory(path)` | Select a trusted external durable-data capability |
 | `with_worker_path(path)` | Select the exact supervised worker executable |
+| `with_bash(BashConfig)` | Opt into the separate bounded Bash frontend (`bash` feature) |
 | `with_max_idle_workers(count)` | Bound reusable clean workers; zero disables pooling |
 | `with_result_compatibility(kind)` | Require native or Python-projectable result values |
 | `with_in_process_execution()` | Trusted-only correctness/benchmark harness |
@@ -57,6 +58,7 @@ retains clean workers and capabilities, but every execution captures a fresh sna
 ```rust
 pub struct RunRequest<'a> {
     pub code: &'a str,
+    pub language: Language,
     pub intent: Option<&'a str>,
     pub mode: RunMode,
     pub detail: ReceiptDetail,
@@ -65,7 +67,8 @@ pub struct RunRequest<'a> {
 ```
 
 `RunRequest::new(code)` creates a compact preview with default limits. Chain
-`with_intent`, `with_mode`, `with_detail`, and `with_budget` to replace one choice.
+`with_language`, `with_intent`, `with_mode`, `with_detail`, and `with_budget` to replace one choice.
+`Language::Monty` is the default; Bash requires explicit host configuration.
 
 ## Modes and detail
 
@@ -149,8 +152,7 @@ pub struct Receipt {
     pub diff: DiffDigest,
     pub changed_paths: usize,
     pub changes: Vec<DiffEntry>,
-    pub value: MontyObject,
-    pub stdout: String,
+    pub output: ExecutionOutput,
     pub execution: ExecutionStats,
     pub timings: StageTimings,
     pub commit: Option<CommitReceipt>,
@@ -166,10 +168,23 @@ pub struct Receipt {
 Pattern-match the decision rather than parsing its display text.
 
 `diff` is a digest. Each full `DiffEntry` includes `path`, `kind`, `before` and `after`
-`NodeState` values, not text hunks. `value` is the typed `MontyObject`, whereas Python
+`NodeState` values, not text hunks. `ExecutionOutput::Monty { value, stdout }` retains
+the typed `MontyObject`, whereas Python
 projects it to a Python object. Native compatibility can represent values the pinned
 Python converter cannot; choose `ResultCompatibility::Python` when that projection is
 part of your downstream contract.
+
+`ExecutionOutput::Bash(BashResult)` carries `profile`, `exit_code` and authoritative
+`Vec<u8>` stdout/stderr. Use `output.language()`, `output.monty_value()`,
+`output.stdout_bytes()` and `output.stderr_bytes()` for borrowed access.
+The old Rust `receipt.value` / `receipt.stdout` fields move under `receipt.output`;
+Python's existing properties remain available. See [bounded Bash](../integrations/bash.md).
+
+`ExecutionCancellation` is a one-request shared handle. `run_cancellable`,
+`commit_cancellable` and `resolve_commit_cancellable` accept it. `cancel()` returns
+false once commit has entered; after entry, the actual commit/recovery result wins.
+`discard_cancelled(id)` is ownership-scoped host cleanup for an undelivered receipt:
+ephemeral artifacts are dropped; durable automatic approvals move to pending review.
 
 ## `StageTimings`
 
@@ -210,8 +225,10 @@ Trusted-host bounds for durable pending artifacts:
 These do not replace execution budgets; they constrain the artifact VSH retains after
 execution.
 
-The guest duration is cumulative bytecode time; the heap cap applies to the supervised
-worker. Neither is a total parent-process RSS or end-to-end request deadline. For all
+Monty's guest duration is cumulative bytecode time. Bash applies it to the interpreter
+and parser timeout, alongside the parent's watchdog. The heap cap applies to the
+supervised worker, not total parent-process RSS. The guest duration alone is not an
+end-to-end request deadline. For all
 defaults and measurement scope, see [policies and budgets](../guides/policies-and-budgets.md).
 
 ## `VshError`

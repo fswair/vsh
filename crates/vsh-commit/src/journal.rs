@@ -9,8 +9,9 @@ use vsh_types::{FileStamp, NodeKind, PlatformFileId, TransactionId};
 use crate::host::{create_new_file, open_real_file, sync_dir};
 
 const JOURNAL_MAGIC: &[u8; 8] = b"VSHLOG01";
+const JOURNAL_MAGIC_V2: &[u8; 8] = b"VSHLOG02";
 const MARKER_MAGIC: &[u8; 8] = b"VSHDONE1";
-const MAX_RECORD_PAYLOAD: usize = 64;
+const MAX_RECORD_PAYLOAD: usize = 128;
 
 pub(crate) const PLAN_FILE: &str = "plan";
 pub(crate) const JOURNAL_FILE: &str = "journal";
@@ -39,9 +40,13 @@ pub(crate) struct Journal {
 }
 
 impl Journal {
-    pub(crate) fn create(transaction_dir: &Dir) -> Result<Self, io::Error> {
+    pub(crate) fn create(transaction_dir: &Dir, metadata: bool) -> Result<Self, io::Error> {
         let mut file = create_new_file(transaction_dir, JOURNAL_FILE)?;
-        file.write_all(JOURNAL_MAGIC)?;
+        file.write_all(if metadata {
+            JOURNAL_MAGIC_V2
+        } else {
+            JOURNAL_MAGIC
+        })?;
         file.sync_all()?;
         sync_dir(transaction_dir)?;
         Ok(Self { file })
@@ -74,6 +79,21 @@ impl Journal {
         self.append_record(&payload)
     }
 
+    pub(crate) fn metadata_done(&mut self, index: u32, stamp: FileStamp) -> Result<(), io::Error> {
+        let mut payload = Vec::with_capacity(80);
+        payload.push(3);
+        payload.extend_from_slice(&index.to_le_bytes());
+        encode_witness(stamp.into(), &mut payload);
+        payload.extend_from_slice(&stamp.size.to_le_bytes());
+        payload.extend_from_slice(&stamp.mode.to_le_bytes());
+        payload.extend_from_slice(&stamp.mtime_ns.to_le_bytes());
+        payload.push(u8::from(stamp.ctime_ns.is_some()));
+        if let Some(ctime) = stamp.ctime_ns {
+            payload.extend_from_slice(&ctime.to_le_bytes());
+        }
+        self.append_record(&payload)
+    }
+
     fn append_record(&mut self, payload: &[u8]) -> Result<(), io::Error> {
         let len = u32::try_from(payload.len())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "journal record too large"))?;
@@ -87,6 +107,7 @@ impl Journal {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct JournalState {
     pub(crate) completed: BTreeMap<u32, Witness>,
+    pub(crate) metadata: BTreeMap<u32, FileStamp>,
     intents: BTreeMap<u32, IntentWitnesses>,
     pending: Option<u32>,
     pub(crate) torn_tail: bool,
@@ -120,6 +141,10 @@ impl JournalState {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Validate complete and legacy journal record sequences in a single ordered pass"
+)]
 pub(crate) fn read_journal(
     transaction_dir: &Dir,
     maximum_bytes: usize,
@@ -137,7 +162,9 @@ pub(crate) fn read_journal(
     if bytes.len() > maximum_bytes {
         return Err(JournalError::RecordLength);
     }
-    if bytes.len() < JOURNAL_MAGIC.len() || &bytes[..8] != JOURNAL_MAGIC {
+    if bytes.len() < JOURNAL_MAGIC.len()
+        || (&bytes[..8] != JOURNAL_MAGIC && &bytes[..8] != JOURNAL_MAGIC_V2)
+    {
         return Err(JournalError::Magic);
     }
     let mut offset = 8_usize;
@@ -206,6 +233,38 @@ pub(crate) fn read_journal(
                     return Err(JournalError::Sequence);
                 }
                 state.completed.insert(index, decode_witness(payload)?);
+                state.pending = None;
+                next_index = next_index.checked_add(1).ok_or(JournalError::Sequence)?;
+            }
+            Some(3) if &bytes[..8] == JOURNAL_MAGIC_V2 && matches!(payload.len(), 51 | 67) => {
+                let index =
+                    u32::from_le_bytes(payload[1..5].try_into().expect("bounded completion index"));
+                if state.pending != Some(index) || index != next_index {
+                    return Err(JournalError::Sequence);
+                }
+                let witness = decode_witness(payload)?;
+                if witness.kind != NodeKind::File {
+                    return Err(JournalError::Tag);
+                }
+                let ctime_ns = match (payload[50], payload.len()) {
+                    (0, 51) => None,
+                    (1, 67) => Some(i128::from_le_bytes(
+                        payload[51..67].try_into().expect("bounded ctime"),
+                    )),
+                    _ => return Err(JournalError::Tag),
+                };
+                let stamp = FileStamp {
+                    kind: witness.kind,
+                    file_id: witness.file_id,
+                    size: u64::from_le_bytes(payload[22..30].try_into().expect("bounded size")),
+                    mode: u32::from_le_bytes(payload[30..34].try_into().expect("bounded mode")),
+                    mtime_ns: i128::from_le_bytes(
+                        payload[34..50].try_into().expect("bounded mtime"),
+                    ),
+                    ctime_ns,
+                };
+                state.completed.insert(index, witness);
+                state.metadata.insert(index, stamp);
                 state.pending = None;
                 next_index = next_index.checked_add(1).ok_or(JournalError::Sequence)?;
             }

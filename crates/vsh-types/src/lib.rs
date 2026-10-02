@@ -3,6 +3,7 @@
 use std::borrow::{Borrow, Cow};
 use std::error::Error;
 use std::fmt;
+mod directory;
 use std::str::FromStr;
 
 /// A normalized, workspace-relative virtual path.
@@ -35,6 +36,10 @@ impl VPath {
     /// Returns [`VPathError`] when the input is empty, absolute, contains a NUL byte or
     /// platform prefix, or would escape the virtual root during normalization.
     pub fn parse(input: &str) -> Result<Self, VPathError> {
+        Self::normalize(Cow::Borrowed(input))
+    }
+
+    fn normalize(input: Cow<'_, str>) -> Result<Self, VPathError> {
         if input.is_empty() {
             return Err(VPathError::Empty);
         }
@@ -45,7 +50,7 @@ impl VPath {
         let portable = if input.contains('\\') {
             Cow::Owned(input.replace('\\', "/"))
         } else {
-            Cow::Borrowed(input)
+            input
         };
         if portable.starts_with('/') {
             return Err(VPathError::Absolute);
@@ -129,7 +134,7 @@ impl VPath {
         } else {
             format!("{}/{child}", self.as_str())
         };
-        Self::parse(&combined)
+        Self::normalize(Cow::Owned(combined))
     }
 
     /// Return whether this path is equal to or below `ancestor`.
@@ -370,6 +375,10 @@ digest_id!(
     "The digest identity of security-relevant runtime configuration."
 );
 digest_id!(
+    ExecutionEvidenceDigest,
+    "The digest identity of the exact completed result, output and review evidence."
+);
+digest_id!(
     IntentDigest,
     "The digest identity of transaction intent supplied out of band."
 );
@@ -423,17 +432,18 @@ impl DirectoryDigest {
 
     /// Hash path-ordered direct children using VSH's canonical listing encoding.
     ///
-    /// Callers must provide entries in canonical [`VPath`] order. Keeping this codec in
+    /// Callers must provide replayable immutable entries in canonical [`VPath`] order.
+    /// The iterator is cloned to count canonical bytes, then hashed with bounded scratch.
+    /// Keeping this codec in
     /// the shared type crate ensures snapshot capture, virtual reads, and trusted host
     /// revalidation cannot silently diverge.
     #[must_use]
-    pub fn digest_entries<'a>(entries: impl IntoIterator<Item = (&'a VPath, NodeState)>) -> Self {
-        let mut canonical = Vec::new();
-        for (path, state) in entries {
-            encode_vpath(path, &mut canonical);
-            state.encode_canonical(&mut canonical);
-        }
-        Self::digest_canonical(&canonical)
+    pub fn digest_entries<'a, I>(entries: I) -> Self
+    where
+        I: IntoIterator<Item = (&'a VPath, NodeState)>,
+        I::IntoIter: Clone,
+    {
+        directory::digest_entries(entries.into_iter())
     }
 }
 
@@ -558,13 +568,17 @@ pub struct TransactionBinding {
     pub runtime_config: RuntimeConfigDigest,
     /// Optional out-of-band user intent shown to an approval principal.
     pub intent: Option<IntentDigest>,
+    /// Completed execution evidence sealed before deriving the transaction ID.
+    /// `None` preserves the original identity domain for legacy records and
+    /// low-level callers which do not supply an execution result.
+    pub execution_evidence: Option<ExecutionEvidenceDigest>,
 }
 
 impl TransactionBinding {
     /// Derive the single transaction identity to which approval and commit bind.
     #[must_use]
     pub fn transaction_id(self) -> TransactionId {
-        let mut canonical = Vec::with_capacity(32 * 8 + 1);
+        let mut canonical = Vec::with_capacity(32 * 9 + 1);
         canonical.extend_from_slice(self.base_snapshot.as_bytes());
         canonical.extend_from_slice(self.diff.as_bytes());
         canonical.extend_from_slice(self.read_set.as_bytes());
@@ -579,24 +593,29 @@ impl TransactionBinding {
             }
             None => canonical.push(0),
         }
-        TransactionId::from_bytes(domain_hash(b"transaction-v1", &canonical))
+        let domain = if let Some(evidence) = self.execution_evidence {
+            canonical.extend_from_slice(evidence.as_bytes());
+            b"transaction-v2".as_slice()
+        } else {
+            b"transaction-v1".as_slice()
+        };
+        TransactionId::from_bytes(domain_hash(domain, &canonical))
     }
 }
 
 fn domain_hash(domain: &[u8], payload: &[u8]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"vsh\0");
-    hasher.update(&(domain.len() as u64).to_le_bytes());
-    hasher.update(domain);
-    hasher.update(&(payload.len() as u64).to_le_bytes());
+    let mut hasher = domain_hasher(domain, payload.len() as u64);
     hasher.update(payload);
     *hasher.finalize().as_bytes()
 }
 
-fn encode_vpath(path: &VPath, output: &mut Vec<u8>) {
-    let bytes = path.as_str().as_bytes();
-    output.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-    output.extend_from_slice(bytes);
+fn domain_hasher(domain: &[u8], payload_bytes: u64) -> blake3::Hasher {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"vsh\0");
+    hasher.update(&(domain.len() as u64).to_le_bytes());
+    hasher.update(domain);
+    hasher.update(&payload_bytes.to_le_bytes());
+    hasher
 }
 
 /// The semantic kind of a virtual filesystem node.
@@ -737,6 +756,12 @@ impl NodeState {
     #[must_use]
     pub const fn content(self) -> Option<ContentVersion> {
         self.content
+    }
+
+    /// Change permission metadata without changing type or content identity.
+    #[must_use]
+    pub const fn with_mode(self, mode: u32) -> Self {
+        Self { mode, ..self }
     }
 
     /// Return a copy whose file/link content is now materialized.
@@ -926,6 +951,75 @@ impl Error for TransitionError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_join_matches_borrowed_normalization_and_error_priority() {
+        for parent in [".", "base", "base/deep", "données/資料"] {
+            let parent = VPath::parse(parent).unwrap();
+            for child in [
+                "file",
+                "",
+                ".",
+                "..",
+                "../other",
+                "../../..",
+                "a//b",
+                "a/./b",
+                "a/../b",
+                "a\\b",
+                "/absolute",
+                "\\absolute",
+                "C:drive",
+                "C:/drive",
+                "nul\0name",
+                "//nul\0",
+                "資料/é",
+                "...",
+                "a/../../b",
+            ] {
+                let combined = if parent.is_root() {
+                    child.to_owned()
+                } else {
+                    format!("{parent}/{child}")
+                };
+                assert_eq!(
+                    parent.join(child),
+                    VPath::parse(&combined),
+                    "parent={parent}, child={child:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn completed_evidence_uses_a_new_domain_without_changing_legacy_identity() {
+        let mut binding = TransactionBinding {
+            base_snapshot: SnapshotId::from_bytes([1; 32]),
+            diff: DiffDigest::from_bytes([2; 32]),
+            read_set: ReadSetDigest::from_bytes([3; 32]),
+            write_set: WriteSetDigest::from_bytes([4; 32]),
+            program: ProgramDigest::from_bytes([5; 32]),
+            policy: PolicyDigest::from_bytes([6; 32]),
+            runtime_config: RuntimeConfigDigest::from_bytes([7; 32]),
+            intent: Some(IntentDigest::from_bytes([8; 32])),
+            execution_evidence: None,
+        };
+        let mut legacy_bytes = Vec::new();
+        for byte in 1..=7 {
+            legacy_bytes.extend_from_slice(&[byte; 32]);
+        }
+        legacy_bytes.push(1);
+        legacy_bytes.extend_from_slice(&[8; 32]);
+        let legacy = TransactionId::from_bytes(domain_hash(b"transaction-v1", &legacy_bytes));
+        assert_eq!(binding.transaction_id(), legacy);
+        binding.execution_evidence = Some(ExecutionEvidenceDigest::from_bytes([9; 32]));
+        let sealed = binding.transaction_id();
+        assert_ne!(sealed, legacy);
+        binding.execution_evidence = Some(ExecutionEvidenceDigest::from_bytes([10; 32]));
+        assert_ne!(binding.transaction_id(), sealed);
+        binding.execution_evidence = None;
+        assert_eq!(binding.transaction_id(), legacy);
+    }
 
     #[test]
     fn canonical_fast_path_matches_normalization_oracle() {

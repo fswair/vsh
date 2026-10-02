@@ -16,8 +16,19 @@ publish = ["crates-io"]
 [lib]
 name = "vsh"
 
+[[example]]
+name = "bash_workflow"
+required-features = ["bash"]
+
+[features]
+default = []
+bash = ["dep:vsh-bash"]
+
 [dependencies]
+blake3.workspace = true
 postcard.workspace = true
+vsh-bash = { workspace = true, features = ["host"], optional = true }
+vsh-execution.workspace = true
 vsh-commit.workspace = true
 vsh-monty.workspace = true
 vsh-policy.workspace = true

@@ -12,6 +12,7 @@ use vsh_types::{
 };
 use vsh_vfs::EffectEvent;
 
+use crate::Language;
 use crate::runtime::{Receipt, RunMode, RunRequest, Runtime, RuntimeConfig, VshError};
 
 /// Which policy-authorized commit candidates a hook may inspect.
@@ -204,6 +205,9 @@ pub struct RequestEvent {
     pub effects: Vec<EffectEvent>,
     /// Independent execution counters.
     pub execution: ExecutionStats,
+    /// Sealed frontend and bounded output metadata, without implicitly disclosing
+    /// file bytes printed by guest code to an external reviewer.
+    pub execution_context: ExecutionContext,
     /// Whether raw review evidence survived the durable boundary.
     pub evidence_complete: bool,
     /// Whether any evidence was deliberately truncated.
@@ -215,6 +219,25 @@ pub struct RequestEvent {
     /// Separate from structural evidence completeness. False for missing/stamped,
     /// protected, disabled, or over-budget content.
     pub content_complete: bool,
+}
+
+/// Complete execution metadata; content sharing remains explicitly configured.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionContext {
+    /// Frontend that interpreted the program.
+    pub language: Language,
+    /// Exact Bash compatibility profile, or None for Monty.
+    pub profile: Option<String>,
+    /// Final Bash exit status, or None for Monty.
+    pub exit_code: Option<i32>,
+    /// Whether output and review evidence were sealed completely.
+    pub complete: bool,
+    /// Transaction-bound execution evidence identity.
+    pub evidence: Option<vsh_types::ExecutionEvidenceDigest>,
+    /// Raw retained byte length, not lossy text length.
+    pub stdout_bytes: usize,
+    /// Raw stderr length; zero for Monty.
+    pub stderr_bytes: usize,
 }
 
 /// Decision returned by a hook handler.

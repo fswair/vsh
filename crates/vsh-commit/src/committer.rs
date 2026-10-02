@@ -13,17 +13,18 @@ use vsh_store::{
     TransactionStore, TransactionStoreError,
 };
 use vsh_types::{
-    BlobId, ContentVersion, DirectoryDigest, NodeKind, NodeState, PlatformFileId, TransactionId,
-    TransactionState, VPath,
+    BlobId, ContentVersion, DirectoryDigest, FileStamp, NodeKind, NodeState, PlatformFileId,
+    TransactionId, TransactionState, VPath,
 };
 use vsh_vfs::{BaseSnapshot, ReadObservation};
 
 use crate::host::{
     HostError, SnapshotLimits, capture_snapshot, content_digest, create_new_file,
-    create_staged_symlink, directory_digest, open_coordination_file, open_or_create_real_dir,
-    open_real_dir, open_real_file, relative_path, relocated_state_matches, set_dir_mode,
-    set_file_mode, stamp_at, stamp_dir, stamp_file, state_matches, sync_dir, sync_installed_file,
-    validate_symlink_target, witness_matches,
+    create_staged_symlink, directory_digest, file_state_matches, is_single_link,
+    open_coordination_file, open_file_for_mode, open_or_create_real_dir, open_real_dir,
+    open_real_file, relative_path, relocated_state_matches, set_dir_mode, set_file_mode, stamp_at,
+    stamp_dir, stamp_file, state_matches, sync_dir, sync_installed_file, validate_symlink_target,
+    witness_matches,
 };
 use crate::journal::{
     JOURNAL_FILE, Journal, JournalError, JournalState, PLAN_FILE, QUARANTINE_DIRECTORY,
@@ -67,9 +68,11 @@ struct OperationWitnesses {
     completed: Option<Witness>,
     source: Option<Witness>,
     parent: Option<Witness>,
+    metadata_stamp: Option<FileStamp>,
 }
 
 struct AppliedOperation {
+    metadata_stamp: Option<FileStamp>,
     witness: Witness,
     created_directory: Option<(VPath, Dir)>,
 }
@@ -998,11 +1001,17 @@ impl Committer {
         F: FaultInjector + ?Sized,
     {
         Self::write_plan(transaction_dir, encoded)?;
-        let mut journal =
-            Journal::create(transaction_dir).map_err(|source| CommitError::InternalIo {
-                operation: "create commit journal",
-                source,
-            })?;
+        let mut journal = Journal::create(
+            transaction_dir,
+            prepared
+                .operations
+                .iter()
+                .any(|operation| matches!(operation, Operation::SetFileMode { .. })),
+        )
+        .map_err(|source| CommitError::InternalIo {
+            operation: "create commit journal",
+            source,
+        })?;
         Self::check_fault(faults, FaultPoint::PlanSynced)?;
 
         let stage =
@@ -1064,6 +1073,7 @@ impl Committer {
         Self::check_fault(faults, FaultPoint::CommitStatePersisted)?;
 
         let mut completed_witnesses = Vec::with_capacity(prepared.operations.len());
+        let mut metadata_stamps = BTreeMap::new();
         for (index, operation) in prepared.operations.iter().enumerate() {
             let index =
                 u32::try_from(index).map_err(|_| CommitPlanError::OperationCountOverflow)?;
@@ -1081,7 +1091,7 @@ impl Committer {
                             format!("commit parent {parent_path} was not pinned"),
                         ),
                     })?;
-            let source_witness = Self::operation_source_witness(operation, &stage)?;
+            let source_witness = Self::operation_source_witness(operation, parent, &stage)?;
             let parent_witness = Witness::from(stamp_dir(parent, &parent_path)?);
             journal
                 .intent(index, source_witness, parent_witness)
@@ -1090,18 +1100,29 @@ impl Committer {
                     source,
                 })?;
             Self::check_fault(faults, FaultPoint::IntentSynced(index))?;
-            let applied =
-                Self::apply_operation(transaction, index, operation, parent, &stage, &quarantine)?;
+            let applied = Self::apply_operation(
+                transaction,
+                index,
+                operation,
+                parent,
+                &stage,
+                &quarantine,
+                source_witness,
+            )?;
             if let Some((path, directory)) = applied.created_directory {
                 pinned_parents.insert(path, directory);
             }
             Self::check_fault(faults, FaultPoint::OperationApplied(index))?;
-            journal
-                .done(index, applied.witness)
-                .map_err(|source| CommitError::InternalIo {
-                    operation: "sync commit completion",
-                    source,
-                })?;
+            let completion = if let Some(stamp) = applied.metadata_stamp {
+                metadata_stamps.insert(index, stamp);
+                journal.metadata_done(index, stamp)
+            } else {
+                journal.done(index, applied.witness)
+            };
+            completion.map_err(|source| CommitError::InternalIo {
+                operation: "sync commit completion",
+                source,
+            })?;
             completed_witnesses.push(applied.witness);
             Self::check_fault(faults, FaultPoint::DoneSynced(index))?;
         }
@@ -1117,7 +1138,9 @@ impl Committer {
             )?;
         }
         Self::check_fault(faults, FaultPoint::OwnershipMarkersCleared)?;
-        self.verify_final(prepared)?;
+        self.verify_final(prepared, &metadata_stamps, |index| {
+            completed_witnesses.get(index as usize).copied()
+        })?;
         self.validate_runtime_directory()?;
         Self::check_fault(faults, FaultPoint::Verified)?;
         write_commit_marker(transaction_dir, transaction).map_err(|source| {
@@ -1255,6 +1278,7 @@ impl Committer {
                 | Operation::InstallSymlink { after, slot, .. } => (*after, *slot),
                 Operation::Quarantine { .. }
                 | Operation::CreateDirectory { .. }
+                | Operation::SetFileMode { .. }
                 | Operation::SetDirectoryMode { .. } => continue,
             };
             let Some(ContentVersion::Blob(blob)) = after.content() else {
@@ -1302,6 +1326,18 @@ impl Committer {
                     operation.path(),
                     &target,
                 )?;
+                // Link modes cannot be set portably without following the link.
+                // Validate the staged node before quarantining any workspace entry.
+                let staged_path = VPath::parse(&stage_link_name(slot))
+                    .expect("staged symbolic-link name is a valid VPath");
+                let (matches, actual) = state_matches(stage, &staged_path, Some(after))?;
+                if !matches {
+                    return Err(CommitError::Verification(Box::new(VerificationFailure {
+                        path: operation.path().clone(),
+                        expected: Some(after),
+                        actual,
+                    })));
+                }
             }
         }
         Ok(())
@@ -1309,8 +1345,32 @@ impl Committer {
 
     fn operation_source_witness(
         operation: &Operation,
+        parent: &Dir,
         stage: &Dir,
     ) -> Result<Option<Witness>, CommitError> {
+        if let Operation::SetFileMode { path, .. } = operation {
+            let file = open_file_for_mode(parent, path.file_name().expect("non-root mode path"))
+                .map_err(|source| HostError::io("pin metadata intent source", path, source))?;
+            if !is_single_link(&file)
+                .map_err(|source| HostError::io("inspect metadata source links", path, source))?
+            {
+                return Err(HostError::io(
+                    "validate metadata source",
+                    path,
+                    io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "in-place mode changes require a single-linked file",
+                    ),
+                )
+                .into());
+            }
+            return Ok(Some(stamp_file(&file, path)?.into()));
+        }
+        if let Operation::SetDirectoryMode { path, .. } = operation {
+            let directory = open_real_dir(parent, path.file_name().expect("non-root mode path"))
+                .map_err(|source| HostError::io("pin directory metadata intent", path, source))?;
+            return Ok(Some(stamp_dir(&directory, path)?.into()));
+        }
         let Operation::InstallSymlink { path, slot, .. } = operation else {
             return Ok(None);
         };
@@ -1375,6 +1435,7 @@ impl Committer {
         parent: &Dir,
         stage: &Dir,
         quarantine: &Dir,
+        source_witness: Option<Witness>,
     ) -> Result<AppliedOperation, CommitError> {
         let path = operation.path();
         let leaf = path
@@ -1418,6 +1479,7 @@ impl Committer {
                 let stamp = stamp_at(quarantine, &quarantine_path)?
                     .expect("verified quarantined node remains present");
                 Ok(AppliedOperation {
+                    metadata_stamp: None,
                     witness: stamp.into(),
                     created_directory: None,
                 })
@@ -1441,6 +1503,7 @@ impl Committer {
                     HostError::io("sync committed parent directory", path, source)
                 })?;
                 Ok(AppliedOperation {
+                    metadata_stamp: None,
                     witness: stamp_dir(&directory, path)?.into(),
                     created_directory: Some((path.clone(), directory)),
                 })
@@ -1467,6 +1530,7 @@ impl Committer {
                     HostError::io("sync committed parent directory", path, source)
                 })?;
                 Ok(AppliedOperation {
+                    metadata_stamp: None,
                     witness: stamp_file(&file, path)?.into(),
                     created_directory: None,
                 })
@@ -1489,9 +1553,65 @@ impl Committer {
                     HostError::io("sync committed parent directory", path, source)
                 })?;
                 Ok(AppliedOperation {
+                    metadata_stamp: None,
                     witness: stamp_at(parent, &leaf_path)?
                         .expect("verified committed symlink remains present")
                         .into(),
+                    created_directory: None,
+                })
+            }
+            Operation::SetFileMode {
+                path,
+                expected,
+                after_mode,
+            } => {
+                let file = open_file_for_mode(parent, leaf).map_err(|source| {
+                    HostError::io("pin file for metadata commit", path, source)
+                })?;
+                let before = stamp_file(&file, path)?;
+                let (matches, actual) = file_state_matches(&file, path, *expected)?;
+                if !matches {
+                    return Err(CommitError::Verification(Box::new(VerificationFailure {
+                        path: path.clone(),
+                        expected: Some(*expected),
+                        actual: Some(actual),
+                    })));
+                }
+                if source_witness != Some(before.into())
+                    || !is_single_link(&file).map_err(|source| {
+                        HostError::io("inspect mode target links", path, source)
+                    })?
+                    || stamp_at(parent, &leaf_path)? != Some(before)
+                {
+                    return Err(CommitError::Verification(Box::new(VerificationFailure {
+                        path: path.clone(),
+                        expected: Some(*expected),
+                        actual: Some(NodeState::from_stamp(before)),
+                    })));
+                }
+                set_file_mode(&file, *after_mode)
+                    .map_err(|source| HostError::io("set committed file mode", path, source))?;
+                file.sync_all()
+                    .map_err(|source| HostError::io("sync committed file mode", path, source))?;
+                sync_dir(parent)
+                    .map_err(|source| HostError::io("sync committed mode parent", path, source))?;
+                let stamp = stamp_file(&file, path)?;
+                if stamp_at(parent, &leaf_path)? != Some(stamp)
+                    || !is_single_link(&file)
+                        .map_err(|source| HostError::io("verify mode target links", path, source))?
+                    || stamp.size != before.size
+                    || stamp.mtime_ns != before.mtime_ns
+                    || stamp.mode != *after_mode
+                {
+                    return Err(CommitError::Verification(Box::new(VerificationFailure {
+                        path: path.clone(),
+                        expected: Some(expected.with_mode(*after_mode)),
+                        actual: Some(NodeState::from_stamp(stamp)),
+                    })));
+                }
+                Ok(AppliedOperation {
+                    witness: stamp.into(),
+                    metadata_stamp: Some(stamp),
                     created_directory: None,
                 })
             }
@@ -1500,17 +1620,21 @@ impl Committer {
                 expected,
                 after_mode,
             } => {
-                let (matches, actual) = state_matches(parent, &leaf_path, Some(*expected))?;
-                if !matches {
+                let directory = open_real_dir(parent, leaf).map_err(|source| {
+                    HostError::io("pin directory for metadata commit", path, source)
+                })?;
+                let before = stamp_dir(&directory, path)?;
+                if before.kind != NodeKind::Directory
+                    || before.mode != expected.mode()
+                    || source_witness != Some(before.into())
+                    || matches!(expected.content(), Some(ContentVersion::Stamp(original)) if original.file_id != before.file_id)
+                {
                     return Err(CommitError::Verification(Box::new(VerificationFailure {
                         path: path.clone(),
                         expected: Some(*expected),
-                        actual,
+                        actual: Some(NodeState::from_stamp(before)),
                     })));
                 }
-                let directory = parent.open_dir(leaf).map_err(|source| {
-                    HostError::io("open directory for metadata commit", path, source)
-                })?;
                 set_dir_mode(&directory, *after_mode).map_err(|source| {
                     HostError::io("set committed directory mode", path, source)
                 })?;
@@ -1521,6 +1645,7 @@ impl Committer {
                     HostError::io("sync committed parent directory", path, source)
                 })?;
                 Ok(AppliedOperation {
+                    metadata_stamp: None,
                     witness: stamp_dir(&directory, path)?.into(),
                     created_directory: None,
                 })
@@ -1582,10 +1707,61 @@ impl Committer {
         Ok(())
     }
 
-    fn verify_final(&self, plan: &PreparedPlan) -> Result<(), CommitError> {
+    fn verify_final(
+        &self,
+        plan: &PreparedPlan,
+        metadata_stamps: &BTreeMap<u32, FileStamp>,
+        completed: impl Fn(u32) -> Option<Witness>,
+    ) -> Result<(), CommitError> {
+        for (index, operation) in plan.operations.iter().enumerate() {
+            if let Operation::SetDirectoryMode {
+                path, after_mode, ..
+            } = operation
+            {
+                let index =
+                    u32::try_from(index).map_err(|_| CommitPlanError::OperationCountOverflow)?;
+                let stamp = stamp_at(&self.root, path)?;
+                if !stamp.is_some_and(|stamp| {
+                    stamp.mode == *after_mode
+                        && stamp.kind == NodeKind::Directory
+                        && completed(index) == Some(stamp.into())
+                }) {
+                    return Err(CommitError::Verification(Box::new(VerificationFailure {
+                        path: path.clone(),
+                        expected: Some(NodeState::directory(*after_mode)),
+                        actual: stamp.map(NodeState::from_stamp),
+                    })));
+                }
+            }
+        }
+        let metadata_paths: BTreeMap<&VPath, FileStamp> = metadata_stamps
+            .iter()
+            .filter_map(|(index, stamp)| {
+                let operation = plan.operations.get(usize::try_from(*index).ok()?)?;
+                matches!(operation, Operation::SetFileMode { .. })
+                    .then_some((operation.path(), *stamp))
+            })
+            .collect();
         for (path, expected) in &plan.final_states {
-            let (matches, actual) = state_matches(&self.root, path, *expected)?;
-            if !matches {
+            let exact_expected = metadata_paths
+                .get(path)
+                .copied()
+                .map(NodeState::from_stamp)
+                .or(*expected);
+            let (matches, actual) = state_matches(&self.root, path, exact_expected)?;
+            let approved_content_matches = if metadata_paths.contains_key(path)
+                && expected
+                    .is_some_and(|state| matches!(state.content(), Some(ContentVersion::Blob(_))))
+            {
+                let file = open_real_file(&self.root, path.as_str())
+                    .map_err(|source| HostError::io("pin approved final file", path, source))?;
+                file_state_matches(&file, path, expected.expect("present metadata after-state"))?.0
+                    && stamp_file(&file, path)? == metadata_paths[path]
+                    && stamp_at(&self.root, path)? == Some(metadata_paths[path])
+            } else {
+                true
+            };
+            if !matches || !approved_content_matches {
                 return Err(CommitError::Verification(Box::new(VerificationFailure {
                     path: path.clone(),
                     expected: *expected,
@@ -1698,7 +1874,13 @@ impl Committer {
             }
             let marker = has_valid_commit_marker(&transaction_dir, plan.transaction)?;
             if marker {
-                if self.verify_final(&plan).is_err() {
+                let journal_state = self.read_bounded_journal(&transaction_dir)?;
+                if self
+                    .verify_final(&plan, &journal_state.metadata, |index| {
+                        journal_state.witness(index)
+                    })
+                    .is_err()
+                {
                     report.conflicts.push(RecoveryConflict {
                         transaction: plan.transaction,
                         path: None,
@@ -1895,6 +2077,7 @@ impl Committer {
                 completed: journal.witness(index),
                 source: journal.intent_witness(index),
                 parent: journal.parent_witness(index),
+                metadata_stamp: journal.metadata.get(&index).copied(),
             };
             let parent =
                 self.open_recovery_parent(plan.transaction, operation.path(), witnesses.parent)?;
@@ -1972,6 +2155,57 @@ impl Committer {
         Ok(parent)
     }
 
+    fn verify_mode_owner(
+        transaction: TransactionId,
+        path: &VPath,
+        expected: NodeState,
+        after_mode: u32,
+        witnesses: OperationWitnesses,
+        file: &cap_std::fs::File,
+    ) -> Result<FileStamp, RecoveryConflict> {
+        let conflict = || {
+            recovery_conflict(
+                transaction,
+                Some(path.clone()),
+                "mode-changed file ownership or content changed",
+            )
+        };
+        let stamp = stamp_file(file, path).map_err(|_| conflict())?;
+        let witness = Witness::from(stamp);
+        if stamp.kind != NodeKind::File
+            || witnesses.source != Some(witness)
+            || witnesses
+                .completed
+                .is_some_and(|completed| completed != witness)
+            || !is_single_link(file).map_err(|_| conflict())?
+            || (stamp.mode != after_mode && stamp.mode != expected.mode())
+            || witnesses.metadata_stamp.is_some_and(|after| {
+                after.file_id != stamp.file_id
+                    || after.size != stamp.size
+                    || after.mtime_ns != stamp.mtime_ns
+                    || (stamp.mode == after_mode && after != stamp)
+            })
+        {
+            return Err(conflict());
+        }
+        match expected.content() {
+            Some(ContentVersion::Stamp(before))
+                if before.file_id == stamp.file_id
+                    && before.size == stamp.size
+                    && before.mtime_ns == stamp.mtime_ns => {}
+            Some(ContentVersion::Blob(_)) => {
+                if !file_state_matches(file, path, expected.with_mode(stamp.mode))
+                    .map_err(|_| conflict())?
+                    .0
+                {
+                    return Err(conflict());
+                }
+            }
+            _ => return Err(conflict()),
+        }
+        Ok(stamp)
+    }
+
     #[allow(clippy::too_many_lines)]
     fn infer_applied(
         transaction: TransactionId,
@@ -1982,7 +2216,12 @@ impl Committer {
         stage: &Dir,
         quarantine: &Dir,
     ) -> Result<bool, RecoveryConflict> {
-        if witnesses.completed.is_some() {
+        if witnesses.completed.is_some()
+            && !matches!(
+                operation,
+                Operation::SetFileMode { .. } | Operation::SetDirectoryMode { .. }
+            )
+        {
             return Ok(true);
         }
         let path = operation.path();
@@ -2152,6 +2391,38 @@ impl Committer {
                     )),
                 }
             }
+            Operation::SetFileMode {
+                path,
+                expected,
+                after_mode,
+            } => {
+                let file = open_file_for_mode(parent, leaf).map_err(|_| {
+                    recovery_conflict(
+                        transaction,
+                        Some(path.clone()),
+                        "cannot pin incomplete file mode change",
+                    )
+                })?;
+                let stamp = Self::verify_mode_owner(
+                    transaction,
+                    path,
+                    *expected,
+                    *after_mode,
+                    witnesses,
+                    &file,
+                )?;
+                if stamp.mode == *after_mode {
+                    Ok(true)
+                } else if stamp.mode == expected.mode() {
+                    Ok(false)
+                } else {
+                    Err(recovery_conflict(
+                        transaction,
+                        Some(path.clone()),
+                        "file has neither the old nor new mode",
+                    ))
+                }
+            }
             Operation::SetDirectoryMode {
                 path,
                 expected,
@@ -2175,7 +2446,15 @@ impl Committer {
                     Some(ContentVersion::Stamp(expected_stamp)) => Some(expected_stamp.file_id),
                     _ => None,
                 };
-                if expected_id.is_some_and(|id| id != stamp.file_id) {
+                if stamp.kind != NodeKind::Directory
+                    || expected_id.is_some_and(|id| id != stamp.file_id)
+                    || witnesses
+                        .source
+                        .is_some_and(|source| source != stamp.into())
+                    || witnesses
+                        .completed
+                        .is_some_and(|completed| completed != stamp.into())
+                {
                     return Err(recovery_conflict(
                         transaction,
                         Some(path.clone()),
@@ -2325,7 +2604,7 @@ impl Committer {
                         ));
                     }
                 }
-                let directory = parent.open_dir(leaf).map_err(|_| {
+                let directory = open_real_dir(parent, leaf).map_err(|_| {
                     recovery_conflict(
                         transaction,
                         Some(path.clone()),
@@ -2484,7 +2763,52 @@ impl Committer {
                     )
                 })?;
             }
-            Operation::SetDirectoryMode { path, expected, .. } => {
+            Operation::SetFileMode {
+                path,
+                expected,
+                after_mode,
+            } => {
+                let file = open_file_for_mode(parent, leaf).map_err(|_| {
+                    recovery_conflict(
+                        transaction,
+                        Some(path.clone()),
+                        "cannot pin file for mode rollback",
+                    )
+                })?;
+                let stamp = Self::verify_mode_owner(
+                    transaction,
+                    path,
+                    *expected,
+                    *after_mode,
+                    witnesses,
+                    &file,
+                )?;
+                if stamp.mode == expected.mode() {
+                    return Ok(());
+                }
+                set_file_mode(&file, expected.mode()).map_err(|_| {
+                    recovery_conflict(transaction, Some(path.clone()), "cannot restore file mode")
+                })?;
+                file.sync_all().map_err(|_| {
+                    recovery_conflict(
+                        transaction,
+                        Some(path.clone()),
+                        "cannot sync restored file mode",
+                    )
+                })?;
+                sync_dir(parent).map_err(|_| {
+                    recovery_conflict(
+                        transaction,
+                        Some(path.clone()),
+                        "cannot sync file mode rollback parent",
+                    )
+                })?;
+            }
+            Operation::SetDirectoryMode {
+                path,
+                expected,
+                after_mode,
+            } => {
                 if let Some(witness) = witnesses.completed
                     && !witness_matches(parent, &leaf_path, witness.kind, witness.file_id).map_err(
                         |_| {
@@ -2502,13 +2826,44 @@ impl Committer {
                         "mode-changed directory identity changed",
                     ));
                 }
-                let directory = parent.open_dir(leaf).map_err(|_| {
+                let directory = open_real_dir(parent, leaf).map_err(|_| {
                     recovery_conflict(
                         transaction,
                         Some(path.clone()),
                         "cannot open directory for mode rollback",
                     )
                 })?;
+                let stamp = stamp_dir(&directory, path).map_err(|_| {
+                    recovery_conflict(
+                        transaction,
+                        Some(path.clone()),
+                        "cannot inspect pinned mode rollback directory",
+                    )
+                })?;
+                if witnesses
+                    .completed
+                    .is_some_and(|completed| completed != stamp.into())
+                    || witnesses
+                        .source
+                        .is_some_and(|source| source != stamp.into())
+                    || matches!(expected.content(), Some(ContentVersion::Stamp(before)) if before.file_id != stamp.file_id)
+                {
+                    return Err(recovery_conflict(
+                        transaction,
+                        Some(path.clone()),
+                        "pinned mode rollback directory identity changed",
+                    ));
+                }
+                if stamp.mode == expected.mode() {
+                    return Ok(());
+                }
+                if stamp.mode != *after_mode {
+                    return Err(recovery_conflict(
+                        transaction,
+                        Some(path.clone()),
+                        "directory has neither the old nor new mode",
+                    ));
+                }
                 set_dir_mode(&directory, expected.mode()).map_err(|_| {
                     recovery_conflict(
                         transaction,

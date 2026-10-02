@@ -1,0 +1,16 @@
+[package]
+name = "vsh-bashkit-feasibility"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+bashkit = { version = "=0.18.2", default-features = false }
+monty-alloc = { version = "=0.0.22", features = ["exit-code"] }
+tokio = { version = "=1.53.1", features = ["rt", "macros"] }
+
+[profile.dev]
+debug = 0
+incremental = false

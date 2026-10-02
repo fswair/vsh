@@ -4,14 +4,14 @@ use monty_types::{
     DictPairs, ExcType, MkdirCallArgs, MontyException, MontyObject, MontyPath, OsFunctionCall,
     PathBytesDataArgs, PathStringDataArgs, RenameCallArgs,
 };
+use vsh_execution::ObservedEntry;
 use vsh_policy::AccessKind;
-use vsh_types::{NodeKind, NodeState, VPath};
-use vsh_vfs::{VfsError, VirtualFs};
+use vsh_types::NodeKind;
+use vsh_vfs::VirtualFs;
 
 use super::{
-    Budget, CallFailure, InProcessConfig, already_exists, authorize_path, check_path_bytes,
-    classify_vfs, dispatch_call, is_directory_exception, map_authorized_path, map_call_path,
-    not_directory, permission_denied, vfs,
+    Budget, CallFailure, InProcessConfig, authorize_path, check_path_bytes, classify_gateway,
+    dispatch_call, gateway, map_authorized_path, map_call_path, not_directory,
 };
 
 /// Stable VSH functions injected into every Monty program.
@@ -236,47 +236,11 @@ fn remove(
     let recursive = args.optional_bool("recursive", false)?;
     let missing_ok = args.optional_bool("missing_ok", false)?;
     let marker = OsFunctionCall::Unlink(MontyPath::from(raw));
-    let path = map_authorized_path(&marker, raw, false, config, &[AccessKind::Delete])?;
-    let state = match filesystem.metadata(&path) {
-        Ok(state) => state,
-        Err(VfsError::NotFound { .. }) if missing_ok => return Ok(MontyObject::None),
-        Err(error) => return Err(classify_vfs(error, raw)),
-    };
-    match state.kind() {
-        NodeKind::File | NodeKind::Symlink => vfs(filesystem.unlink(&path), raw)?,
-        NodeKind::Directory if recursive => {
-            preflight_recursive_delete(&path, filesystem, config, budget)?;
-            vfs(filesystem.remove_tree(&path), raw)?;
-        }
-        NodeKind::Directory => vfs(filesystem.rmdir(&path), raw)?,
-    }
+    let path = map_call_path(&marker, raw, false, config)?;
+    gateway(filesystem, config, budget)
+        .remove(&path, recursive, missing_ok)
+        .map_err(|source| classify_gateway(source, raw))?;
     Ok(MontyObject::None)
-}
-
-fn preflight_recursive_delete(
-    root: &VPath,
-    filesystem: &mut VirtualFs,
-    config: &InProcessConfig,
-    budget: &mut Budget,
-) -> Result<(), CallFailure> {
-    let mut pending = vec![root.clone()];
-    while let Some(directory) = pending.pop() {
-        authorize_path(
-            config,
-            &directory,
-            &[AccessKind::Delete, AccessKind::DirectoryRead],
-        )?;
-        let children = vfs(filesystem.read_dir(&directory), directory.as_str())?;
-        budget.charge_directory_entries(children.len())?;
-        for child in children {
-            authorize_path(config, &child, &[AccessKind::Delete])?;
-            let state = vfs(filesystem.metadata(&child), child.as_str())?;
-            if state.kind() == NodeKind::Directory {
-                pending.push(child);
-            }
-        }
-    }
-    Ok(())
 }
 
 fn copy(
@@ -300,186 +264,12 @@ fn copy(
         src: MontyPath::from(source_raw),
         dst: MontyPath::from(destination_raw),
     });
-    let source = map_authorized_path(
-        &marker,
-        source_raw,
-        false,
-        config,
-        &[AccessKind::MetadataRead],
-    )?;
-    let destination = map_authorized_path(
-        &marker,
-        destination_raw,
-        true,
-        config,
-        &[AccessKind::Create, AccessKind::Modify],
-    )?;
-    if destination == source || destination.is_within(&source) {
-        return Err(value_error(
-            "vsh_copy() destination cannot be inside its source".to_owned(),
-        ));
-    }
-    require_destination_parent(&destination, filesystem, destination_raw)?;
-    let source_state = vfs(filesystem.metadata(&source), source_raw)?;
-    match source_state.kind() {
-        NodeKind::File => copy_file(
-            &source,
-            &destination,
-            source_state,
-            overwrite,
-            filesystem,
-            config,
-            budget,
-        )?,
-        NodeKind::Directory if recursive => copy_tree(
-            &source,
-            &destination,
-            source_state,
-            overwrite,
-            filesystem,
-            config,
-            budget,
-        )?,
-        NodeKind::Directory => {
-            return Err(value_error(
-                "vsh_copy() source is a directory; pass recursive=True".to_owned(),
-            ));
-        }
-        NodeKind::Symlink => {
-            return Err(value_error(
-                "vsh_copy() does not copy symbolic links".to_owned(),
-            ));
-        }
-    }
+    let source = map_call_path(&marker, source_raw, false, config)?;
+    let destination = map_call_path(&marker, destination_raw, true, config)?;
+    gateway(filesystem, config, budget)
+        .copy(&source, &destination, recursive, overwrite)
+        .map_err(|source| classify_gateway(source, source_raw))?;
     Ok(MontyObject::Path(config.virtual_root.present(&destination)))
-}
-
-fn require_destination_parent(
-    destination: &VPath,
-    filesystem: &mut VirtualFs,
-    raw: &str,
-) -> Result<(), CallFailure> {
-    let Some(parent) = destination.parent() else {
-        return Err(CallFailure::Python(permission_denied(raw)));
-    };
-    let state = vfs(filesystem.metadata(&parent), raw)?;
-    if state.kind() != NodeKind::Directory {
-        return Err(not_directory(raw));
-    }
-    Ok(())
-}
-
-fn copy_file(
-    source: &VPath,
-    destination: &VPath,
-    source_state: NodeState,
-    overwrite: bool,
-    filesystem: &mut VirtualFs,
-    config: &InProcessConfig,
-    budget: &mut Budget,
-) -> Result<(), CallFailure> {
-    match filesystem.metadata(destination) {
-        Ok(_) if !overwrite => return Err(already_exists(destination.as_str())),
-        Ok(state) if state.kind() == NodeKind::Directory => {
-            return Err(CallFailure::Python(is_directory_exception(
-                destination.as_str(),
-            )));
-        }
-        Ok(_) | Err(VfsError::NotFound { .. }) => {}
-        Err(error) => return Err(classify_vfs(error, destination.as_str())),
-    }
-    authorize_path(config, source, &[AccessKind::ContentRead])?;
-    budget.charge_read(source_state.size())?;
-    let bytes = vfs(filesystem.read(source), source.as_str())?;
-    budget.charge_write(bytes.len())?;
-    vfs(filesystem.write(destination, &bytes), destination.as_str())
-}
-
-#[derive(Debug)]
-enum CopyEntry {
-    Directory { destination: VPath, mode: u32 },
-    File { destination: VPath, bytes: Vec<u8> },
-}
-
-fn copy_tree(
-    source: &VPath,
-    destination: &VPath,
-    source_state: NodeState,
-    overwrite: bool,
-    filesystem: &mut VirtualFs,
-    config: &InProcessConfig,
-    budget: &mut Budget,
-) -> Result<(), CallFailure> {
-    match filesystem.metadata(destination) {
-        Ok(_) if !overwrite => return Err(already_exists(destination.as_str())),
-        Ok(_) => {
-            return Err(value_error(
-                "vsh_copy() cannot merge or overwrite a directory tree".to_owned(),
-            ));
-        }
-        Err(VfsError::NotFound { .. }) => {}
-        Err(error) => return Err(classify_vfs(error, destination.as_str())),
-    }
-    let mut entries = vec![CopyEntry::Directory {
-        destination: destination.clone(),
-        mode: source_state.mode(),
-    }];
-    let mut pending = vec![source.clone()];
-    while let Some(directory) = pending.pop() {
-        authorize_path(config, &directory, &[AccessKind::DirectoryRead])?;
-        let children = vfs(filesystem.read_dir(&directory), directory.as_str())?;
-        budget.charge_directory_entries(children.len())?;
-        for child in children {
-            authorize_path(config, &child, &[AccessKind::MetadataRead])?;
-            let state = vfs(filesystem.metadata(&child), child.as_str())?;
-            let target = child
-                .rebase(source, destination)
-                .map_err(|error| CallFailure::InternalVfs(VfsError::Path(error)))?
-                .expect("walked copy child must be within source");
-            authorize_path(config, &target, &[AccessKind::Create, AccessKind::Modify])?;
-            match state.kind() {
-                NodeKind::Directory => {
-                    entries.push(CopyEntry::Directory {
-                        destination: target,
-                        mode: state.mode(),
-                    });
-                    pending.push(child);
-                }
-                NodeKind::File => {
-                    authorize_path(config, &child, &[AccessKind::ContentRead])?;
-                    budget.charge_read(state.size())?;
-                    let bytes = vfs(filesystem.read(&child), child.as_str())?;
-                    budget.charge_write(bytes.len())?;
-                    entries.push(CopyEntry::File {
-                        destination: target,
-                        bytes,
-                    });
-                }
-                NodeKind::Symlink => {
-                    return Err(value_error(format!(
-                        "vsh_copy() does not copy symbolic link {:?}",
-                        child.as_str()
-                    )));
-                }
-            }
-        }
-    }
-    entries.sort_by_key(|entry| match entry {
-        CopyEntry::Directory { destination, .. } | CopyEntry::File { destination, .. } => {
-            destination.as_str().matches('/').count()
-        }
-    });
-    for entry in entries {
-        match entry {
-            CopyEntry::Directory { destination, mode } => {
-                vfs(filesystem.mkdir(&destination, mode), destination.as_str())?;
-            }
-            CopyEntry::File { destination, bytes } => {
-                vfs(filesystem.write(&destination, &bytes), destination.as_str())?;
-            }
-        }
-    }
-    Ok(())
 }
 
 fn glob(
@@ -508,7 +298,9 @@ fn glob(
         &[AccessKind::MetadataRead],
     )?;
     if max_results == 0 {
-        let state = vfs(filesystem.metadata(&root), raw_root)?;
+        let state = gateway(filesystem, config, budget)
+            .metadata(&root)
+            .map_err(|source| classify_gateway(source, raw_root))?;
         if state.kind() != NodeKind::Directory {
             return Err(not_directory(raw_root));
         }
@@ -518,7 +310,8 @@ fn glob(
     let normalized = pattern.trim_start_matches("./").replace('\\', "/");
     let compiled = GlobPattern::new(&normalized);
     let mut paths = Vec::with_capacity(max_results.min(64));
-    walk_visible(&root, filesystem, config, budget, |path, _, _, _| {
+    gateway(filesystem, config, budget).walk_visible::<CallFailure>(&root, |entry| {
+        let path = entry.path();
         if path
             .relative_to(&root)
             .is_some_and(|relative| compiled.matches(relative))
@@ -558,7 +351,11 @@ fn search(
         config,
         &[AccessKind::MetadataRead],
     )?;
-    let root_state = vfs(filesystem.metadata(&root), raw_root)?;
+    let mut active_gateway = gateway(filesystem, config, budget);
+    let root_entry = active_gateway
+        .observe(&root)
+        .map_err(|source| classify_gateway(source, raw_root))?;
+    let root_state = root_entry.state();
     if max_results == 0 {
         if root_state.kind() == NodeKind::Directory {
             authorize_path(config, &root, &[AccessKind::DirectoryRead])?;
@@ -568,67 +365,49 @@ fn search(
     let folded_query = (!case_sensitive).then(|| query.to_lowercase());
     let mut matches = Vec::with_capacity(max_results.min(64));
     if root_state.kind() == NodeKind::Directory {
-        walk_visible(
-            &root,
-            filesystem,
-            config,
-            budget,
-            |path, state, filesystem, budget| {
-                search_file(
-                    path,
-                    state,
-                    query,
-                    folded_query.as_deref(),
-                    max_results,
-                    &mut matches,
-                    filesystem,
-                    config,
-                    budget,
-                )
-            },
-        )?;
+        active_gateway.walk_visible(&root, |entry| {
+            search_file(
+                entry,
+                query,
+                folded_query.as_deref(),
+                max_results,
+                &mut matches,
+                config,
+            )
+        })?;
     } else {
         authorize_path(config, &root, &[AccessKind::ContentRead])?;
         search_file(
-            &root,
-            root_state,
+            root_entry,
             query,
             folded_query.as_deref(),
             max_results,
             &mut matches,
-            filesystem,
             config,
-            budget,
         )?;
     }
     Ok(MontyObject::List(matches))
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the bounded visitor keeps search on one pass without a result-tree allocation"
-)]
 fn search_file(
-    path: &VPath,
-    state: NodeState,
+    mut entry: ObservedEntry<'_, '_>,
     query: &str,
     folded_query: Option<&str>,
     max_results: usize,
     matches: &mut Vec<MontyObject>,
-    filesystem: &mut VirtualFs,
     config: &InProcessConfig,
-    budget: &mut Budget,
 ) -> Result<bool, CallFailure> {
-    if state.kind() != NodeKind::File
+    if entry.state().kind() != NodeKind::File
         || config
             .call_policy
-            .authorize(path, AccessKind::ContentRead)
+            .authorize(entry.path(), AccessKind::ContentRead)
             .is_err()
     {
         return Ok(true);
     }
-    budget.charge_read(state.size())?;
-    let bytes = vfs(filesystem.read(path), path.as_str())?;
+    let bytes = entry
+        .read()
+        .map_err(|source| classify_gateway(source, entry.path().as_str()))?;
     let Ok(text) = String::from_utf8(bytes) else {
         return Ok(true);
     };
@@ -637,7 +416,7 @@ fn search_file(
             continue;
         };
         matches.push(search_match(
-            config.virtual_root.present(path),
+            config.virtual_root.present(entry.path()),
             line_index.saturating_add(1),
             column,
             line,
@@ -730,47 +509,6 @@ fn patch(
     Ok(MontyObject::Int(
         i64::try_from(replacements).unwrap_or(i64::MAX),
     ))
-}
-
-fn walk_visible(
-    root: &VPath,
-    filesystem: &mut VirtualFs,
-    config: &InProcessConfig,
-    budget: &mut Budget,
-    mut visit: impl FnMut(&VPath, NodeState, &mut VirtualFs, &mut Budget) -> Result<bool, CallFailure>,
-) -> Result<(), CallFailure> {
-    let state = vfs(filesystem.metadata(root), root.as_str())?;
-    if state.kind() != NodeKind::Directory {
-        return Err(not_directory(root.as_str()));
-    }
-    authorize_path(config, root, &[AccessKind::DirectoryRead])?;
-    let children = vfs(filesystem.read_dir(root), root.as_str())?;
-    budget.charge_directory_entries(children.len())?;
-    let mut pending = children.into_iter().rev().collect::<Vec<_>>();
-    while let Some(path) = pending.pop() {
-        if config
-            .call_policy
-            .authorize(&path, AccessKind::MetadataRead)
-            .is_err()
-        {
-            continue;
-        }
-        let state = vfs(filesystem.metadata(&path), path.as_str())?;
-        if !visit(&path, state, filesystem, budget)? {
-            return Ok(());
-        }
-        if state.kind() == NodeKind::Directory
-            && config
-                .call_policy
-                .authorize(&path, AccessKind::DirectoryRead)
-                .is_ok()
-        {
-            let children = vfs(filesystem.read_dir(&path), path.as_str())?;
-            budget.charge_directory_entries(children.len())?;
-            pending.extend(children.into_iter().rev());
-        }
-    }
-    Ok(())
 }
 
 fn validate_pattern(pattern: &str, config: &InProcessConfig) -> Result<(), CallFailure> {

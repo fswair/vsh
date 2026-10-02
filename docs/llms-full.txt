@@ -14,6 +14,7 @@ This file contains every documentation source: Zensical navigation pages first, 
 - [Use VSH efficiently](https://fswair.github.io/vsh/guides/efficient-usage/)
 - [Troubleshooting](https://fswair.github.io/vsh/guides/troubleshooting/)
 - [Command-line workflows](https://fswair.github.io/vsh/guides/cli/)
+- [Bounded Bash on the VSH filesystem](https://fswair.github.io/vsh/integrations/bash/)
 - [Tutorial: deterministic Pydantic AI review](https://fswair.github.io/vsh/tutorials/pydantic-ai-deterministic/)
 - [Tutorial: evidence-first LLM commit review](https://fswair.github.io/vsh/tutorials/pydantic-ai-judge/)
 - [Python SDK](https://fswair.github.io/vsh/python/)
@@ -628,6 +629,8 @@ denials, not approval prompts.
 | One I/O call | 4 MiB | single-frame allocation |
 | One path | 16 KiB | path/protocol abuse |
 | Directory entries | 100,000 | traversal fan-out |
+| Filesystem evidence records | 250,000 | effect/dependency retention |
+| Filesystem evidence storage | 64 MiB | parent-side owned paths and record storage |
 | Captured stdout | 1 MiB | output flooding |
 | Returned value | 1 MiB | host conversion |
 | Exception payload | 256 KiB | traceback/error flooding |
@@ -635,6 +638,24 @@ denials, not approval prompts.
 The supervised worker additionally enforces protocol frame and process boundaries.
 Snapshot, artifact, state-log, journal, plan, and commit paths have their own trusted
 host limits.
+
+`max_evidence_records` counts retained effects, read dependencies, write
+preconditions and adapter-retained policy denials together. Filtered/ignored
+traversal denials are not retained and do not consume this record count.
+`max_evidence_bytes` charges owned path bytes and
+conservative record/container costs; write preconditions also reserve their overlay
+slot and retained original paths after rename/chmod. Temporary directory/subtree
+paths, rebased copy destinations and traversal frontiers are checked against the
+available byte envelope before growth; they do not consume retained-record counts.
+Nested buffer scopes have independent checks, and canonical directory hashing uses
+bounded streaming scratch with unchanged identity. Repeated observations preserve
+ordered effects but reuse
+existing dependency keys. These limits do not inflate receipt file I/O or OS-call
+counters and are not a whole-process RSS, snapshot or blob-content cap.
+
+An evidence resource failure is terminal and sticky: it cannot be caught inside the
+guest to obtain a committable partial transaction. Native `VirtualFs::exists`
+returns `Result<bool, VfsError>` so a failed observation is not mistaken for absence.
 
 Duration is cumulative Monty **bytecode** time, not total request wall time. Worker
 heap is not parent-process or process-tree RSS. Parent-side high-level function work,
@@ -875,6 +896,11 @@ the SDK and writes a JSON receipt to stdout.
 
 ## Preview one program
 
+Monty is the default. To use the optional Unix Bash frontend, select both the host
+opt-in and guest language: `vsh run --enable-bash --language bash --workspace ./demo-workspace
+--code 'printf verified > report.txt'`. `--bash-worker` selects an explicit trusted
+executable; it does not enable host shell commands. See [bounded Bash](../integrations/bash.md).
+
 Choose an existing workspace and save supported Monty source in `transform.py`:
 
 ```python
@@ -896,6 +922,29 @@ Inspect `decision`, `changes`, `result_repr` and `commit.committed`, not only th
 process exit code. Policy denial or pending approval can be returned as a normal
 receipt. A runtime/compilation failure exits unsuccessfully instead of supplying a
 successful transaction receipt.
+
+### Bash failure diagnostics
+
+A Bash execution failure writes one JSON object to **stderr**, with no successful
+receipt on stdout and no committable transaction handle. `state` is `"failed"` and
+`committable` is `false`. `error.kind` distinguishes failure categories;
+`exit_code` preserves the guest status when available. The CLI exits with that status
+when it is between 1 and 255, otherwise with 1.
+
+The diagnostic `stdout` and `stderr` fields are base64 strings, each limited to
+65,536 raw bytes. Check `encoding` and `output_truncated` before decoding. `changes`
+describes virtual changes only; `changes_complete: false` means a complete diagnostic
+diff was unavailable, not that nothing changed in the simulation. No partial guest
+changes are committed when execution fails.
+
+```bash
+vsh run --enable-bash --language bash --workspace ./demo-workspace \
+  --mode auto --code 'printf diagnostic >&2; printf draft > report.txt; exit 7'
+```
+
+This exits with 7, reports the virtual `report.txt` change and leaves the host file
+unchanged. Ordinary receipt decisions such as pending approval still require inspecting
+the receipt; they are not Bash execution failures.
 
 ## Important cross-process limit
 
@@ -931,6 +980,243 @@ of the lost auto-approved handle, then verifies explicit one-shot fixture automa
 It does not use or modify your repository as its workspace.
 
 For CodeMode, transport configuration and receipt fields, continue to [MCP](../integrations/mcp.md).
+
+---
+
+# Bounded Bash on the VSH filesystem
+
+Canonical URL: https://fswair.github.io/vsh/integrations/bash/
+
+Bashkit parses and executes the shell; **VSH owns the filesystem authority and the
+transaction**. This is an additional guest frontend, not a host `bash` subprocess,
+a container, or a claim of complete POSIX compatibility. Monty remains the default.
+
+Use Bash for familiar text pipelines, generated-file workflows, directory operations
+and mode changes that need the same preview/review/stale/commit guarantees as Monty.
+Use Monty for structured values and the native `vsh_*` Python tools. Neither guest
+gets the host's filesystem, environment, executables or network.
+
+## Enable it explicitly
+
+Python wheels bundle two separate workers. Enabling Bash does not start a worker
+until the first Bash call. `worker_path` still selects Monty; the Bash executable is
+selected by `BashConfig.worker_path`, `VSH_BASH_WORKER`, or the wheel's script directory.
+There is no implicit download, shell command lookup or fallback to real filesystem I/O.
+
+```python
+from vsh import BashConfig, BashResult, Language, ReceiptDetail, Runtime
+
+runtime = Runtime.open("./workspace", bash=BashConfig())
+preview = runtime.preview(
+    "mkdir -p reports; printf 'verified\\n' > reports/status.txt; cat reports/status.txt",
+    language=Language.BASH,
+    intent="write a generated status report",
+    detail=ReceiptDetail.FULL,
+)
+assert isinstance(preview.result, BashResult)
+print(preview.state, preview.changes, preview.result.stdout)
+# Inspect the exact proposal, then promote its existing identity:
+committed = runtime.commit(preview.transaction, 0)
+```
+
+The final line requires a committable proposal. Strict policy returns pending approval
+instead: use an independent approval or a configured [commit hook](../python/hooks.md).
+Do not rerun the source to “commit the preview”; promote its exact transaction ID.
+
+In a source checkout, build the independent executable first:
+
+```bash
+cargo build --release --locked -p vsh-bash --no-default-features --features worker --bin vsh-bash-worker
+export VSH_BASH_WORKER="$PWD/target/release/vsh-bash-worker"
+```
+
+Rust enables only the lightweight host adapter in the application:
+
+```toml
+[dependencies]
+# Replace this path with the location of your VSH checkout (unpublished feature).
+vsh = { path = "/path/to/vsh/crates/vsh", features = ["bash"] }
+```
+
+```rust
+use vsh::{BashConfig, Language, RunRequest, Runtime, RuntimeConfig};
+
+let runtime = Runtime::open(
+    RuntimeConfig::new("./workspace")
+        .with_bash(BashConfig::new("./vsh-bash-worker")),
+)?;
+let preview = runtime.preview(
+    RunRequest::new("printf verified > report.txt")
+        .with_language(Language::Bash)
+        .with_intent("create a generated report"),
+)?;
+let committed = runtime.commit(preview.transaction, 0)?;
+```
+
+This surface is implemented in the checkout; it is not a claim that an already
+published 0.5.0 artifact includes these additions. Publishing requires a new release.
+The initial Bash profile is for Unix hosts (Linux/macOS). Windows Bash opt-in is
+rejected; the existing Monty platform support is unchanged.
+
+Relative Bash worker paths are resolved against the host's current directory when
+the adapter opens, before workers switch to their isolated working directory. The
+resolved executable is reused for pool replacements; it never becomes a guest command.
+
+## Execution and evidence
+
+Each call captures a fresh immutable workspace snapshot. The worker gets a fresh
+Bash interpreter, with `/workspace` as its working directory and no persistent
+variables, functions or shell state from earlier calls. Filesystem calls cross a
+bounded typed protocol into the parent-owned gateway, which maps paths, authorizes
+access, accounts budgets, records origins and changes the transaction's `VirtualFs`.
+
+The final canonical diff compares base and overlay state. It is not a list of command
+names: writes later restored to their original content need not remain in the diff.
+The ordered effect ledger still records what happened, including `bash_call` origins;
+read/write dependencies still participate in stale checking. Snapshot, diff, policy,
+output evidence, source, intent, language and profile are bound into the transaction.
+
+A successful shell exit is necessary but not sufficient. Policy can still deny or
+require review. Nonzero exit, timeout, cancellation, protocol/resource failure or an
+unsupported operation produces **no approvable transaction**. A diagnostic diff
+after failure is not permission to commit partial work. Unsupported-profile and
+resource failures remain terminal even if shell code catches a failing command.
+
+## The reviewed profile: `vsh-bash-bounded-v4`
+
+| Area | Contract |
+| --- | --- |
+| Paths | `/workspace` maps to the snapshot root; traversal/other namespaces fail closed |
+| Files | `cat`, writes/redirection, append, lists, plain `cp`/`mv`, bounded `rm` and directory operations use VSH's gateway |
+| Pipelines | Virtual pipelines, expansions, loops, functions and supported Bashkit builtins; no host process spawn |
+| Permissions | Ordinary permission-bit `chmod` is virtual and participates in policy, durable diff and verified commit; special bits/unsupported flags are rejected |
+| Time metadata | Deterministic synthetic stat times; timestamp mutation/preservation is not promised; `touch` is unsupported |
+| Links | Existing snapshot links stay opaque; guest link creation/following is unsupported in this profile |
+| Scheduling | Background/parallel syntax is run sequentially in the virtual interpreter, not as concurrent filesystem mutations; no host job-control claim |
+| Coprocess/FDs | Bounded synchronous virtual `coproc`; process-substitution `/dev/fd` access is unsupported |
+| Extras | RealFs, HTTP/network, SSH, Python/TS bridges, SQLite, arbitrary host binaries, `env`, `tar` and other excluded builtins are unavailable |
+| Streams | Raw bytes are authoritative for filesystem/`cat` streams; text builtins use Bashkit's UTF-8 string model |
+
+This is not every upstream builtin or flag. In particular `cp`/`mv` accept plain
+operands, and `rm` has the narrow supported recursive/force contract. There is no
+source-text security scanner: guards inspect actual resolved command arguments and
+all filesystem access still crosses the policy gateway.
+
+Replacing an existing opaque symlink quarantines the old entry even when its target
+text is unchanged. Before any workspace mutation, commit checks that the staged link
+can reproduce the requested metadata. A host-specific symlink mode that cannot be
+reproduced fails early with the original workspace intact; VSH does not silently
+normalize link permissions or follow the link to change its target's mode.
+
+`printf` accepts literal text, `%s` and `%%` only. Variable assignment (`-v`),
+precision, width, `%c`, `%b` and
+other conversions are rejected rather than silently changing binary output.
+Numeric byte escapes in `printf`/`echo` (`\\x..`, octal forms) are rejected because
+upstream's text formatter can lose or replace bytes. Use `cat`/`cp` for binary data.
+Do not rely on Bash variables/arguments for arbitrary binary strings or on full Bash
+ANSI-C quoting compatibility. This restriction is explicit, not silent data repair.
+
+## Outputs, errors and limits
+
+`BashResult` contains `profile`, `exit_code`, `stdout: bytes`, `stderr: bytes`.
+`receipt.stdout_bytes` and `stderr_bytes` expose those same authoritative bytes.
+The convenience text properties decode with replacement; never use them to hash,
+approve, round-trip or compare binary evidence. Rust uses `ExecutionOutput::Bash`;
+the Monty branch retains its typed value and UTF-8 stdout.
+
+```python
+from vsh import VshBashError
+
+try:
+    runtime.preview("printf partial > failed.txt; exit 7", language=Language.BASH)
+except VshBashError as error:
+    diagnostics = error.diagnostics
+    print(diagnostics.kind, diagnostics.exit_code, diagnostics.changes)
+    # failed.txt was not applied; diagnostics have no commit handle.
+```
+
+`ExecutionBudget` retains shared program, wall-time, filesystem-call, I/O, path,
+directory, active-evidence and output bounds. `BashLimits` adds interpreter-work
+ceilings for work units, aggregate intermediate input, live intermediate bytes,
+commands, single/total loop iterations and nested parser operations.
+Shared execution limits additionally bound output, recursion and memory.
+`BashConfig` also bounds active workers (default
+4), idle workers (default 4), and an optional host watchdog. Zero idle disables reuse;
+active must be positive and idle cannot exceed active. Queue waiting consumes the
+watchdog. An idle process is retained only after a clean reset; its next call still
+constructs a fresh interpreter.
+
+Async capability/hook execution runs native work off the event loop. Cancellation
+joins that work and retires its worker. If cancellation wins before commit entry,
+user files remain unchanged; an unseen ephemeral receipt is dropped and durable
+automatic approval is revoked into pending review. If commit already entered, VSH
+finishes its recovery protocol and returns its actual outcome, not a false rollback.
+Synchronous host loaders are cooperative: cancellation is checked when they return.
+
+## Capability, judge, MCP and CLI
+
+```python
+from vsh import BashConfig, HookDecision, HookScope
+from vsh.pydantic_ai import VshCapability
+
+capability = VshCapability(
+    "./workspace",
+    bash=BashConfig(),
+    hook_handler=lambda event: HookDecision.review("confirm the actual changed paths"),
+    hook_scope=HookScope.ALL_REQUESTS,
+)
+result = await capability.vsh_run("printf draft > report.txt", "draft a report", language="bash")
+assert result.requires_review
+```
+
+The filesystem tools remain Monty-powered; the existing `vsh_run` tool gains a
+host-enabled language selector. A judge is wired as `judge.hook_handler`, not as the
+handler itself. `review_instructions` extend its evidence-first instructions. The
+judge sees the bound execution context, canonical before/after diff, effects,
+dependencies, policy and explicitly permitted content. It cannot override native
+denials or stale/commit checks. Review/reject feedback withholds guest results and
+both streams from the main agent. See the [guided judge tutorial](../tutorials/pydantic-ai-judge.md).
+
+For MCP/CodeMode, set `VSH_ENABLE_BASH=1` in the **server host environment** before
+starting the server. `VSH_BASH_WORKER` is optional with a wheel. The tool schema
+advertises only host-enabled languages; model arguments cannot enable a backend.
+MCP's Bash output includes bounded base64 stdout/stderr and an explicit truncation
+flag. Display truncation does not change the sealed native output or approval identity.
+
+```bash
+vsh run --workspace ./workspace --enable-bash --language bash --code 'printf verified > report.txt' --mode preview
+```
+
+For one-shot auto mode, replace `preview` with `auto`. An auto-approved CLI preview
+is process-local and cannot be promoted by a later CLI process; use a live SDK or
+MCP runtime. Run `examples/native/bash_workflow.py` for a disposable, binary-safe
+preview/commit plus deterministic capability review. Rust's compiled counterpart is
+`crates/vbash/examples/bash_workflow.rs`.
+
+## Guided Bash review workflow
+
+1. Install the wheel, or follow the source-checkout worker setup above. Then run
+   `python examples/native/bash_workflow.py`. It creates a disposable workspace,
+   previews a binary-safe `cat` redirection, checks that the host file is still absent,
+   and commits that exact receipt. It then enables strict policy and a deterministic
+   handler on a capability. This requires no model credentials or paid calls.
+2. Start with a narrow host-owned decision rule. Inspect `event.canonical_diff`,
+   `event.effects`, `event.evidence_complete` and `event.execution_context`; do not approve
+   solely because the caller says “cleanup.” A read-only request can also reach a
+   strict review handler. Returning `HookDecision.review(...)` preserves the pending
+   transaction and gives the main agent concrete feedback without releasing streams.
+3. For an independent model reviewer, run `examples/native/bash_judge.py` only after
+   configuring authenticated `VSH_MAIN_MODEL` and `VSH_JUDGE_MODEL` IDs. This optional
+   live example makes model requests against a disposable `service.toml` fixture.
+   Its agent uses Bash `sed -i`; the judge must verify that the canonical final config
+   retains authentication. The example authorizes content forwarding for that one
+   path, uses strict policy, and supplies the adapter as `judge.hook_handler`.
+
+The live example is not a deployment security policy. Set your own path/content
+permissions, model usage limits and trusted review rules before adapting it to a real
+workspace. Tests exercise an equivalent `FunctionModel` reviewer without network or
+LLM cost. Bash never receives a special approval path: all of these examples finish
+through the native policy, binding, stale-dependency and single-use commit checks.
 
 ---
 
@@ -1689,6 +1975,8 @@ ExecutionBudget(
     max_io_call_bytes: int | None = ...,
     max_path_bytes: int | None = ...,
     max_directory_entries: int | None = ...,
+    max_evidence_records: int | None = ...,
+    max_evidence_bytes: int | None = ...,
     max_output_bytes: int | None = ...,
     max_result_bytes: int | None = ...,
     max_exception_bytes: int | None = ...,
@@ -1704,10 +1992,14 @@ calls. The functions available in every `code` program are documented in
 
 ## `RunRequest`
 
+`Language.MONTY` (default) and `Language.BASH` select the guest frontend. Bash
+requires `Runtime.open(..., bash=BashConfig(...))`; guest source cannot enable it.
+
 ```text
 RunRequest(
     code: str,
     *,
+    language: Language | None = ...,
     intent: str | None = ...,
     mode: RunMode | None = ...,
     detail: ReceiptDetail | None = ...,
@@ -1717,7 +2009,8 @@ RunRequest(
 
 | Property | Meaning |
 |---|---|
-| `code` | Exact Monty source bound into transaction identity |
+| `code` | Exact selected-language source bound into transaction identity |
+| `language` | Immutable guest language, default `MONTY` |
 | `intent` | Optional trusted-host context bound independently from source |
 | `mode` | Defaults to `PREVIEW` |
 | `detail` | Defaults to `COMPACT` |
@@ -1736,6 +2029,7 @@ Runtime.open(
     data_directory: str | os.PathLike[str] | None = ...,
     policy: str = "balanced",
     worker_path: str | os.PathLike[str] | None = ...,
+    bash: BashConfig | None = ...,
     hook_id: str | None = ...,
     hook_scope: HookScope | None = ...,
     review_content_bytes: int = 0,
@@ -1759,6 +2053,7 @@ preview(request: RunRequest) -> Receipt
 preview(
     request: str,
     *,
+    language: Language | None = ...,
     intent: str | None = ...,
     detail: ReceiptDetail | None = ...,
     budget: ExecutionBudget | None = ...,
@@ -1845,9 +2140,10 @@ configuration together with `hook_handler`, `hook_scope`, `hook_id`,
 there is no `VshCapability.open` alias.
 
 `VshToolResult` contains `transaction`, `state`, JSON-compatible `result`,
-`changed_paths`, optional `hook_verdict`, optional `feedback`, and the derived
+`changed_paths`, `language`, display `stdout`/`stderr`, optional `hook_verdict`, optional `feedback`, and the derived
 `requires_review` property. Pending, rejected, and denied outcomes withhold the guest
-result from the calling agent.
+result and streams from the calling agent. Committed Bash results retain their
+raw streams as base64-wrapped values inside `result`.
 
 `CommitJudge(model, ...)` builds a bounded structured reviewer. Configure its additive
 `review_instructions`, model settings, content allowlist, usage limits, provider output
@@ -1861,6 +2157,31 @@ See the [capability constructor and tool reference](../integrations/pydantic-ai.
 [judge](../tutorials/pydantic-ai-judge.md) applications.
 
 ## `Receipt`
+
+For Bash, `result` is a frozen `BashResult(profile, exit_code, stdout, stderr)`
+projection with raw `bytes` streams. `language`, `stdout_bytes` and `stderr_bytes`
+are available for both frontends. `stdout`/`stderr` are convenience strings decoded
+with replacement for Bash; the byte fields are the canonical evidence.
+
+### Bash configuration and failures
+
+`BashConfig(*, worker_path=None, limits=None, wall_timeout_ms=None,
+max_active_workers=4, max_idle_workers=4)` enables one reviewed Unix profile.
+`worker_path` on `Runtime.open` still refers only to Monty. No Bash config means
+Bash selection fails before execution.
+
+`BashLimits` is keyword-only and immutable: `max_work_units`,
+`max_aggregate_input_bytes`, `max_live_intermediate_bytes`, `max_commands`,
+`max_loop_iterations`, `max_total_loop_iterations`, `max_parser_operations`.
+These interpreter ceilings supplement, not replace,
+the shared `ExecutionBudget` filesystem, evidence and output ceilings.
+
+`VshBashError` derives from `VshExecutionError`. Its `.diagnostics` has `kind`,
+`exit_code`, `stdout`, `stderr`, `changes`, `changes_complete` and a denied-access
+count. `changes_complete=False` means final diagnostic diff computation was not
+possible; an empty list must not be interpreted as no side effects. Even a complete
+diagnostic diff has no transaction ID and cannot be approved or committed.
+See the [Bash guide](../integrations/bash.md) for typed examples and limitations.
 
 ### Identity and decision
 
@@ -1880,9 +2201,13 @@ See the [capability constructor and tool reference](../integrations/pydantic-ai.
 |---|---|---|
 | `changed_paths` | `int` | Canonical change count |
 | `changes` | `list[tuple[str, str]]` | Full path/kind list when requested |
-| `result` | `object` | Native Python projection of Monty's returned value |
+| `language` | `Language` | `MONTY` or `BASH` |
+| `result` | `object` | Monty's projected return value, or a `BashResult` with exit/profile and raw streams |
 | `result_repr` | `str` | Full `repr()` of the projected value, constructed on access |
-| `stdout` | `str` | Bounded captured `print()` output |
+| `stdout` | `str` | Captured stdout display text; lossy for non-UTF-8 Bash bytes |
+| `stderr` | `str` | Captured stderr display text; lossy for non-UTF-8 Bash bytes |
+| `stdout_bytes` | `bytes` | Exact bounded stdout bytes |
+| `stderr_bytes` | `bytes` | Exact bounded stderr bytes |
 
 Change kinds are `create`, `delete`, `modify`, and `metadata_change`. Rename effects are
 represented by the canonical before/after entries produced by the native diff.
@@ -1898,8 +2223,10 @@ The decision remains the original policy decision even when state becomes `commi
 `os_calls`, `read_bytes`, `write_bytes`, `directory_entries`, `output_bytes`,
 `denied_accesses`, and `result_bytes` describe work performed by the worker adapter.
 
-Read/write counts describe cumulative work, not just final diff size. `result_bytes`
-tracks Monty's bounded host-footprint estimate, not network JSON bytes or token count.
+Read/write counts describe cumulative work, not just final diff size. For Monty,
+`result_bytes` tracks the bounded host-footprint estimate; Bash charges four bytes
+for its exit status. Bash stdout and stderr count together toward `output_bytes`.
+None of these counters measures network JSON bytes or token count.
 
 ### Commit evidence
 
@@ -2011,7 +2338,9 @@ unhookable.
 - transaction, event, hook, base snapshot, program, policy, runtime configuration,
   diff, read-set and write-set identities;
 - the complete path-ordered canonical diff used by commit;
-- ordered VFS/Monty effect observations and execution counters;
+- ordered VFS/Monty/Bash effect observations and execution counters;
+- `execution_context` with language, profile/status, completeness, evidence digest,
+  and authoritative stdout/stderr byte lengths (event schema version 2);
 - deterministic risk metrics and sorted risk flags;
 - bounded raw intent plus its transaction-bound digest;
 - explicit `evidence_complete` and `evidence_truncated` markers.
@@ -2909,6 +3238,7 @@ let config = RuntimeConfig::new(workspace_root)
 | `new(workspace_root)` | Balanced configuration with protected `.vsh-runtime/data` |
 | `with_data_directory(path)` | Select a trusted external durable-data capability |
 | `with_worker_path(path)` | Select the exact supervised worker executable |
+| `with_bash(BashConfig)` | Opt into the separate bounded Bash frontend (`bash` feature) |
 | `with_max_idle_workers(count)` | Bound reusable clean workers; zero disables pooling |
 | `with_result_compatibility(kind)` | Require native or Python-projectable result values |
 | `with_in_process_execution()` | Trusted-only correctness/benchmark harness |
@@ -2934,6 +3264,7 @@ retains clean workers and capabilities, but every execution captures a fresh sna
 ```rust
 pub struct RunRequest<'a> {
     pub code: &'a str,
+    pub language: Language,
     pub intent: Option<&'a str>,
     pub mode: RunMode,
     pub detail: ReceiptDetail,
@@ -2942,7 +3273,8 @@ pub struct RunRequest<'a> {
 ```
 
 `RunRequest::new(code)` creates a compact preview with default limits. Chain
-`with_intent`, `with_mode`, `with_detail`, and `with_budget` to replace one choice.
+`with_language`, `with_intent`, `with_mode`, `with_detail`, and `with_budget` to replace one choice.
+`Language::Monty` is the default; Bash requires explicit host configuration.
 
 ## Modes and detail
 
@@ -3026,8 +3358,7 @@ pub struct Receipt {
     pub diff: DiffDigest,
     pub changed_paths: usize,
     pub changes: Vec<DiffEntry>,
-    pub value: MontyObject,
-    pub stdout: String,
+    pub output: ExecutionOutput,
     pub execution: ExecutionStats,
     pub timings: StageTimings,
     pub commit: Option<CommitReceipt>,
@@ -3043,10 +3374,23 @@ pub struct Receipt {
 Pattern-match the decision rather than parsing its display text.
 
 `diff` is a digest. Each full `DiffEntry` includes `path`, `kind`, `before` and `after`
-`NodeState` values, not text hunks. `value` is the typed `MontyObject`, whereas Python
+`NodeState` values, not text hunks. `ExecutionOutput::Monty { value, stdout }` retains
+the typed `MontyObject`, whereas Python
 projects it to a Python object. Native compatibility can represent values the pinned
 Python converter cannot; choose `ResultCompatibility::Python` when that projection is
 part of your downstream contract.
+
+`ExecutionOutput::Bash(BashResult)` carries `profile`, `exit_code` and authoritative
+`Vec<u8>` stdout/stderr. Use `output.language()`, `output.monty_value()`,
+`output.stdout_bytes()` and `output.stderr_bytes()` for borrowed access.
+The old Rust `receipt.value` / `receipt.stdout` fields move under `receipt.output`;
+Python's existing properties remain available. See [bounded Bash](../integrations/bash.md).
+
+`ExecutionCancellation` is a one-request shared handle. `run_cancellable`,
+`commit_cancellable` and `resolve_commit_cancellable` accept it. `cancel()` returns
+false once commit has entered; after entry, the actual commit/recovery result wins.
+`discard_cancelled(id)` is ownership-scoped host cleanup for an undelivered receipt:
+ephemeral artifacts are dropped; durable automatic approvals move to pending review.
 
 ## `StageTimings`
 
@@ -3087,8 +3431,10 @@ Trusted-host bounds for durable pending artifacts:
 These do not replace execution budgets; they constrain the artifact VSH retains after
 execution.
 
-The guest duration is cumulative bytecode time; the heap cap applies to the supervised
-worker. Neither is a total parent-process RSS or end-to-end request deadline. For all
+Monty's guest duration is cumulative bytecode time. Bash applies it to the interpreter
+and parser timeout, alongside the parent's watchdog. The heap cap applies to the
+supervised worker, not total parent-process RSS. The guest duration alone is not an
+end-to-end request deadline. For all
 defaults and measurement scope, see [policies and budgets](../guides/policies-and-budgets.md).
 
 ## `VshError`
@@ -3262,7 +3608,7 @@ auto-approved artifact after consuming it:
 
 ```rust
 let receipt = runtime.preview(RunRequest::new("{'answer': 42}"))?;
-println!("{:?}", receipt.value);
+println!("{:?}", receipt.output.monty_value());
 runtime.discard_preview(receipt.transaction)?;
 ```
 
@@ -3288,7 +3634,8 @@ See [Rust setup](index.md), [API reference](api.md) and [performance](../perform
 Canonical URL: https://fswair.github.io/vsh/integrations/mcp/
 
 VSH exposes one normal MCP tool, `vsh_run`. Its `code` argument is a complete Monty
-program: one snapshot, one active overlay, one canonical change set and one policy
+program or explicitly host-enabled bounded Bash program: one snapshot, one active
+overlay, one canonical change set and one policy
 decision. The Python adapter constructs a native request and projects the receipt;
 it does not implement a separate filesystem simulator.
 
@@ -3308,6 +3655,11 @@ vsh-codemode
 
 The ten in-program VSH functions and the existing `pathlib` surface are included in
 the current release. See [source installation](../development.md) when developing from a checkout.
+
+The Bash selector, `VSH_ENABLE_BASH`, and binary stream fields described below are
+source-checkout additions, **not included in the published 0.5.0 installation above**.
+Use the [Bash source setup](bash.md#enable-it-explicitly) for those features; the
+published installation remains Monty-only.
 
 ## Connect a client
 
@@ -3337,6 +3689,7 @@ budget arguments. Constrain those in a trusted wrapper for an untrusted client.
 vsh_run(
     code: str | None = None,
     *,
+    language: "monty" | "bash" = "monty",
     transaction: str | None = None,
     workspace_root: str | None = None,
     intent: str | None = None,
@@ -3346,6 +3699,12 @@ vsh_run(
     budget: BudgetOverrides | None = None,
 ) -> dict[str, object]
 ```
+
+Bash is disabled by default. Start the server with `VSH_ENABLE_BASH=1` (and an
+optional host-only `VSH_BASH_WORKER` path) to advertise `"bash"` in the tool schema.
+The guest cannot enable it by passing a language argument. The receipt includes
+language, exit/profile and bounded base64 streams with explicit truncation markers.
+See [bounded Bash](bash.md) for the supported Unix profile and noncommittable failures.
 
 For new work pass `code`. For promotion pass `transaction`, no code, and `mode="auto"`.
 Resolve the same workspace/profile/worker identity as the preview. Promotion does not
@@ -3387,7 +3746,8 @@ proposal and review, not a forced replay.
 | Top-level identity | `transaction`, `base_snapshot`, `diff` digest |
 | Top-level decision | `state`, `decision`, `risk_flags`, `deny_reason` |
 | Top-level changes | `changed_paths`, `changes: [{path, kind}]` in full detail |
-| Top-level guest output | `result_repr`, `result_truncated`, `stdout`, `stdout_truncated` |
+| Top-level guest output | `language`, `result_repr`, `result_truncated`, `stdout`, `stdout_truncated`, `stderr`, `stderr_truncated` |
+| `bash` | `None` for Monty; otherwise `profile`, `exit_code`, `encoding="base64"`, encoded `stdout`/`stderr` and `output_truncated` |
 | `execution` | `os_calls`, `read_bytes`, `write_bytes`, `directory_entries`, `output_bytes`, `denied_accesses`, `result_bytes` |
 | `commit` | `committed`, `operations`, `verified_paths`, `cleanup_pending` |
 | `timings_ns` | `snapshot`, `execute`, `diff`, `policy`, `bind_and_store`, `commit`, `total` |
@@ -3397,11 +3757,30 @@ that representation. `diff` is not a textual diff; request bounded before/after 
 when reviewing a transformation.
 
 The adapter retains **65,536 Python characters plus an ellipsis** independently for
-result representation and stdout. This is not 64 KiB of UTF-8, a whole-envelope cap or
+result representation, stdout and stderr. This is not 64 KiB of UTF-8, a whole-envelope cap or
 a token limit. JSON escaping and full change lists add transport bytes. Truncation
 happens after constructing the representation; return small results in the first place.
+The separate `bash` object encodes at most 65,536 **raw bytes** per stream before
+base64 conversion and marks `output_truncated` if either stream exceeds that bound.
+Do not use the top-level lossy display text for binary comparison or approval.
 
 ## Lifetime and retention limits
+
+### Cancellation
+
+The registered MCP tool offloads blocking native work without detaching it. An MCP
+`notifications/cancelled` notification received before native commit entry cancels
+execution and joins cleanup. Unseen previews are discarded or their durable automatic
+approval is revoked. The synchronous Python helper `vsh.mcp.vsh_run` remains available
+for ordinary local calls; the server registers a cancellation-aware async adapter.
+
+Clients must send the protocol cancellation notification. Abandoning a local await or
+closing a UI does not necessarily notify the server. Once native commit entry wins the
+race, the commit completes with its actual outcome; cancellation does not roll it back.
+A cancelled transport may no longer deliver that result, so reconcile transaction
+state through your trusted host instead of assuming host files were untouched.
+
+### Runtime retention
 
 The adapter's process-local LRU holds 16 runtimes, keyed by resolved workspace, profile
 and worker identity. Each runtime caps auto-approved previews at 64 entries or 128 MiB
@@ -3458,6 +3837,15 @@ Use this page as the integration reference. For a guided build, continue with ei
 [evidence-first LLM judge](../tutorials/pydantic-ai-judge.md).
 
 ## Choose the control layer
+
+The Bash options on this page describe the current source checkout, not the published
+0.5.0 packages. Follow the [Bash source setup](bash.md#enable-it-explicitly) to try them.
+
+Optional Unix Bash uses `VshCapability(workspace, bash=BashConfig(...))`. The same
+`vsh_run(code, intent, language="bash")` tool enters the shared native transaction
+pipeline; existing filesystem tools remain Monty-based. The language enum advertises
+only host-enabled frontends. Pending/rejected calls return feedback but withhold
+their result and both streams from the main agent. See [bounded Bash](bash.md).
 
 | Requirement | Configuration | Who may authorize commit? |
 |---|---|---|
@@ -3527,7 +3915,7 @@ Pydantic AI agent
 VshCapability ── one RunRequest ──► native VSH runtime
                                       │
                                       ├─ immutable base snapshot
-                                      ├─ Monty + virtual filesystem
+                                      ├─ Monty or enabled Bash + virtual filesystem
                                       ├─ canonical diff + policy
                                       ├─ optional commit hook
                                       └─ revalidate + commit, or keep pending
@@ -3550,6 +3938,7 @@ VshCapability(
     data_directory=None,
     policy="balanced",
     worker_path=None,
+    bash=None,
     hook_handler=None,
     hook_scope=HookScope.REVIEW_REQUIRED,
     hook_id="vsh.pydantic-ai",
@@ -3565,6 +3954,7 @@ VshCapability(
 | `data_directory` | Trusted VSH state location; it must not overlap the workspace |
 | `policy` | Native transaction profile, normally `balanced` or `strict` |
 | `worker_path` | Explicit matching Monty worker, mainly useful from a source checkout |
+| `bash` | Optional `BashConfig`; explicitly enables the bounded Unix Bash frontend |
 | `hook_handler` | Sync or async application-owned `RequestEvent -> HookDecision` handler |
 | `hook_scope` | Review only policy-pending work, or every non-denied request |
 | `hook_id` | Stable identity bound into hook evidence and approvals |
@@ -3592,7 +3982,7 @@ tool calls; never put a host absolute path into model instructions.
 | `vsh_glob` | `(pattern, path="/workspace", max_results=1000)` | Bounded path matching |
 | `vsh_search` | `(query, path="/workspace", case_sensitive=True, max_results=100)` | Bounded literal text search |
 | `vsh_patch` | `(path, old, new, count=1)` | Exact text replacement |
-| `vsh_run` | `(code, intent)` | Dependent work in one atomic transaction |
+| `vsh_run` | `(code, intent, language="monty")` | Dependent work in one atomic transaction; Bash only when host-enabled |
 
 ### One tool or one compound transaction?
 
@@ -3628,9 +4018,11 @@ vsh_write('/workspace/config/change-note.txt', 'timeout: 10 -> 30\n')
 )
 ```
 
-Code passed to `vsh_run` is Python syntax executed by Monty, but it can call only the
-ten listed `vsh_*` filesystem functions. `read_file` and `write_file` do not exist.
-Pass normal Python arguments—do not pass one JSON object as a positional argument.
+By default (`language="monty"`), `vsh_run` accepts Python syntax executed by Monty;
+its filesystem functions are the ten listed `vsh_*` calls. `read_file` and `write_file`
+do not exist. Pass normal Python arguments, not one JSON positional object.
+When the host opts into Bash, `language="bash"` accepts bounded shell source instead;
+see the [Bash profile and guided workflow](bash.md). Both languages use the same commit gate.
 The `intent` is useful context for policy and review, never authority or proof.
 
 ## Agent-visible results
@@ -3642,6 +4034,9 @@ transaction: str
 state: str
 result: JSON-compatible value
 changed_paths: int
+language: str
+stdout: str
+stderr: str
 hook_verdict: str | None
 feedback: str | None
 requires_review: bool
@@ -3658,9 +4053,14 @@ requires_review: bool
 strings, tuples become arrays, mappings are normalized recursively, and bytes use
 `{"encoding": "base64", "data": "..."}`.
 
-Guest results are withheld until commit when a hook is attached. Review feedback can
-therefore describe a simulated read or write without releasing its guest return value.
+Guest results and both streams are withheld for every noncommitted result, whether
+or not a hook is attached. Review feedback can therefore describe a simulated read
+or write without releasing its guest return value.
 This does not erase reads already performed inside the isolated virtual execution.
+
+For committed Bash work, `result` contains `exit_code`, `profile`, and base64-wrapped
+`stdout`/`stderr` bytes. The top-level string streams are convenient display text,
+not authoritative binary evidence; use the encoded result streams for exact bytes.
 
 Give the main agent an explicit response rule:
 
@@ -4399,6 +4799,22 @@ revalidation.
 Auto-approval is a deterministic policy result, not an AI judgement. Strict and
 paranoid profiles force mutations to an independent approval boundary.
 
+### Policy changes invalidate pending authority
+
+Approval, commit preparation, hook resolution and direct commit require the pending
+artifact's policy digest to equal the runtime's active policy digest. A profile,
+protected-rule or policy-semantics change requires a fresh preview, even if the old
+transaction was already approved. Rust returns `VshError::PolicyChanged`; Python
+raises `VshStateError` with a fresh-preview instruction. Old lifecycle records remain
+inspectable. Do not reuse the old approval for the new transaction ID.
+
+The wildcard correction uses the `vsh-policy-v3` digest domain. `*` in a protected
+pattern always means a wildcard, even when the actual filename contains literal
+stars: `*.key` protects `*.key.key`, and `.env.*` protects `.env.**`. Pending artifacts
+created under v2 require a new preview. This check does not interrupt recovery of an
+already-entered durable commit: recovery must complete or roll back according to its
+journal and ownership evidence, including after a policy change.
+
 ## Explicit non-goals
 
 VSH is not:
@@ -4687,6 +5103,297 @@ are recorded for large-payload cases.
 # Performance and optimization evidence
 
 Canonical URL: https://fswair.github.io/vsh/performance/
+
+## Stable integration decision — 2026-10-02
+
+The latest local candidate also avoids an unsuccessful `mkdir` for every existing
+blob shard. It inspects the entry without following links and creates only missing
+directories. Opened/named identity checks, hash verification, locking and disk
+synchronization are unchanged. A separate shared-path representation experiment
+was rejected because it regressed reads and changed evidence-budget accounting.
+
+This series compares the **pre-Bash reference** with the current integration,
+not with the intermediate optimization checkout below. Both use the same worker,
+release-profile harness and permissions on macOS arm64: 500 ms warm-up, 100 retained
+samples per workload per run, ABBA ordering, 200 observations per side and
+`ceil((n - 1) * p)` quantiles. Builds, tests and profilers ran separately.
+
+| Workload | Reference p50 / p95, ms | Candidate p50 / p95, ms |
+| --- | ---: | ---: |
+| No-op | 0.143 / 0.167 | 0.138 / 0.151 |
+| Read 10 files | 0.821 / 0.966 | 0.807 / 0.894 |
+| Edit 20 files | 1.720 / 1.883 | 1.687 / 1.805 |
+| Search 10K files | 49.528 / 57.786 | 43.103 / 47.061 |
+| VSH glob 10K files | 58.187 / 73.602 | 52.800 / 56.197 |
+| Rename subtree 100 | 56.984 / 81.198 | 55.170 / 71.938 |
+| Delete subtree 100 | 46.982 / 67.767 | 43.967 / 55.095 |
+| VSH remove subtree 100 | 44.216 / 58.995 | 42.009 / 45.923 |
+| Delete 5K files | 134.083 / 155.528 | 129.465 / 164.458 |
+
+All receipt states and changed-path counts agree. Eight workloads satisfy the 5%
+p50/p95 target. Delete-5K improves p50 by 3.44%, but p95 regresses **5.74%**:
+8.930 ms above the reference, or 1.154 ms beyond the allowed 5% boundary.
+The project owner accepted **this measured performance exception** for integration
+on 2026-10-02. It is not a passing benchmark, a general threshold increase, a
+security/CI waiver, or a cross-platform performance guarantee. No release is implied.
+
+Reference tails vary materially between series. These end-to-end comparisons do
+not isolate the directory-opening change or prove it caused each improvement.
+Earlier unfavorable runs remain below and in the evidence plan; unchanged code
+was not repeatedly measured until a favorable result appeared. Raw runs and binary
+identities are recorded in `target/stable-readiness-evidence/` and
+`plans/policy_fix_and_latency_2026_10_02.md`. The Python/Bash table below predates
+the last directory-opening change; it is not a new measurement of that change.
+
+## Wildcard correction and canonical-diff work — 2026-10-02
+
+This follow-up fixes protected wildcard matching for literal-star filenames and
+binds the corrected semantics to policy v3. It also borrows canonical-diff candidate
+paths, expands each deleted subtree once, avoids temporary node/origin clones,
+short-circuits exact missing/tombstoned node lookups, and writes each durable state
+frame in one call instead of three. Checksums, locks, `sync_all`, snapshot freshness,
+evidence bounds and commit revalidation remain in place. Old pending authority
+requires a [fresh preview under the current policy](security.md#policy-changes-invalidate-pending-authority).
+
+The final native series compares the preceding optimized checkout with this
+candidate. It retains 100 observations per workload per invocation, 500 ms warm-up,
+and before/after/after/before ordering: 200 samples per side, using the ceil-index
+quantiles described below. Both versions use the same worker and harness, outside
+the filesystem sandbox. No builds, tests or profilers overlapped these runs.
+
+| Workload | Before p50 / p95, ms | After p50 / p95, ms |
+| --- | ---: | ---: |
+| No-op | 0.139 / 0.158 | 0.139 / 0.155 |
+| Read 10 files | 0.818 / 1.048 | 0.793 / 0.959 |
+| Edit 20 files | 1.747 / 2.149 | 1.666 / 1.770 |
+| Search 10K files | 43.863 / 49.429 | 43.246 / 51.042 |
+| VSH glob 10K files | 50.527 / 55.151 | 50.290 / 58.673 |
+| Rename subtree 100 | 53.922 / 58.338 | 53.967 / 63.354 |
+| Delete subtree 100 | 43.071 / 47.997 | 43.011 / 46.932 |
+| VSH remove subtree 100 | 42.050 / 46.201 | 43.093 / 52.906 |
+| Delete 5K files | 128.000 / 145.404 | 129.942 / 150.507 |
+
+The targeted delete-5K **diff stage** fell from per-run medians of 5.290/5.220 ms to
+3.333/3.281 ms, approximately 37%. This is not a 37% reduction in total request
+latency: its end-to-end median rose 1.52%. Read-10 and edit-20 medians improved
+3.15% and 4.64%, but **the 5% all-case p95 gate still fails** for glob (+6.39%),
+rename (+8.60%) and VSH remove-100 (+14.51%). Every receipt state and changed-path
+count agrees. No release or merge-readiness claim follows from these measurements.
+
+The final parent peak RSS observations were 33,783,808 / 32,653,312 bytes before and
+31,948,800 / 32,096,256 after. This series is lower, but the earlier candidate's
+ranges overlapped; there is no demonstrated uniform process-tree memory reduction.
+Workers are excluded from these parent figures.
+
+### Final Python/Bash series
+
+The unchanged public harness uses the old/new release-profile native extensions
+and one identical worker, again in ABBA order: 100 warm samples per side and 40
+cold opens. Median and floor-index p95 are used. All state/path/call/byte counters
+agree, and the new extension was restored after measurement.
+
+| Workload | Before p50 / p95, ms | After p50 / p95, ms |
+| --- | ---: | ---: |
+| No-op | 0.186 / 0.239 | 0.187 / 0.237 |
+| Read 10 files | 0.961 / 1.171 | 0.988 / 1.137 |
+| Pipeline 1 MiB | 7.987 / 8.418 | 7.972 / 8.372 |
+| Edit 20 files | 1.802 / 2.088 | 1.815 / 1.978 |
+| Copy 1 MiB | 3.511 / 3.664 | 3.511 / 3.683 |
+| Chmod 20 files | 13.003 / 14.110 | 12.946 / 15.366 |
+| Cold open + first preview | 5.824 / 6.063 | 5.882 / 9.880 |
+
+Chmod bind/store median is essentially unchanged: 11.884 → 11.842 ms. Fewer write
+calls did not establish a durable-I/O speedup; its p95 and the cold-start p95 worsened.
+The first complete candidate series also had unfavorable Bash tails and a native
+remove-100 tail failure. It is retained, not replaced by an unchanged-code retry.
+The second candidate changes point lookup; both series and exact binary identities
+are documented in `plans/policy_fix_and_latency_2026_10_02.md`. Raw evidence is under
+`target/policy-latency-evidence/`. Confirm tail latency on an isolated runner with
+adequate free disk space before treating it as an acceptance pass. No durability
+guarantee should be weakened to meet a latency target.
+
+## Earlier core optimization checkout — 2026-10-02
+
+This earlier local comparison starts from the already implemented Bash integration,
+not from the pre-Bash release. It removes repeated path copies, builds snapshot
+child indexes as sorted vectors, shares ancestor validation across directory
+siblings, and compiles policy component shapes once. Authorization also extracts
+the basename once per path, not once per rule. No dependency, public API, policy
+threshold, snapshot freshness check or durability guarantee changed.
+
+The native comparison uses the same release-profile harness and worker on both
+sides: 500 ms warm-up per workload, 100 retained samples per run, ordered
+before/after/after/before, pooling 200 observations per version. Quantiles select
+`ceil((n - 1) * p)`. Builds, tests and profilers ran separately. Both versions ran
+outside the filesystem sandbox because macOS process-memory accounting required it.
+Absolute timings must not be mixed with earlier sandboxed measurements.
+
+| Workload | Before p50 / p95, ms | After p50 / p95, ms | Median change |
+| --- | ---: | ---: | ---: |
+| No-op | 0.141 / 0.165 | 0.137 / 0.168 | -2.89% |
+| Read 10 files | 0.822 / 1.004 | 0.800 / 0.893 | -2.69% |
+| Edit 20 files | 1.706 / 2.000 | 1.677 / 1.861 | -1.69% |
+| Search 10K files | 48.130 / 63.493 | 42.546 / 45.540 | -11.60% |
+| VSH glob 10K files | 53.915 / 58.061 | 49.733 / 51.877 | -7.76% |
+| Rename subtree 100 | 55.037 / 62.616 | 53.012 / 72.885 | -3.68% |
+| Delete subtree 100 | 45.983 / 52.952 | 42.960 / 48.587 | -6.57% |
+| VSH remove subtree 100 | 44.081 / 53.078 | 42.060 / 47.081 | -4.58% |
+| Delete 5K files | 164.618 / 204.871 | 157.002 / 216.532 | -4.63% |
+
+All receipt states and changed-path counts agree. All nine medians improved, but
+**the 5% all-case tail gate still fails**: rename p95 rose 16.40%, delete-5K p95
+rose 5.69%. Earlier unsuccessful optimization attempts and unfavorable runs were
+retained. These are checkout measurements, not release or merge-readiness claims.
+
+The policy microbenchmark's median dropped 28.94% (5.231 → 3.717 ms per 10K
+authorizations); its p95 rose 22.12%. It uses three complete ABBA blocks with 60
+samples per side and verifies exactly 1,000 denied paths per invocation. This
+microbenchmark does not replace end-to-end measurements.
+
+Parent-process peak RSS was 33,423,360 / 33,308,672 bytes before and
+31,506,432 / 33,865,728 bytes after. These ranges overlap: there is **no demonstrated
+uniform memory reduction**. The unchanged worker's memory is excluded. This shared
+macOS arm64 machine also had less than 1 GiB free; durable-I/O tail behavior needs
+confirmation on a dedicated runner. Raw data is under
+`target/optimization-evidence/`; implementation decisions, rejected attempts,
+correctness evidence and remaining costs are recorded in
+`plans/performance_optimization_2026_10_02.md` in the checkout.
+
+### Updated public Python/Bash comparison
+
+The unchanged Bash harness also ran before/after/after/before using the old and
+rebuilt native extension, with one identical worker. Each side pools 100 warm
+samples per workload and 40 cold opens. Bash uses the median and the
+`floor((n - 1) * 0.95)` tail index. State, changed-path count, OS calls and byte
+accounting agree in every sample.
+
+| Workload | Before p50 / p95, ms | After p50 / p95, ms |
+| --- | ---: | ---: |
+| No-op | 0.197 / 0.249 | 0.193 / 0.291 |
+| Read 10 files | 1.096 / 1.393 | 1.109 / 2.276 |
+| Pipeline 1 MiB | 8.093 / 10.351 | 8.049 / 8.586 |
+| Edit 20 files | 2.104 / 3.832 | 1.987 / 2.243 |
+| Copy 1 MiB | 3.772 / 4.391 | 3.581 / 4.359 |
+| Chmod 20 files | 13.018 / 18.214 | 14.006 / 19.322 |
+| Cold open + first preview | 9.401 / 10.907 | 9.520 / 11.602 |
+
+Editing and copying medians improved by 5.55% and 5.07%. This does **not** imply
+every Bash workload improved: chmod regressed 7.59% in median and 6.08% in p95,
+and read/no-op tails worsened. Chmod's measured execution, snapshot and policy
+stages decreased, while its bind/store median increased from 11.880 to 12.783 ms.
+Required durable storage remains a substantial cost; no synchronization or
+integrity check was removed to improve these numbers.
+
+## Bash integration checkout — 2026-10-01–02
+
+These are local macOS arm64 **checkout** measurements, not a published release or
+cross-platform latency guarantee. Optimized native builds use exact Bashkit 0.18.2,
+Monty 0.0.22 and matching supervised workers. All timed calls are previews, not commits.
+
+### Public Python Bash surface
+
+`benchmarks/bash_runtime.py` uses a disposable 21-file workspace, including one
+1 MiB binary file. Each warm case retains 50 samples after one discarded warmup;
+20 independent cold runtime/first-call samples measure startup separately. Each call
+still captures a fresh snapshot; process reuse does not reuse interpreter state.
+Bash p50 is the sample median; p95 selects sorted index `floor((n - 1) * 0.95)`.
+
+| Workload | p50 / p95, ms | Policy outcome |
+| --- | ---: | --- |
+| No-op | 0.271 / 0.318 | Auto-approved |
+| Read 10 files | 1.037 / 1.322 | Auto-approved |
+| 1 MiB `cat` → `wc` pipeline | 7.660 / 7.943 | Auto-approved |
+| Edit 20 files | 1.927 / 2.084 | Auto-approved |
+| Copy a 1 MiB binary file | 3.585 / 3.641 | Auto-approved |
+| Change modes on 20 files | 17.996 / 21.721 | Pending approval; includes durable I/O |
+| Cold open + first Bash preview | 10.156 / 17.854 | Auto-approved |
+
+A separate 20 ms process-tree sampler observed **40.45 MiB parent peak** and
+**54.64 MiB summed tree peak**, with at most two processes, on this same small fixture.
+The 53 samples can miss shorter peaks, and summed RSS double-counts shared pages.
+Sampler-perturbed latency is excluded. This is not a memory ceiling, allocation-peak
+measurement, or evidence that larger snapshots have the same footprint.
+
+The final checkout CPython 3.14 macOS arm64 wheel is 9,069,044 bytes and bundles both workers.
+No before/after wheel-size or RSS saving is claimed without a matching baseline.
+The default Rust SDK and Python parent dependency graphs exclude Bashkit/Tokio;
+only the independent Bash worker links them.
+
+### Monty regression assessment
+
+Preserved baseline and candidate native binaries used identical policies, fixtures,
+release settings and the same worker. After the adapter-template/program-copy fixes,
+an earlier counterbalanced candidate/baseline/baseline/candidate series retained 100
+samples per run: 200 per side per workload.
+Quantiles below use sorted pooled raw samples, index `ceil((n - 1) * p)`; pooling is
+descriptive, not proof of a causal speedup. Earlier measurements remain retained too.
+
+| Workload | Baseline p50 / p95, ms | Candidate p50 / p95, ms |
+| --- | ---: | ---: |
+| No-op | 0.179 / 0.228 | 0.173 / 0.206 |
+| Read 10 files | 0.942 / 1.704 | 0.932 / 1.322 |
+| Edit 20 files | 1.915 / 4.560 | 1.871 / 3.454 |
+| Filter filenames in 10,000-file tree | 61.535 / 64.581 | 59.334 / 61.284 |
+| Generic glob in 10,000-file tree | 66.229 / 70.684 | 66.652 / 68.730 |
+| Rename 100-file subtree | 69.126 / 87.405 | 68.865 / 71.021 |
+| Remove 100-file subtree | 57.978 / 63.377 | 57.955 / 59.052 |
+| `vsh_remove` of 100-file subtree | 56.988 / 60.911 | 56.036 / 58.031 |
+| Delete 5,000 files + 50 directories | 145.581 / 152.873 | 158.627 / 197.006 |
+
+**The proposed 5% all-case median/tail non-regression gate is not closed.** That
+pooled large-delete median rose 8.96% and p95 rose 28.87%. Its two candidate-run
+medians were 172.077 and 150.888 ms: the slower run is retained, not discarded to
+make the gate green. Bind/store time includes bounded encoding, sealing and durable
+I/O; a broad CPU/pipe attribution is not established. Other pooled cases in that series remain
+within the target, including the no-op regression identified in earlier runs.
+
+#### Completion check: symmetric warm-up and bounded transport
+
+Subsequent runs exposed nonstationary small-call timings. Both archived baseline
+and candidate therefore received the same 500 ms per-workload warm-up, with no
+changes to timed work, expected state, durability or the 5% gate. The first complete
+warm comparison still failed no-op and glob p95. Those results remain retained.
+
+The latest candidate also eliminates one redundant read of each available Monty
+message prefix. Fragmented input, interrupted reads, exact frame boundaries and
+pre-allocation/pre-decode limits remain tested. Fewer reads do **not** establish
+lower end-to-end latency: the complete follow-up below still fails the gate.
+
+The predeclared baseline/candidate/candidate/baseline order retains 100 samples per
+run, pooled to 200 per side with the same ceiling-index quantiles. Both binaries use
+default crate features, identical benchmark source and the same worker. No builds,
+tests or RSS sampler ran alongside the series. This tests the default Rust Monty
+path; it is not an all-feature or Python performance guarantee.
+
+| Workload | Baseline p50 / p95, ms | Candidate p50 / p95, ms |
+| --- | ---: | ---: |
+| No-op | 0.173 / 0.185 | 0.181 / 0.351 |
+| Read 10 files | 0.913 / 1.002 | 1.001 / 2.022 |
+| Edit 20 files | 1.869 / 1.937 | 2.076 / 2.822 |
+| Filter filenames in 10,000-file tree | 62.587 / 67.136 | 64.252 / 92.318 |
+| Generic glob in 10,000-file tree | 68.321 / 91.532 | 70.218 / 84.097 |
+| Rename 100-file subtree | 70.863 / 74.554 | 71.020 / 99.029 |
+| Remove 100-file subtree | 58.993 / 68.009 | 58.914 / 62.147 |
+| `vsh_remove` of 100-file subtree | 57.986 / 61.224 | 57.978 / 65.077 |
+| Delete 5,000 files + 50 directories | 144.307 / 159.536 | 150.741 / 173.210 |
+
+Read/edit medians and several tails exceed 5%; large deletion is +4.46% median and
++8.57% p95. Sample state and changed-path counts agree in all four runs. No slow run
+was removed, and no CPU/storage cause or overall speedup is claimed. The machine
+also experienced severe disk-space pressure during this investigation. Clean,
+controlled follow-up measurements are required; a favorable subset is not approval.
+
+The implementation removes evidence-set/effect-buffer cloning, redundant durable
+receipt cloning, repeated default-policy construction, a second program-string copy,
+redundant fresh cache-identity hashing and a second fresh artifact sealing pass.
+These are ownership/work reductions with correctness tests, **not** a claim that the entire integration is
+faster. Active evidence bounds, output sealing and cancellation remain enabled.
+Further profiling and clean hosted/platform evidence are required before declaring
+the complete performance/release gate passed. Raw measurements and command logs live
+under ignored `target/bashkit-evidence/p7/`; the engineering summary is
+`plans/bashkit_p7_p9_evidence.md` in the checkout.
+
+## Historical optimization — VSH 0.4.0, 2026-09-05
 
 The 2026-09-05 release-profile measurements show roughly **25–30% lower median latency**
 for the large filename-discovery, glob and bulk-delete workloads after this optimization.
@@ -5140,7 +5847,7 @@ exact version tag can enter protected crates.io and PyPI environments.
 
 Canonical URL: https://fswair.github.io/vsh/coverage/
 
-Captured: 2026-09-05
+Captured: 2026-10-02, local macOS arm64; optimized Bash integration checkout, not a new release.
 
 Coverage is a merge gate, not an inferred property of the test count. Python and Rust
 use separate measurements because the CPython extension and supervised worker cross
@@ -5162,7 +5869,7 @@ uv run pytest \
   --cov=src/vsh --cov-branch --cov-report=term-missing --cov-fail-under=100
 ```
 
-Current result: 103 tests, 508 statements, 124 branches, 100% line and 100% branch
+Current result: 182 tests, 664 statements, 178 branches, 100% line and 100% branch
 coverage.
 
 `pyproject.toml` omits only the generated/static version module. Every maintained
@@ -5186,16 +5893,18 @@ Current stable-toolchain core result:
 
 | Metric | Measured | Merge floor |
 |---|---:|---:|
-| Lines | 81.48% | 79% |
-| Functions | 74.65% | 70% |
-| Regions | 83.05% | 81% |
+| Lines | 84.51% | 79% |
+| Functions | 77.34% | 70% |
+| Regions | 84.93% | 81% |
 
-The measurement executed 166 Rust tests. The ignore expression affects the threshold
+The measurement executed 295 Rust tests. The ignore expression affects the threshold
 report, not test execution. `vsh-python`
 is loaded and exercised by the Python/PyO3 suite. `vsh-worker` is exercised through
-ten real subprocess protocol/isolation tests. Both report zero when measured only by
-the parent `cargo test` profile because they execute in a CPython runtime or a child
-process; counting those zeros as untested Rust core would misstate both boundaries.
+real subprocess protocol/isolation tests. These boundaries require their own
+behavioral tests; parent-only zero coverage is not proof that they are untested.
+The new `vsh-bash` protocol, parent gateway and worker code are **not** added to the
+ignore expression. Stable LLVM reports regions, not Rust branch coverage; this run
+does not establish 100% Rust branches.
 
 Rust 100% is not a merge target. Mutually exclusive Unix/Windows paths, injected I/O
 failures, child-process code, and the CPython extension cannot all be represented
@@ -5212,6 +5921,10 @@ broad regressions; these tests protect the
 high-risk contracts even where platform error branches remain unexecuted locally.
 Hook coverage additionally exercises immutable canonical evidence, read-only scope,
 pending feedback, approval, hard-deny exclusion and fail-closed Python handler errors.
+The Bash suite adds binary streams, profile rejection, durable preview/restart,
+permission review and stale mode checks, caught policy denial, bounded evidence,
+worker retirement and cancellation. Python tests also cover repeated cancellation,
+unseen-preview cleanup, durable automatic-approval revocation and the commit-entry race.
 The Pydantic AI tests register a real capability on `Agent`, execute every filesystem
 tool, verify JSON-safe result projection, and preserve review feedback without adding a
 new lifecycle state.
@@ -5223,9 +5936,24 @@ input/concurrency, timeout, cancellation, provider failure and stale commit reje
 They verify the integration contract, not a real model's judgment accuracy or
 resistance to prompt injection.
 
-The optimization additions include a 94,501-case policy-matcher differential oracle,
+The optimization additions include a 266,321-case path-matcher differential oracle,
 compiled-pattern fast-path comparisons, portable path normalization oracle checks,
 overlay prefix-sibling visibility and existing generated-operation replay checks.
+The wildcard fix checks both compiled and general matchers against an independent
+byte-DP oracle for all 116,281 component cases, including literal-star filenames.
+Active-policy checks cover direct and hooked approval/commit after restart; injected
+commit failures verify recovery after a policy change. Diff tests verify canonical
+entries, digest and complete metrics, both lexical directions of lazy rename, and
+metadata-only edits without content capture. State-log tests verify unchanged frame
+bytes for optional artifact/approval fields and reject oversize appends before I/O.
+Store tests cover existing-directory reuse without changing its contents,
+non-directory rejection and concurrent creation; existing symlink and capability
+relocation tests retain the filesystem trust boundary.
+An ancestor-first point-lookup oracle covers missing nodes, tombstones and hidden
+present nodes across generated operation sequences.
+Snapshot tests preserve punctuation/root ordering; sibling-resolution
+tests cover renamed, deleted and non-directory ancestors without resurrecting hidden
+children. No evidence limit, security check or coverage exclusion was relaxed.
 Python acceptance also executes fixture-owning SDK/MCP/separate-process CLI recipes,
 the actual first-run documentation block and multibyte Unicode output truncation.
 APFS rejects invalid UTF-8 filename fixtures before snapshot capture; that platform
@@ -5501,7 +6229,8 @@ An artifact binds:
 - read and write dependency digests;
 - canonical diff digest;
 - deterministic policy digest and decision;
-- bounded Monty result, stdout, counters, and change detail.
+- language/profile, bounded tagged output, raw streams, counters and ordered effects;
+- evidence completeness, risk/denial evidence and canonical review detail.
 
 Changing any bound input produces another transaction identity.
 
@@ -5523,6 +6252,14 @@ pending-artifact cancellation. Restart or MCP runtime-LRU eviction loses auto-ap
 handles; approval-required artifacts are durable.
 
 ## Integrity and recovery
+
+Current pending artifacts use `VSHPND03`. Monty and Bash have separate output tags;
+Bash records its profile, successful exit status and byte-authoritative stdout/stderr.
+Loading recomputes the execution-evidence seal and identity. Unknown tags, incomplete
+outputs, nonzero Bash exits, malformed lengths or combined output over the configured
+ceiling are rejected before admission. Timings and display detail do not redefine
+approval identity. Fresh artifacts are encoded and sealed in one bounded pass;
+loading or promoting an existing artifact verifies its seal and never silently re-signs it.
 
 Artifacts are content-addressed and decoded under size/cardinality/path limits. A
 decoded transaction binding must match the requested record. State log frames are

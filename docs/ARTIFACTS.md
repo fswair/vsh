@@ -12,7 +12,8 @@ An artifact binds:
 - read and write dependency digests;
 - canonical diff digest;
 - deterministic policy digest and decision;
-- bounded Monty result, stdout, counters, and change detail.
+- language/profile, bounded tagged output, raw streams, counters and ordered effects;
+- evidence completeness, risk/denial evidence and canonical review detail.
 
 Changing any bound input produces another transaction identity.
 
@@ -34,6 +35,14 @@ pending-artifact cancellation. Restart or MCP runtime-LRU eviction loses auto-ap
 handles; approval-required artifacts are durable.
 
 ## Integrity and recovery
+
+Current pending artifacts use `VSHPND03`. Monty and Bash have separate output tags;
+Bash records its profile, successful exit status and byte-authoritative stdout/stderr.
+Loading recomputes the execution-evidence seal and identity. Unknown tags, incomplete
+outputs, nonzero Bash exits, malformed lengths or combined output over the configured
+ceiling are rejected before admission. Timings and display detail do not redefine
+approval identity. Fresh artifacts are encoded and sealed in one bounded pass;
+loading or promoting an existing artifact verifies its seal and never silently re-signs it.
 
 Artifacts are content-addressed and decoded under size/cardinality/path limits. A
 decoded transaction binding must match the requested record. State log frames are

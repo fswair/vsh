@@ -152,6 +152,7 @@ typeCheckingMode = "standard"
 reportUnusedCallResult = false
 include = [
     "src/vsh/__init__.py",
+    "src/vsh/_async.py",
     "src/vsh/_native.pyi",
     "src/vsh/_version.py",
     "src/vsh/cli.py",

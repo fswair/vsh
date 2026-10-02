@@ -1,0 +1,37 @@
+[package]
+name = "vsh-bash"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+readme.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Isolated Bashkit execution against VSH's policy-aware filesystem authority"
+publish = ["crates-io"]
+
+[features]
+default = ["host"]
+host = ["dep:vsh-execution", "dep:vsh-policy", "dep:vsh-types", "dep:vsh-vfs"]
+worker = ["dep:bashkit", "dep:monty-alloc", "dep:tokio"]
+
+[dependencies]
+vsh-execution = { workspace = true, optional = true }
+vsh-policy = { workspace = true, optional = true }
+vsh-types = { workspace = true, optional = true }
+vsh-vfs = { workspace = true, optional = true }
+bashkit = { workspace = true, optional = true }
+monty-alloc = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
+[dev-dependencies]
+vsh-store.workspace = true
+
+[[bin]]
+name = "vsh-bash-worker"
+path = "src/main.rs"
+required-features = ["worker"]
+
+[lints]
+workspace = true

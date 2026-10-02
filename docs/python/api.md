@@ -63,6 +63,8 @@ ExecutionBudget(
     max_io_call_bytes: int | None = ...,
     max_path_bytes: int | None = ...,
     max_directory_entries: int | None = ...,
+    max_evidence_records: int | None = ...,
+    max_evidence_bytes: int | None = ...,
     max_output_bytes: int | None = ...,
     max_result_bytes: int | None = ...,
     max_exception_bytes: int | None = ...,
@@ -78,10 +80,14 @@ calls. The functions available in every `code` program are documented in
 
 ## `RunRequest`
 
+`Language.MONTY` (default) and `Language.BASH` select the guest frontend. Bash
+requires `Runtime.open(..., bash=BashConfig(...))`; guest source cannot enable it.
+
 ```text
 RunRequest(
     code: str,
     *,
+    language: Language | None = ...,
     intent: str | None = ...,
     mode: RunMode | None = ...,
     detail: ReceiptDetail | None = ...,
@@ -91,7 +97,8 @@ RunRequest(
 
 | Property | Meaning |
 |---|---|
-| `code` | Exact Monty source bound into transaction identity |
+| `code` | Exact selected-language source bound into transaction identity |
+| `language` | Immutable guest language, default `MONTY` |
 | `intent` | Optional trusted-host context bound independently from source |
 | `mode` | Defaults to `PREVIEW` |
 | `detail` | Defaults to `COMPACT` |
@@ -110,6 +117,7 @@ Runtime.open(
     data_directory: str | os.PathLike[str] | None = ...,
     policy: str = "balanced",
     worker_path: str | os.PathLike[str] | None = ...,
+    bash: BashConfig | None = ...,
     hook_id: str | None = ...,
     hook_scope: HookScope | None = ...,
     review_content_bytes: int = 0,
@@ -133,6 +141,7 @@ preview(request: RunRequest) -> Receipt
 preview(
     request: str,
     *,
+    language: Language | None = ...,
     intent: str | None = ...,
     detail: ReceiptDetail | None = ...,
     budget: ExecutionBudget | None = ...,
@@ -219,9 +228,10 @@ configuration together with `hook_handler`, `hook_scope`, `hook_id`,
 there is no `VshCapability.open` alias.
 
 `VshToolResult` contains `transaction`, `state`, JSON-compatible `result`,
-`changed_paths`, optional `hook_verdict`, optional `feedback`, and the derived
+`changed_paths`, `language`, display `stdout`/`stderr`, optional `hook_verdict`, optional `feedback`, and the derived
 `requires_review` property. Pending, rejected, and denied outcomes withhold the guest
-result from the calling agent.
+result and streams from the calling agent. Committed Bash results retain their
+raw streams as base64-wrapped values inside `result`.
 
 `CommitJudge(model, ...)` builds a bounded structured reviewer. Configure its additive
 `review_instructions`, model settings, content allowlist, usage limits, provider output
@@ -235,6 +245,31 @@ See the [capability constructor and tool reference](../integrations/pydantic-ai.
 [judge](../tutorials/pydantic-ai-judge.md) applications.
 
 ## `Receipt`
+
+For Bash, `result` is a frozen `BashResult(profile, exit_code, stdout, stderr)`
+projection with raw `bytes` streams. `language`, `stdout_bytes` and `stderr_bytes`
+are available for both frontends. `stdout`/`stderr` are convenience strings decoded
+with replacement for Bash; the byte fields are the canonical evidence.
+
+### Bash configuration and failures
+
+`BashConfig(*, worker_path=None, limits=None, wall_timeout_ms=None,
+max_active_workers=4, max_idle_workers=4)` enables one reviewed Unix profile.
+`worker_path` on `Runtime.open` still refers only to Monty. No Bash config means
+Bash selection fails before execution.
+
+`BashLimits` is keyword-only and immutable: `max_work_units`,
+`max_aggregate_input_bytes`, `max_live_intermediate_bytes`, `max_commands`,
+`max_loop_iterations`, `max_total_loop_iterations`, `max_parser_operations`.
+These interpreter ceilings supplement, not replace,
+the shared `ExecutionBudget` filesystem, evidence and output ceilings.
+
+`VshBashError` derives from `VshExecutionError`. Its `.diagnostics` has `kind`,
+`exit_code`, `stdout`, `stderr`, `changes`, `changes_complete` and a denied-access
+count. `changes_complete=False` means final diagnostic diff computation was not
+possible; an empty list must not be interpreted as no side effects. Even a complete
+diagnostic diff has no transaction ID and cannot be approved or committed.
+See the [Bash guide](../integrations/bash.md) for typed examples and limitations.
 
 ### Identity and decision
 
@@ -254,9 +289,13 @@ See the [capability constructor and tool reference](../integrations/pydantic-ai.
 |---|---|---|
 | `changed_paths` | `int` | Canonical change count |
 | `changes` | `list[tuple[str, str]]` | Full path/kind list when requested |
-| `result` | `object` | Native Python projection of Monty's returned value |
+| `language` | `Language` | `MONTY` or `BASH` |
+| `result` | `object` | Monty's projected return value, or a `BashResult` with exit/profile and raw streams |
 | `result_repr` | `str` | Full `repr()` of the projected value, constructed on access |
-| `stdout` | `str` | Bounded captured `print()` output |
+| `stdout` | `str` | Captured stdout display text; lossy for non-UTF-8 Bash bytes |
+| `stderr` | `str` | Captured stderr display text; lossy for non-UTF-8 Bash bytes |
+| `stdout_bytes` | `bytes` | Exact bounded stdout bytes |
+| `stderr_bytes` | `bytes` | Exact bounded stderr bytes |
 
 Change kinds are `create`, `delete`, `modify`, and `metadata_change`. Rename effects are
 represented by the canonical before/after entries produced by the native diff.
@@ -272,8 +311,10 @@ The decision remains the original policy decision even when state becomes `commi
 `os_calls`, `read_bytes`, `write_bytes`, `directory_entries`, `output_bytes`,
 `denied_accesses`, and `result_bytes` describe work performed by the worker adapter.
 
-Read/write counts describe cumulative work, not just final diff size. `result_bytes`
-tracks Monty's bounded host-footprint estimate, not network JSON bytes or token count.
+Read/write counts describe cumulative work, not just final diff size. For Monty,
+`result_bytes` tracks the bounded host-footprint estimate; Bash charges four bytes
+for its exit status. Bash stdout and stderr count together toward `output_bytes`.
+None of these counters measures network JSON bytes or token count.
 
 ### Commit evidence
 

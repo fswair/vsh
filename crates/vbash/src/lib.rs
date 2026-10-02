@@ -6,10 +6,16 @@
 
 mod artifact;
 mod hook;
+mod output;
 mod review;
 mod runtime;
 
 pub use artifact::ArtifactError;
+pub use hook::ExecutionContext;
+pub use output::{BashResult, ExecutionOutput, Language};
+#[cfg(feature = "bash")]
+pub use vsh_bash::{BashConfig, BashError, BashLimits};
+pub use vsh_execution::ExecutionCancellation;
 
 pub use hook::{
     CommitHook, CommitPreparation, CommitResolution, HookBaseline, HookConfig, HookDecision,

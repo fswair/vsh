@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use vsh_policy::{AccessKind, CallPolicy};
 use vsh_store::{BlobStore, BlobStoreError};
-use vsh_types::{BlobId, ContentVersion, DiffEntry, NodeKind, NodeState, VPath};
+use vsh_types::{BlobId, ContentVersion, DiffEntry, DiffKind, NodeKind, NodeState, VPath};
 use vsh_vfs::{Effect, EffectEvent};
 
 use crate::ReviewContent;
@@ -16,10 +16,11 @@ pub(crate) fn collect_content(
 ) -> Result<(Vec<ReviewContent>, bool), BlobStoreError> {
     if maximum == 0 {
         let needs_content = changes.iter().any(|entry| {
-            [entry.before, entry.after]
-                .into_iter()
-                .flatten()
-                .any(|state| state.kind() != NodeKind::Directory)
+            entry.kind != DiffKind::MetadataChange
+                && [entry.before, entry.after]
+                    .into_iter()
+                    .flatten()
+                    .any(|state| state.kind() != NodeKind::Directory)
         }) || effects
             .iter()
             .any(|event| matches!(event.effect, Effect::ContentRead { .. }));
@@ -34,6 +35,9 @@ pub(crate) fn collect_content(
         contents: Vec::new(),
     };
     for change in changes {
+        if change.kind == DiffKind::MetadataChange {
+            continue;
+        }
         for state in [change.before, change.after].into_iter().flatten() {
             collector.node(&change.path, state)?;
         }

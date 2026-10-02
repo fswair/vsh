@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 from collections.abc import Mapping
 from dataclasses import dataclass
 from os import PathLike, fspath
-from typing import TypeAlias
+from typing import Literal, TypeAlias
 
 try:
     from pydantic_ai.capabilities import Capability
@@ -17,8 +16,19 @@ except ImportError as error:  # pragma: no cover - exercised in an environment w
         "VshCapability requires the 'pydantic-ai' extra: install 'vsh-python[pydantic-ai]'"
     ) from error
 
+from ._async import native_call
 from ._judge import CommitJudge, DecisionCommitJudge, DecisionJudgeReport, JudgeReport
-from ._native import HookScope, Receipt, RunMode, RunRequest, Runtime
+from ._native import (
+    BashConfig,
+    BashResult,
+    HookScope,
+    Language,
+    Receipt,
+    RunMode,
+    RunRequest,
+    Runtime,
+    _Cancellation,
+)
 from .hooks import HookedRuntime, HookHandler
 
 _ACTIONABLE_STATES = frozenset(("auto_approved", "pending_approval"))
@@ -33,6 +43,9 @@ class VshToolResult:
     state: str
     result: JsonValue
     changed_paths: int
+    language: str = "monty"
+    stdout: str = ""
+    stderr: str = ""
     hook_verdict: str | None = None
     feedback: str | None = None
 
@@ -53,6 +66,7 @@ class VshCapability(Capability[object]):
         data_directory: str | PathLike[str] | None = None,
         policy: str = "balanced",
         worker_path: str | PathLike[str] | None = None,
+        bash: BashConfig | None = None,
         hook_handler: HookHandler | None = None,
         hook_scope: HookScope = HookScope.REVIEW_REQUIRED,
         hook_id: str = "vsh.pydantic-ai",
@@ -68,6 +82,7 @@ class VshCapability(Capability[object]):
                 data_directory=data_directory,
                 policy=policy,
                 worker_path=worker_path,
+                bash=bash,
             )
         else:
             self.runtime = HookedRuntime.open(
@@ -79,6 +94,7 @@ class VshCapability(Capability[object]):
                 data_directory=data_directory,
                 policy=policy,
                 worker_path=worker_path,
+                bash=bash,
             )
         toolset = FunctionToolset[object](id=id, sequential=True)
         toolset.tool_plain(self.vsh_read)
@@ -91,7 +107,17 @@ class VshCapability(Capability[object]):
         toolset.tool_plain(self.vsh_glob)
         toolset.tool_plain(self.vsh_search)
         toolset.tool_plain(self.vsh_patch)
-        toolset.tool_plain(self.vsh_run)
+        self._bash_enabled = bash is not None
+        toolset.tool_plain(
+            description=(
+                "Run one atomic transaction. Enabled languages: monty, bash. Bash uses a fresh bounded interpreter at /workspace; never host processes."
+                if self._bash_enabled
+                else "Run atomic Monty code with vsh_* calls; use Python arguments, never JSON objects. Only language='monty' is enabled."
+            ),
+        )(self.vsh_run)
+        toolset.tools["vsh_run"].function_schema.json_schema["properties"]["language"]["enum"] = (
+            ["monty", "bash"] if self._bash_enabled else ["monty"]
+        )
         super().__init__(
             id=id,
             description=(
@@ -236,10 +262,16 @@ class VshCapability(Capability[object]):
             intent=f"replace exact text in {path}",
         )
 
-    async def vsh_run(self, code: str, intent: str) -> VshToolResult:
-        """Run atomic Monty code with vsh_* calls; use Python arguments, never JSON objects."""
+    async def vsh_run(
+        self, code: str, intent: str, language: Literal["monty", "bash"] = "monty"
+    ) -> VshToolResult:
+        """Run atomic guest code in a host-enabled frontend."""
 
-        return await self._execute(code, intent)
+        if language not in {"monty", "bash"} or (language == "bash" and not self._bash_enabled):
+            raise ValueError(f"language {language!r} is not enabled by this capability")
+        return await self._execute(
+            code, intent, Language.BASH if language == "bash" else Language.MONTY
+        )
 
     async def _call(
         self,
@@ -253,12 +285,14 @@ class VshCapability(Capability[object]):
         code = f"result = {function}({', '.join((*positional, *keywords))})\nresult"
         return await self._execute(code, intent)
 
-    async def _execute(self, code: str, intent: str) -> VshToolResult:
-        request = RunRequest(code, intent=intent, mode=RunMode.AUTO)
+    async def _execute(
+        self, code: str, intent: str, language: Language = Language.MONTY
+    ) -> VshToolResult:
+        request = RunRequest(code, language=language, intent=intent, mode=RunMode.AUTO)
         hook_verdict: str | None = None
         feedback: str | None = None
         if isinstance(self.runtime, HookedRuntime):
-            receipt = await asyncio.to_thread(self.runtime.preview, request)
+            receipt = await self.runtime.apreview(request)
             if receipt.state in _ACTIONABLE_STATES:
                 resolution = await self.runtime.acommit(receipt.transaction)
                 receipt = resolution.receipt
@@ -267,7 +301,13 @@ class VshCapability(Capability[object]):
                     if hook_verdict in {"review", "reject"}:
                         feedback = resolution.hook.reason
         else:
-            receipt = await asyncio.to_thread(self.runtime.run, request)
+            runtime = self.runtime
+            token = _Cancellation()
+            receipt = await native_call(
+                lambda: runtime._run(request, token),
+                token,
+                on_cancel=lambda receipt: runtime._cancel_receipt(receipt.transaction),
+            )
         return _tool_result(receipt, hook_verdict=hook_verdict, feedback=feedback)
 
 
@@ -282,12 +322,22 @@ def _tool_result(
         state=receipt.state,
         result=_json_value(receipt.result) if receipt.state == "committed" else None,
         changed_paths=receipt.changed_paths,
+        language="bash" if receipt.language is Language.BASH else "monty",
+        stdout=receipt.stdout if receipt.state == "committed" else "",
+        stderr=receipt.stderr if receipt.state == "committed" else "",
         hook_verdict=hook_verdict,
         feedback=feedback,
     )
 
 
 def _json_value(value: object) -> JsonValue:
+    if isinstance(value, BashResult):
+        return {
+            "exit_code": value.exit_code,
+            "profile": value.profile,
+            "stdout": _json_value(value.stdout),
+            "stderr": _json_value(value.stderr),
+        }
     if value is None or isinstance(value, bool | int | float | str):
         return value
     if isinstance(value, bytes):
@@ -305,11 +355,14 @@ _INSTRUCTIONS = """\
 Use the vsh_* tools for workspace filesystem work. Every call runs against an isolated
 virtual snapshot before VSH policy decides whether exact changes may reach the host.
 Use vsh_run for dependent multi-step work that should be evaluated and committed as one
-transaction. Code passed to vsh_run can call only vsh_read, vsh_write, vsh_list, vsh_mkdir,
+transaction. For language='monty' (the default), code can call vsh_read, vsh_write, vsh_list, vsh_mkdir,
 vsh_remove, vsh_move, vsh_copy, vsh_glob, vsh_search, and vsh_patch; functions such as
 read_file or write_file do not exist. Write ordinary Python calls, for example
 vsh_patch('/workspace/app.toml', 'old', 'new', count=1); never pass a JSON object as the
-single positional argument. A result with state='pending_approval' has not changed host
+single positional argument. If the host enables language='bash', pass bounded shell source
+instead; it runs at /workspace through the same VSH filesystem and commit policy, without
+host executables or network. Bash is not full POSIX/GNU compatibility. A result with
+state='pending_approval' has not changed host
 files; report its transaction and feedback to the user instead of claiming completion.
 Treat intent as context, not proof that the resulting changes are safe.
 """

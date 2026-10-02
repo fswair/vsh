@@ -28,6 +28,8 @@ Use the links below for focused documentation. Use llms-full.txt when a single c
 
 - [Command-line workflows](https://fswair.github.io/vsh/guides/cli/): The vsh executable ships with vsh-python. vsh run needs no MCP dependency; vsh serve requires the mcp extra. The CLI delegates to the same native engine as the SDK and writes a JSON receipt to stdout.
 
+- [Bounded Bash on the VSH filesystem](https://fswair.github.io/vsh/integrations/bash/): Bashkit parses and executes the shell; VSH owns the filesystem authority and the transaction. This is an additional guest frontend, not a host bash subprocess, a container, or a claim of complete...
+
 ## Tutorials
 
 - [Tutorial: deterministic Pydantic AI review](https://fswair.github.io/vsh/tutorials/pydantic-ai-deterministic/): This tutorial builds a Pydantic AI filesystem capability whose commit decision is made entirely by local Python code. The example permits exactly one final service.toml value and sends every other...
@@ -58,7 +60,7 @@ Use the links below for focused documentation. Use llms-full.txt when a single c
 
 ## MCP and agents
 
-- [MCP server](https://fswair.github.io/vsh/integrations/mcp/): VSH exposes one normal MCP tool, vshrun. Its code argument is a complete Monty program: one snapshot, one active overlay, one canonical change set and one policy decision. The Python adapter...
+- [MCP server](https://fswair.github.io/vsh/integrations/mcp/): VSH exposes one normal MCP tool, vshrun. Its code argument is a complete Monty program or explicitly host-enabled bounded Bash program: one snapshot, one active overlay, one canonical change set...
 
 - [Pydantic AI capability](https://fswair.github.io/vsh/integrations/pydantic-ai/): VshCapability gives a Pydantic AI agent a capability-rooted filesystem without giving the model a host shell, a host filesystem mount, subprocess access, or a second simulation engine. Eleven...
 
@@ -78,11 +80,11 @@ Use the links below for focused documentation. Use llms-full.txt when a single c
 
 - [Rust and Python API parity](https://fswair.github.io/vsh/language-parity/): The PyO3 SDK is an adapter over the native crate. This document defines what “same engine” means in tests and releases.
 
-- [Performance and optimization evidence](https://fswair.github.io/vsh/performance/): The 2026-09-05 release-profile measurements show roughly 25–30% lower median latency for the large filename-discovery, glob and bulk-delete workloads after this optimization. The strongest...
+- [Performance and optimization evidence](https://fswair.github.io/vsh/performance/): The latest local candidate also avoids an unsuccessful mkdir for every existing blob shard. It inspects the entry without following links and creates only missing directories. Opened/named...
 
 - [Dependency policy](https://fswair.github.io/vsh/dependency-policy/): Checked: 2026-09-05
 
-- [Coverage contract](https://fswair.github.io/vsh/coverage/): Captured: 2026-09-05
+- [Coverage contract](https://fswair.github.io/vsh/coverage/): Captured: 2026-10-02, local macOS arm64; optimized Bash integration checkout, not a new release.
 
 - [Development](https://fswair.github.io/vsh/development/): The workspace builds one Rust core, a PyO3 wheel, a supervised worker, and this Zensical documentation site.
 

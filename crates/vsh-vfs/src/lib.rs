@@ -15,6 +15,11 @@ use vsh_types::{
     SnapshotId, VPath, VPathError,
 };
 
+mod evidence;
+
+use evidence::EvidenceBudget;
+pub use evidence::{EvidenceBuffer, EvidenceLimitExceeded, EvidenceLimits, EvidenceUsage};
+
 #[cfg(not(windows))]
 const DEFAULT_FILE_MODE: u32 = 0o644;
 #[cfg(windows)]
@@ -367,26 +372,37 @@ impl SnapshotBuilder {
 
     /// Validate parent relationships and freeze the snapshot.
     ///
+    /// # Panics
+    ///
+    /// Panics if a non-root path has no parent, violating validated path invariants.
+    ///
     /// # Errors
     ///
     /// Returns an error when a parent is absent or not a directory.
     pub fn build(self) -> Result<BaseSnapshot, SnapshotError> {
-        let mut children: BTreeMap<VPath, BTreeSet<VPath>> = BTreeMap::new();
+        let mut children: BTreeMap<VPath, Vec<VPath>> = BTreeMap::new();
         for path in self.nodes.keys().filter(|path| !path.is_root()) {
-            let parent = path.parent().unwrap_or_else(VPath::root);
-            let Some(parent_node) = self.nodes.get(&parent) else {
+            let parent = parent_str(path.as_str());
+            // Nodes are unique and visited in canonical order, so each parent's
+            // children are already sorted. An existing group has a validated,
+            // immutable directory parent; no owned parent or set insertion needed.
+            if let Some(siblings) = children.get_mut(parent) {
+                siblings.push(path.clone());
+                continue;
+            }
+            let Some((parent_path, parent_node)) = self.nodes.get_key_value(parent) else {
                 return Err(SnapshotError::MissingParent {
                     path: path.clone(),
-                    parent,
+                    parent: path.parent().expect("non-root path has a parent"),
                 });
             };
             if parent_node.state.kind() != NodeKind::Directory {
                 return Err(SnapshotError::ParentNotDirectory {
                     path: path.clone(),
-                    parent,
+                    parent: parent_path.clone(),
                 });
             }
-            children.entry(parent).or_default().insert(path.clone());
+            children.insert(parent_path.clone(), vec![path.clone()]);
         }
         let id = snapshot_id(&self.nodes);
         Ok(BaseSnapshot {
@@ -424,7 +440,7 @@ fn snapshot_id(nodes: &BTreeMap<VPath, Arc<SnapshotNode>>) -> SnapshotId {
 struct SnapshotInner {
     id: SnapshotId,
     nodes: BTreeMap<VPath, Arc<SnapshotNode>>,
-    children: BTreeMap<VPath, BTreeSet<VPath>>,
+    children: BTreeMap<VPath, Vec<VPath>>,
     store: BlobStore,
 }
 
@@ -479,35 +495,31 @@ impl BaseSnapshot {
         self.inner.nodes.get(path).cloned()
     }
 
-    fn direct_children(&self, path: &VPath) -> impl Iterator<Item = VPath> + '_ {
+    fn direct_children(&self, path: &VPath) -> impl Iterator<Item = &VPath> + '_ {
         self.inner
             .children
             .get(path)
             .into_iter()
-            .flat_map(|children| children.iter().cloned())
+            .flat_map(|children| children.iter())
     }
 
-    fn subtree_paths(&self, root: &VPath) -> Vec<VPath> {
-        if !self.inner.nodes.contains_key(root) {
-            return Vec::new();
-        }
-        let mut paths = Vec::new();
-        let mut pending = vec![root.clone()];
-        while let Some(path) = pending.pop() {
-            if let Some(children) = self.inner.children.get(&path) {
-                pending.extend(children.iter().rev().cloned());
-            }
-            paths.push(path);
-        }
-        paths.sort_unstable();
-        paths
+    fn subtree_paths<'a>(&'a self, root: &'a VPath) -> impl Iterator<Item = &'a VPath> {
+        // Valid top-level names such as "!" sort before the virtual root ".".
+        let all = root.is_root().then(|| self.inner.nodes.keys());
+        let subtree = (!root.is_root() && self.inner.nodes.contains_key(root))
+            .then(|| subtree_keys(&self.inner.nodes, root));
+        all.into_iter()
+            .flatten()
+            .chain(subtree.into_iter().flatten())
     }
 
     fn directory_digest(&self, path: &VPath) -> DirectoryDigest {
-        let children = self.direct_children(path).collect::<Vec<_>>();
         DirectoryDigest::digest_entries(
-            children
-                .iter()
+            self.inner
+                .children
+                .get(path)
+                .into_iter()
+                .flat_map(|children| children.iter())
                 .map(|child| (child, self.inner.nodes[child].expected_state())),
         )
     }
@@ -682,6 +694,20 @@ struct ResolvedNode {
     base_origin: Option<VPath>,
 }
 
+struct ResolvedNodeRef<'a> {
+    node: &'a Arc<SnapshotNode>,
+    base_origin: Option<&'a VPath>,
+}
+
+impl ResolvedNodeRef<'_> {
+    fn into_owned(self) -> ResolvedNode {
+        ResolvedNode {
+            node: Arc::clone(self.node),
+            base_origin: self.base_origin.cloned(),
+        }
+    }
+}
+
 #[derive(Clone)]
 enum OverlayEntry {
     Present(ResolvedNode),
@@ -716,6 +742,8 @@ pub enum EffectOrigin {
     MontyOsCall,
     /// A high-level VSH function called from inside a Monty program.
     MontyToolCall,
+    /// A filesystem RPC originating from the isolated Bashkit guest.
+    BashCall,
 }
 
 /// Semantic event emitted by the operation that actually observed or changed state.
@@ -757,6 +785,15 @@ pub enum Effect {
         /// State before the operation.
         before: NodeState,
         /// State after the operation.
+        after: NodeState,
+    },
+    /// Permission metadata changed without replacing file content.
+    ModifyMetadata {
+        /// Changed path.
+        path: VPath,
+        /// State before the operation.
+        before: NodeState,
+        /// State after the operation, with the same content identity.
         after: NodeState,
     },
     /// A path was deleted.
@@ -894,6 +931,17 @@ pub struct CanonicalDiffMetrics {
     pub materialized_after_bytes: u64,
 }
 
+/// Owned evidence moved out of a completed virtual transaction without cloning paths.
+#[derive(Debug)]
+pub struct TransactionEvidence {
+    /// Complete observed base dependencies.
+    pub read_set: BTreeMap<VPath, ReadObservation>,
+    /// Complete base preconditions for virtual writes.
+    pub write_set: BTreeMap<VPath, WritePrecondition>,
+    /// Complete ordered execution effects, with their original allocation.
+    pub effects: Vec<EffectEvent>,
+}
+
 /// Copy-on-write filesystem over one immutable snapshot.
 pub struct VirtualFs {
     base: BaseSnapshot,
@@ -901,6 +949,7 @@ pub struct VirtualFs {
     effects: Vec<EffectEvent>,
     read_set: BTreeMap<VPath, ReadObservation>,
     write_set: BTreeMap<VPath, WritePrecondition>,
+    evidence: EvidenceBudget,
     next_sequence: u64,
     effect_origin: EffectOrigin,
 }
@@ -915,6 +964,7 @@ impl VirtualFs {
             effects: Vec::new(),
             read_set: BTreeMap::new(),
             write_set: BTreeMap::new(),
+            evidence: EvidenceBudget::default(),
             next_sequence: 0,
             effect_origin: EffectOrigin::VirtualFs,
         }
@@ -924,6 +974,12 @@ impl VirtualFs {
     #[must_use]
     pub fn base_node_count(&self) -> usize {
         self.base.len()
+    }
+
+    /// Return the active adapter scope used to attribute effects.
+    #[must_use]
+    pub const fn effect_origin(&self) -> EffectOrigin {
+        self.effect_origin
     }
 
     /// Run an operation while attributing every emitted effect to `origin`.
@@ -949,15 +1005,69 @@ impl VirtualFs {
         self.base.id()
     }
 
-    /// Test path existence and record the metadata dependency.
-    pub fn exists(&mut self, path: &VPath) -> bool {
-        let state = self.resolve(path).map(|resolved| resolved.node.state());
-        self.record_metadata_dependency(path);
-        self.push_effect(Effect::MetadataRead {
-            path: path.clone(),
-            state,
-        });
-        state.is_some()
+    /// Bound active evidence. After the first reservation, limits can only tighten.
+    /// A previous terminal failure is never cleared by reconfiguration.
+    pub fn limit_evidence(&mut self, limits: EvidenceLimits) {
+        self.evidence.limit(limits);
+    }
+
+    /// Return charged evidence storage, separate from filesystem I/O statistics.
+    #[must_use]
+    pub fn evidence_usage(&self) -> EvidenceUsage {
+        self.evidence.usage()
+    }
+
+    /// Reject an incomplete transaction after a terminal evidence resource failure.
+    ///
+    /// # Errors
+    /// Returns the first sticky [`VfsError::EvidenceLimit`].
+    pub fn check_evidence(&self) -> Result<(), VfsError> {
+        self.evidence.check().map_err(VfsError::EvidenceLimit)
+    }
+
+    /// Reserve temporary path/container storage against the available evidence cap.
+    ///
+    /// Each buffer accounts one live compound-operation scope. Nested scopes have
+    /// their own checks; this is not an allocator or a whole-process peak-RSS cap.
+    ///
+    /// # Errors
+    /// Returns a sticky [`VfsError::EvidenceLimit`] before growth if it cannot fit.
+    pub fn reserve_evidence_buffer(
+        &mut self,
+        buffer: &mut EvidenceBuffer,
+        bytes: u64,
+    ) -> Result<(), VfsError> {
+        self.evidence
+            .reserve_buffer(buffer, bytes)
+            .map_err(VfsError::EvidenceLimit)
+    }
+
+    /// Reserve one parent-adapter observation, such as a retained policy denial.
+    ///
+    /// # Errors
+    /// Returns a sticky resource failure before the adapter retains the record.
+    pub fn reserve_adapter_evidence(&mut self, bytes: u64) -> Result<(), VfsError> {
+        self.evidence
+            .reserve(1, bytes)
+            .map_err(VfsError::EvidenceLimit)
+    }
+
+    /// Preserve an adapter allocation failure as a terminal evidence failure.
+    #[must_use]
+    pub fn stop_evidence(&mut self, failure: EvidenceLimitExceeded) -> VfsError {
+        VfsError::EvidenceLimit(self.evidence.stop(failure))
+    }
+
+    /// Test existence without mistaking a terminal evidence failure for absence.
+    ///
+    /// # Errors
+    /// Returns [`VfsError::EvidenceLimit`] if observation cannot be retained.
+    pub fn exists(&mut self, path: &VPath) -> Result<bool, VfsError> {
+        match self.metadata(path) {
+            Ok(_) => Ok(true),
+            Err(VfsError::NotFound { .. }) => Ok(false),
+            Err(source) => Err(source),
+        }
     }
 
     /// Read virtual metadata without following symbolic links.
@@ -966,12 +1076,12 @@ impl VirtualFs {
     ///
     /// Returns [`VfsError::NotFound`] when `path` is absent.
     pub fn metadata(&mut self, path: &VPath) -> Result<NodeState, VfsError> {
-        let state = self.resolve(path).map(|resolved| resolved.node.state());
-        self.record_metadata_dependency(path);
-        self.push_effect(Effect::MetadataRead {
+        let state = self.resolve_ref(path).map(|resolved| resolved.node.state());
+        self.record_metadata_dependency(path)?;
+        self.push_effect(&[path], || Effect::MetadataRead {
             path: path.clone(),
             state,
-        });
+        })?;
         state.ok_or_else(|| VfsError::NotFound { path: path.clone() })
     }
 
@@ -982,6 +1092,7 @@ impl VirtualFs {
     /// Returns an error for absent paths, non-files, stale lazy content, or blob-store
     /// verification failures.
     pub fn read(&mut self, path: &VPath) -> Result<Vec<u8>, VfsError> {
+        self.record_metadata_dependency(path)?;
         let resolved = self
             .resolve(path)
             .ok_or_else(|| VfsError::NotFound { path: path.clone() })?;
@@ -993,13 +1104,13 @@ impl VirtualFs {
         }
         let (blob, bytes) = resolved.node.read(path, self.base.store())?;
         if let Some(origin) = resolved.base_origin {
-            let observation = self.read_set.entry(origin).or_default();
+            let observation = self.read_entry(&origin)?;
             observation.content.get_or_insert(blob);
         }
-        self.push_effect(Effect::ContentRead {
+        self.push_effect(&[path], || Effect::ContentRead {
             path: path.clone(),
             blob,
-        });
+        })?;
         Ok(bytes)
     }
 
@@ -1009,6 +1120,7 @@ impl VirtualFs {
     ///
     /// Returns an error for absent paths, non-links, stale lazy content, or blob errors.
     pub fn read_link(&mut self, path: &VPath) -> Result<Vec<u8>, VfsError> {
+        self.record_metadata_dependency(path)?;
         let resolved = self
             .resolve(path)
             .ok_or_else(|| VfsError::NotFound { path: path.clone() })?;
@@ -1020,13 +1132,13 @@ impl VirtualFs {
         }
         let (blob, bytes) = resolved.node.read(path, self.base.store())?;
         if let Some(origin) = resolved.base_origin {
-            let observation = self.read_set.entry(origin).or_default();
+            let observation = self.read_entry(&origin)?;
             observation.content.get_or_insert(blob);
         }
-        self.push_effect(Effect::ContentRead {
+        self.push_effect(&[path], || Effect::ContentRead {
             path: path.clone(),
             blob,
-        });
+        })?;
         Ok(bytes)
     }
 
@@ -1036,18 +1148,69 @@ impl VirtualFs {
     ///
     /// Returns an error when `path` is absent or not a directory.
     pub fn read_dir(&mut self, path: &VPath) -> Result<Vec<VPath>, VfsError> {
+        self.read_dir_with_limit(path, usize::MAX)
+    }
+
+    /// Read a complete directory listing without allocating beyond an entry cap.
+    ///
+    /// An over-limit listing is never returned as a successful partial result and
+    /// does not record a directory-read effect. Enumeration stops at the first
+    /// excess visible entry, including when the directory has overlay changes.
+    ///
+    /// # Errors
+    /// Returns a directory/type error or [`VfsError::DirectoryEntryLimit`].
+    pub fn read_dir_with_limit(
+        &mut self,
+        path: &VPath,
+        max_entries: usize,
+    ) -> Result<Vec<VPath>, VfsError> {
+        self.record_metadata_dependency(path)?;
         self.require_directory(path)?;
-        self.record_metadata_dependency(path);
-        let children = self.visible_direct_children(path);
+        let mut probe = self.evidence;
+        let mut buffer = EvidenceBuffer::default();
+        let collected = (|| {
+            let mut children = Vec::new();
+            for child in self.visible_direct_children(path) {
+                if children.len() == max_entries {
+                    return Err(VfsError::DirectoryEntryLimit {
+                        path: path.clone(),
+                        limit: max_entries,
+                        attempted: max_entries.saturating_add(1),
+                    });
+                }
+                probe.reserve_buffer(
+                    &mut buffer,
+                    accounted_bytes(2 * size_of::<VPath>(), &[child], 1),
+                )?;
+                grow_bounded(&mut children)?;
+                children.push(child.clone());
+            }
+            Ok(children)
+        })();
+        let children = collected.map_err(|source| {
+            if let VfsError::EvidenceLimit(failure) = source {
+                self.evidence.stop(failure);
+            }
+            source
+        })?;
         let digest = self.listing_digest(&children);
-        if self.base.node(path).is_some() {
-            self.read_set.entry(path.clone()).or_default().directory =
-                Some(self.base.directory_digest(path));
+        if self.base.inner.nodes.contains_key(path)
+            && self
+                .read_set
+                .get(path)
+                .is_none_or(|entry| entry.directory.is_none())
+        {
+            let base_digest = if self.overlay.is_empty() {
+                digest
+            } else {
+                self.base.directory_digest(path)
+            };
+            self.read_entry(path)?.directory = Some(base_digest);
         }
-        self.push_effect(Effect::DirectoryRead {
+        self.push_effect(&[path], || Effect::DirectoryRead {
             path: path.clone(),
             digest,
-        });
+        })?;
         Ok(children)
     }
 
@@ -1058,9 +1221,10 @@ impl VirtualFs {
     /// Returns an error when the parent is absent/non-directory, the target is a
     /// directory/link, or immutable blob storage fails.
     pub fn write(&mut self, path: &VPath, bytes: &[u8]) -> Result<(), VfsError> {
+        self.check_evidence()?;
         Self::ensure_mutable_path(path)?;
         self.require_parent_directory(path)?;
-        let before = self.resolve(path).map(|resolved| resolved.node.state());
+        let before = self.resolve_ref(path).map(|resolved| resolved.node.state());
         if let Some(state) = before
             && state.kind() != NodeKind::File
         {
@@ -1079,7 +1243,7 @@ impl VirtualFs {
             mode,
         ));
         let after = node.state();
-        self.record_write_precondition(path);
+        self.record_write_precondition(path)?;
         self.overlay.insert(
             path.clone(),
             OverlayEntry::Present(ResolvedNode {
@@ -1087,7 +1251,7 @@ impl VirtualFs {
                 base_origin: None,
             }),
         );
-        self.push_effect(match before {
+        self.push_effect(&[path], || match before {
             Some(before) => Effect::ModifyContent {
                 path: path.clone(),
                 before,
@@ -1097,7 +1261,7 @@ impl VirtualFs {
                 path: path.clone(),
                 after,
             },
-        });
+        })?;
         Ok(())
     }
 
@@ -1118,14 +1282,15 @@ impl VirtualFs {
     ///
     /// Returns an error when the path exists or its parent is unavailable.
     pub fn mkdir(&mut self, path: &VPath, mode: u32) -> Result<(), VfsError> {
+        self.check_evidence()?;
         Self::ensure_mutable_path(path)?;
         self.require_parent_directory(path)?;
-        if self.resolve(path).is_some() {
+        if self.resolve_ref(path).is_some() {
             return Err(VfsError::AlreadyExists { path: path.clone() });
         }
         let node = Arc::new(SnapshotNode::directory(platform_directory_mode(mode)));
         let after = node.state();
-        self.record_write_precondition(path);
+        self.record_write_precondition(path)?;
         self.overlay.insert(
             path.clone(),
             OverlayEntry::Present(ResolvedNode {
@@ -1133,10 +1298,56 @@ impl VirtualFs {
                 base_origin: None,
             }),
         );
-        self.push_effect(Effect::Create {
+        self.push_effect(&[path], || Effect::Create {
             path: path.clone(),
             after,
-        });
+        })?;
+        Ok(())
+    }
+
+    /// Change ordinary permission bits without loading or replacing content.
+    ///
+    /// Unchanged modes retain the metadata observation but emit no mutation.
+    /// Symbolic links are never followed, and special mode bits are unsupported.
+    ///
+    /// # Errors
+    /// Returns an error for the root, absence, links or bits outside `0o777`.
+    pub fn set_mode(&mut self, path: &VPath, mode: u32) -> Result<(), VfsError> {
+        self.check_evidence()?;
+        Self::ensure_mutable_path(path)?;
+        if mode & !0o777 != 0 {
+            return Err(VfsError::UnsupportedMode {
+                path: path.clone(),
+                mode,
+            });
+        }
+        let before = self.metadata(path)?;
+        if before.kind() == NodeKind::Symlink {
+            return Err(VfsError::SymlinkMode { path: path.clone() });
+        }
+        if before.mode() == mode {
+            return Ok(());
+        }
+        let origin_bytes = self
+            .resolve_ref(path)
+            .and_then(|node| node.base_origin)
+            .map_or(0, |origin| origin.as_str().len() as u64);
+        self.evidence.reserve(0, origin_bytes)?;
+        let mut resolved = self
+            .resolve(path)
+            .ok_or_else(|| VfsError::NotFound { path: path.clone() })?;
+        let mut node = (*resolved.node).clone();
+        node.state = node.state.with_mode(mode);
+        resolved.node = Arc::new(node);
+        let after = resolved.node.state();
+        self.record_write_precondition(path)?;
+        self.overlay
+            .insert(path.clone(), OverlayEntry::Present(resolved));
+        self.push_effect(&[path], || Effect::ModifyMetadata {
+            path: path.clone(),
+            before,
+            after,
+        })?;
         Ok(())
     }
 
@@ -1146,20 +1357,22 @@ impl VirtualFs {
     ///
     /// Returns an error when the path is absent or is a directory/root.
     pub fn unlink(&mut self, path: &VPath) -> Result<(), VfsError> {
+        self.check_evidence()?;
         Self::ensure_mutable_path(path)?;
+        self.record_metadata_dependency(path)?;
         let before = self
-            .resolve(path)
+            .resolve_ref(path)
             .map(|resolved| resolved.node.state())
             .ok_or_else(|| VfsError::NotFound { path: path.clone() })?;
         if before.kind() == NodeKind::Directory {
             return Err(VfsError::IsDirectory { path: path.clone() });
         }
-        self.record_write_precondition(path);
+        self.record_write_precondition(path)?;
         self.overlay.insert(path.clone(), OverlayEntry::Tombstone);
-        self.push_effect(Effect::Delete {
+        self.push_effect(&[path], || Effect::Delete {
             path: path.clone(),
             before,
-        });
+        })?;
         Ok(())
     }
 
@@ -1169,18 +1382,20 @@ impl VirtualFs {
     ///
     /// Returns an error when the path is absent, non-directory, non-empty, or root.
     pub fn rmdir(&mut self, path: &VPath) -> Result<(), VfsError> {
+        self.check_evidence()?;
         Self::ensure_mutable_path(path)?;
+        self.record_metadata_dependency(path)?;
         let before = self.require_directory(path)?;
         let children = self.read_dir(path)?;
         if !children.is_empty() {
             return Err(VfsError::DirectoryNotEmpty { path: path.clone() });
         }
-        self.record_write_precondition(path);
+        self.record_write_precondition(path)?;
         self.overlay.insert(path.clone(), OverlayEntry::Tombstone);
-        self.push_effect(Effect::Delete {
+        self.push_effect(&[path], || Effect::Delete {
             path: path.clone(),
             before,
-        });
+        })?;
         Ok(())
     }
 
@@ -1190,17 +1405,19 @@ impl VirtualFs {
     ///
     /// Returns an error when the root path is absent or targets the virtual root.
     pub fn remove_tree(&mut self, path: &VPath) -> Result<(), VfsError> {
+        self.check_evidence()?;
         Self::ensure_mutable_path(path)?;
-        let nodes = self.visible_subtree(path);
+        self.record_metadata_dependency(path)?;
+        let nodes = self.visible_subtree(path)?;
         if nodes.is_empty() {
             return Err(VfsError::NotFound { path: path.clone() });
         }
         for (node_path, resolved) in nodes.iter().rev() {
-            self.record_write_precondition(node_path);
-            self.push_effect(Effect::Delete {
+            self.record_write_precondition(node_path)?;
+            self.push_effect(&[node_path], || Effect::Delete {
                 path: node_path.clone(),
                 before: resolved.node.state(),
-            });
+            })?;
         }
         for (node_path, _) in nodes {
             self.overlay.insert(node_path, OverlayEntry::Tombstone);
@@ -1218,6 +1435,7 @@ impl VirtualFs {
     /// Returns an error for root/overlapping moves, absent sources, invalid parents, or
     /// incompatible/non-empty destinations.
     pub fn rename(&mut self, from: &VPath, to: &VPath) -> Result<(), VfsError> {
+        self.check_evidence()?;
         Self::ensure_mutable_path(from)?;
         Self::ensure_mutable_path(to)?;
         if from == to {
@@ -1229,17 +1447,19 @@ impl VirtualFs {
                 to: to.clone(),
             });
         }
+        self.record_metadata_dependency(from)?;
+        self.record_metadata_dependency(to)?;
         self.require_parent_directory(to)?;
         let source = self
-            .resolve(from)
+            .resolve_ref(from)
             .ok_or_else(|| VfsError::NotFound { path: from.clone() })?;
         let source_state = source.node.state();
 
-        if let Some(destination) = self.resolve(to) {
+        if let Some(destination) = self.resolve_ref(to) {
             let destination_state = destination.node.state();
             match (source_state.kind(), destination_state.kind()) {
                 (NodeKind::Directory, NodeKind::Directory)
-                    if !self.visible_direct_children(to).is_empty() =>
+                    if self.visible_direct_children(to).next().is_some() =>
                 {
                     return Err(VfsError::DirectoryNotEmpty { path: to.clone() });
                 }
@@ -1252,15 +1472,15 @@ impl VirtualFs {
                 }
                 _ => {}
             }
-            self.record_write_precondition(to);
+            self.record_write_precondition(to)?;
             self.overlay.insert(to.clone(), OverlayEntry::Tombstone);
         }
 
-        let moving = self.visible_subtree(from);
+        let moving = self.visible_subtree(from)?;
         for (source_path, _) in &moving {
-            self.record_write_precondition(source_path);
+            self.record_write_precondition(source_path)?;
         }
-        for (source_path, _) in &moving {
+        for (source_path, resolved) in &moving {
             let destination_path =
                 source_path
                     .rebase(from, to)?
@@ -1268,7 +1488,12 @@ impl VirtualFs {
                         from: from.clone(),
                         to: to.clone(),
                     })?;
-            self.record_write_precondition(&destination_path);
+            self.record_write_precondition(&destination_path)?;
+            let origin_bytes = resolved
+                .base_origin
+                .as_ref()
+                .map_or(0, |origin| origin.as_str().len() as u64);
+            self.evidence.reserve(0, origin_bytes)?;
         }
 
         for (source_path, _) in &moving {
@@ -1286,12 +1511,12 @@ impl VirtualFs {
             self.overlay
                 .insert(destination_path, OverlayEntry::Present(resolved));
         }
-        self.push_effect(Effect::Rename {
+        self.push_effect(&[from, to], || Effect::Rename {
             from: from.clone(),
             to: to.clone(),
             before: source_state,
             after: source_state,
-        });
+        })?;
         Ok(())
     }
 
@@ -1304,17 +1529,21 @@ impl VirtualFs {
     ///
     /// Returns an error if changed lazy content cannot be captured and verified.
     pub fn canonical_diff(&self) -> Result<CanonicalDiff, VfsError> {
+        self.check_evidence()?;
         let mut candidates = BTreeSet::new();
         let mut expanded_delete_paths = BTreeSet::new();
         for (path, entry) in &self.overlay {
-            candidates.insert(path.clone());
-            if matches!(entry, OverlayEntry::Tombstone) {
+            candidates.insert(path);
+            if matches!(entry, OverlayEntry::Tombstone) && !expanded_delete_paths.contains(path) {
+                // remove_tree records each descendant too. Once a base path has
+                // been expanded through an ancestor, its entire subtree is already
+                // present; do not traverse it again or allocate owned path copies.
                 expanded_delete_paths.extend(self.base.subtree_paths(path));
             }
         }
-        candidates.extend(expanded_delete_paths.iter().cloned());
+        candidates.extend(expanded_delete_paths.iter().copied());
 
-        let candidates: Vec<VPath> = candidates
+        let candidates: Vec<&VPath> = candidates
             .into_iter()
             .filter(|path| !path.is_root())
             .collect();
@@ -1322,12 +1551,26 @@ impl VirtualFs {
         let mut after_states = Vec::with_capacity(candidate_paths);
         let mut materialized_after_bytes = 0_u64;
         for path in &candidates {
-            let after = match self.resolve(path) {
-                Some(resolved) => Some(resolved.node.materialized_state(path, self.base.store())?),
+            let after = match self.resolve_ref(path) {
+                Some(resolved) => {
+                    let state = resolved.node.state();
+                    let metadata_only = resolved.base_origin == Some(*path)
+                        && self
+                            .base
+                            .inner
+                            .nodes
+                            .get(*path)
+                            .is_some_and(|before| before.state().content_equivalent(state));
+                    Some(if metadata_only {
+                        state
+                    } else {
+                        materialized_after_bytes =
+                            materialized_after_bytes.saturating_add(state.size());
+                        resolved.node.materialized_state(path, self.base.store())?
+                    })
+                }
                 None => None,
             };
-            materialized_after_bytes =
-                materialized_after_bytes.saturating_add(after.map_or(0, NodeState::size));
             after_states.push(after);
         }
 
@@ -1335,13 +1578,13 @@ impl VirtualFs {
         // Finish every lazy after-state capture before reading any before-state:
         // rename destinations may share their lazy node with a base source.
         for (path, after) in candidates.into_iter().zip(after_states) {
-            let before = self.base.node(&path).map(|node| node.state());
+            let before = self.base.inner.nodes.get(path).map(|node| node.state());
             if before == after {
                 continue;
             }
             let kind = classify_diff(before, after);
             entries.push(DiffEntry {
-                path,
+                path: path.clone(),
                 before,
                 after,
                 kind,
@@ -1370,6 +1613,22 @@ impl VirtualFs {
     #[must_use]
     pub fn effects(&self) -> &[EffectEvent] {
         &self.effects
+    }
+
+    /// Consume a completed transaction and move its complete evidence to its owner.
+    ///
+    /// Compute the canonical diff first. Consuming the VFS prevents execution from
+    /// continuing with cleared dependencies or a missing effect ledger.
+    ///
+    /// # Errors
+    /// Returns the sticky evidence failure if execution exceeded an evidence bound.
+    pub fn into_evidence(self) -> Result<TransactionEvidence, VfsError> {
+        self.check_evidence()?;
+        Ok(TransactionEvidence {
+            read_set: self.read_set,
+            write_set: self.write_set,
+            effects: self.effects,
+        })
     }
 
     /// Capture bounded base content before finalizing a reviewable transaction.
@@ -1445,6 +1704,7 @@ impl VirtualFs {
     ///
     /// Returns an error when visible lazy content cannot be verified.
     pub fn materialized_final_state(&self) -> Result<BTreeMap<VPath, NodeState>, VfsError> {
+        self.check_evidence()?;
         let mut candidates: BTreeSet<VPath> = self.base.inner.nodes.keys().cloned().collect();
         candidates.extend(self.overlay.keys().cloned());
         let mut final_state = BTreeMap::new();
@@ -1458,14 +1718,21 @@ impl VirtualFs {
     }
 
     fn resolve(&self, path: &VPath) -> Option<ResolvedNode> {
+        self.resolve_ref(path).map(ResolvedNodeRef::into_owned)
+    }
+
+    fn resolve_ref<'a>(&'a self, path: &'a VPath) -> Option<ResolvedNodeRef<'a>> {
         // Read-only transactions have no ancestors to shadow. Do not allocate
         // and probe every parent when the overlay is provably empty.
         if self.overlay.is_empty() {
-            return self.base.node(path).map(|node| ResolvedNode {
+            return self.base.inner.nodes.get(path).map(|node| ResolvedNodeRef {
                 node,
-                base_origin: Some(path.clone()),
+                base_origin: Some(path),
             });
         }
+        // Tombstones and absent exact nodes are invisible regardless of their
+        // ancestors. Present nodes still require the full visibility check below.
+        let resolved = self.resolve_unshadowed_ref(path)?;
         let mut ancestor = (!path.is_root()).then(|| parent_str(path.as_str()));
         while let Some(current) = ancestor {
             match self.overlay.get(current) {
@@ -1479,23 +1746,33 @@ impl VirtualFs {
             }
             ancestor = (current != ".").then(|| parent_str(current));
         }
+        Some(resolved)
+    }
+
+    // Exact-node lookup only. Callers must establish ancestor visibility before
+    // exposing the result; direct siblings can share that check through their parent.
+    fn resolve_unshadowed_ref<'a>(&'a self, path: &'a VPath) -> Option<ResolvedNodeRef<'a>> {
         if let Some(entry) = self.overlay.get(path) {
             return match entry {
-                OverlayEntry::Present(resolved) => Some(resolved.clone()),
+                OverlayEntry::Present(resolved) => Some(ResolvedNodeRef {
+                    node: &resolved.node,
+                    base_origin: resolved.base_origin.as_ref(),
+                }),
                 OverlayEntry::Tombstone => None,
             };
         }
-        self.base.node(path).map(|node| ResolvedNode {
+        self.base.inner.nodes.get(path).map(|node| ResolvedNodeRef {
             node,
-            base_origin: Some(path.clone()),
+            base_origin: Some(path),
         })
     }
 
-    fn visible_direct_children(&self, path: &VPath) -> Vec<VPath> {
-        if self.overlay.is_empty() {
-            return self.base.direct_children(path).collect();
-        }
-        let mut candidates: BTreeSet<VPath> = self.base.direct_children(path).collect();
+    fn visible_direct_children(&self, path: &VPath) -> impl Iterator<Item = &VPath> + '_ {
+        let parent_visible = self.overlay.is_empty()
+            || self
+                .resolve_ref(path)
+                .is_some_and(|node| node.node.state.kind() == NodeKind::Directory);
+        let mut base = self.base.direct_children(path).peekable();
         // The slash is part of the lexical lower bound: a/ must not include
         // a-, a., a0 or other prefix siblings. No additional index is retained.
         let prefix = if path.is_root() {
@@ -1503,48 +1780,105 @@ impl VirtualFs {
         } else {
             format!("{path}/")
         };
-        candidates.extend(
-            self.overlay
-                .range::<str, _>((Included(prefix.as_str()), Unbounded))
-                .take_while(|(candidate, _)| candidate.as_str().starts_with(&prefix))
-                .filter(|(candidate, _)| !candidate.as_str()[prefix.len()..].contains('/'))
-                .map(|(candidate, _)| candidate.clone()),
-        );
-        candidates
-            .into_iter()
-            .filter(|candidate| self.resolve(candidate).is_some())
-            .collect()
+        let prefix_length = prefix.len();
+        let mut overlay = self
+            .overlay
+            .range::<str, _>((Included(prefix.as_str()), Unbounded))
+            .take_while(move |(candidate, _)| candidate.as_str().starts_with(&prefix))
+            .filter(move |(candidate, _)| !candidate.as_str()[prefix_length..].contains('/'))
+            .map(|(candidate, _)| candidate)
+            .peekable();
+
+        // Both sources are already ordered. A streaming merge avoids cloning a
+        // second full BTreeSet and lets bounded reads stop before allocating it.
+        std::iter::from_fn(move || {
+            loop {
+                if !parent_visible {
+                    return None;
+                }
+                if self.overlay.is_empty() {
+                    return base.next();
+                }
+                let candidate = match (base.peek(), overlay.peek()) {
+                    (Some(left), Some(right)) if left < right => base.next(),
+                    (Some(left), Some(right)) if left == right => {
+                        overlay.next();
+                        base.next()
+                    }
+                    (_, Some(_)) => overlay.next(),
+                    (Some(_), None) => base.next(),
+                    (None, None) => return None,
+                }?;
+                if self.resolve_unshadowed_ref(candidate).is_some() {
+                    return Some(candidate);
+                }
+            }
+        })
     }
 
-    fn visible_subtree(&self, path: &VPath) -> Vec<(VPath, ResolvedNode)> {
-        let mut candidates: BTreeSet<VPath> = self.base.subtree_paths(path).into_iter().collect();
-        candidates.extend(
-            self.overlay
-                .keys()
-                .filter(|candidate| candidate.is_within(path))
-                .cloned(),
-        );
-        candidates
-            .into_iter()
-            .filter_map(|candidate| self.resolve(&candidate).map(|node| (candidate, node)))
-            .collect()
+    fn visible_subtree(&mut self, path: &VPath) -> Result<Vec<(VPath, ResolvedNode)>, VfsError> {
+        // Merge borrowed keys before cloning. The probe bounds temporary path/node
+        // storage without pretending those temporary bytes are retained evidence.
+        let mut probe = self.evidence;
+        let mut buffer = EvidenceBuffer::default();
+        let collected = (|| {
+            let mut base = subtree_keys(&self.base.inner.nodes, path).peekable();
+            let mut overlay = subtree_keys(&self.overlay, path).peekable();
+            let mut nodes = Vec::new();
+            loop {
+                let candidate = match (base.peek(), overlay.peek()) {
+                    (Some(left), Some(right)) if left < right => base.next(),
+                    (Some(left), Some(right)) if left == right => {
+                        base.next();
+                        overlay.next()
+                    }
+                    (_, Some(_)) => overlay.next(),
+                    (Some(_), None) => base.next(),
+                    (None, None) => break,
+                }
+                .expect("merged candidate");
+                if let Some(node) = self.resolve_ref(candidate) {
+                    let mut storage =
+                        accounted_bytes(2 * size_of::<(VPath, ResolvedNode)>(), &[candidate], 1);
+                    if let Some(origin) = node.base_origin {
+                        storage = storage.checked_add(origin.as_str().len() as u64).ok_or(
+                            EvidenceLimitExceeded::Bytes {
+                                limit: self.evidence.limits().max_bytes,
+                                attempted: u64::MAX,
+                            },
+                        )?;
+                    }
+                    probe.reserve_buffer(&mut buffer, storage)?;
+                    grow_bounded(&mut nodes)?;
+                    nodes.push((candidate.clone(), node.into_owned()));
+                }
+            }
+            Ok(nodes)
+        })();
+        collected.map_err(|failure| VfsError::EvidenceLimit(self.evidence.stop(failure)))
     }
 
     fn listing_digest(&self, children: &[VPath]) -> DirectoryDigest {
+        // Lazy blob capture is shared across snapshot clones. It is a cache
+        // change, not a directory mutation: both streaming passes must observe
+        // immutable node state, including any explicit overlay mode/content.
+        // The caller collected direct children of a validated visible directory;
+        // no mutation occurs between collecting them and these two digest passes.
         DirectoryDigest::digest_entries(children.iter().map(|child| {
             (
                 child,
-                self.resolve(child)
+                self.resolve_unshadowed_ref(child)
                     .expect("visible child resolves")
                     .node
-                    .state(),
+                    .expected_state(),
             )
         }))
     }
 
-    fn require_directory(&self, path: &VPath) -> Result<NodeState, VfsError> {
+    fn require_directory(&mut self, path: &VPath) -> Result<NodeState, VfsError> {
+        self.record_metadata_dependency(path)?;
         let state = self
-            .resolve(path)
+            .resolve_ref(path)
             .map(|resolved| resolved.node.state())
             .ok_or_else(|| VfsError::NotFound { path: path.clone() })?;
         if state.kind() != NodeKind::Directory {
@@ -1556,7 +1890,7 @@ impl VirtualFs {
         Ok(state)
     }
 
-    fn require_parent_directory(&self, path: &VPath) -> Result<(), VfsError> {
+    fn require_parent_directory(&mut self, path: &VPath) -> Result<(), VfsError> {
         let parent = path.parent().ok_or(VfsError::RootMutation)?;
         self.require_directory(&parent).map(|_| ())
     }
@@ -1569,26 +1903,78 @@ impl VirtualFs {
         }
     }
 
-    fn record_metadata_dependency(&mut self, path: &VPath) {
-        let expected = self.base.node(path).map(|node| node.expected_state());
-        self.read_set
-            .entry(path.clone())
-            .or_default()
-            .metadata
-            .get_or_insert(expected);
-    }
-
-    fn record_write_precondition(&mut self, path: &VPath) {
-        let expected = self.base.node(path).map(|node| node.expected_state());
-        self.write_set
-            .entry(path.clone())
-            .or_insert(WritePrecondition { expected });
-        if let Some(parent) = path.parent() {
-            self.record_metadata_dependency(&parent);
+    fn record_metadata_dependency(&mut self, path: &VPath) -> Result<(), VfsError> {
+        self.check_evidence()?;
+        if self
+            .read_set
+            .get(path)
+            .is_some_and(|entry| entry.metadata.is_some())
+        {
+            return Ok(());
         }
+        let expected = self
+            .base
+            .inner
+            .nodes
+            .get(path)
+            .map(|node| node.expected_state());
+        self.read_entry(path)?.metadata.get_or_insert(expected);
+        Ok(())
     }
 
-    fn push_effect(&mut self, effect: Effect) {
+    fn read_entry(&mut self, path: &VPath) -> Result<&mut ReadObservation, VfsError> {
+        self.check_evidence()?;
+        if !self.read_set.contains_key(path) {
+            let storage = 2 * size_of::<(VPath, ReadObservation)>() + 12 * size_of::<usize>();
+            self.evidence
+                .reserve(1, accounted_bytes(storage, &[path], 1))?;
+            return Ok(self.read_set.entry(path.clone()).or_default());
+        }
+        Ok(self.read_set.get_mut(path).expect("reserved read entry"))
+    }
+
+    fn record_write_precondition(&mut self, path: &VPath) -> Result<(), VfsError> {
+        self.check_evidence()?;
+        if !path.is_root()
+            && self
+                .read_set
+                .get(parent_str(path.as_str()))
+                .is_none_or(|entry| entry.metadata.is_none())
+        {
+            self.record_metadata_dependency(&path.parent().expect("non-root path has a parent"))?;
+        }
+        if self.write_set.contains_key(path) {
+            return Ok(());
+        }
+        // Reserve both the precondition and its eventual overlay slot. Existing
+        // keys are never cloned merely to discover that an entry already exists.
+        let storage = 2 * size_of::<(VPath, WritePrecondition)>()
+            + 2 * size_of::<(VPath, OverlayEntry)>()
+            + size_of::<SnapshotNode>()
+            + 24 * size_of::<usize>();
+        self.evidence
+            .reserve(1, accounted_bytes(storage, &[path], 2))?;
+        let expected = self
+            .base
+            .inner
+            .nodes
+            .get(path)
+            .map(|node| node.expected_state());
+        self.write_set
+            .insert(path.clone(), WritePrecondition { expected });
+        Ok(())
+    }
+
+    fn push_effect(
+        &mut self,
+        paths: &[&VPath],
+        effect: impl FnOnce() -> Effect,
+    ) -> Result<(), VfsError> {
+        // Explicit 1, 2, 4, ... growth keeps capacity <= 2 * retained length.
+        // Reserve the path clones and that storage envelope before allocation.
+        self.evidence
+            .reserve(1, accounted_bytes(2 * size_of::<EffectEvent>(), paths, 1))?;
+        grow_bounded(&mut self.effects).map_err(|failure| self.evidence.stop(failure))?;
         let sequence = self.next_sequence;
         self.next_sequence = self
             .next_sequence
@@ -1597,9 +1983,49 @@ impl VirtualFs {
         self.effects.push(EffectEvent {
             sequence,
             origin: self.effect_origin,
-            effect,
+            effect: effect(),
         });
+        Ok(())
     }
+}
+
+fn accounted_bytes(storage: usize, paths: &[&VPath], copies: usize) -> u64 {
+    let bytes = paths.iter().try_fold(storage, |total, path| {
+        total.checked_add(path.as_str().len().checked_mul(copies)?)
+    });
+    bytes
+        .and_then(|value| u64::try_from(value).ok())
+        .unwrap_or(u64::MAX)
+}
+
+fn grow_bounded<T>(values: &mut Vec<T>) -> Result<(), EvidenceLimitExceeded> {
+    if values.len() == values.capacity() {
+        values
+            .try_reserve_exact(values.capacity().max(1))
+            .map_err(|_| EvidenceLimitExceeded::Allocation)?;
+    }
+    Ok(())
+}
+
+fn subtree_keys<'a, T>(
+    entries: &'a BTreeMap<VPath, T>,
+    root: &'a VPath,
+) -> impl Iterator<Item = &'a VPath> {
+    let prefix = if root.is_root() {
+        String::new()
+    } else {
+        format!("{root}/")
+    };
+    let descendants = entries
+        .range::<str, _>((Included(prefix.as_str()), Unbounded))
+        .map(|(path, _)| path)
+        .take_while(move |path| path.as_str().starts_with(&prefix))
+        .filter(move |path| *path != root);
+    entries
+        .get_key_value(root)
+        .map(|(path, _)| path)
+        .into_iter()
+        .chain(descendants)
 }
 
 fn parent_str(path: &str) -> &str {
@@ -1648,6 +2074,8 @@ fn encode_diff_entry(entry: &DiffEntry, output: &mut Vec<u8>) {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum VfsError {
+    /// Active evidence is incomplete after a terminal resource failure.
+    EvidenceLimit(EvidenceLimitExceeded),
     /// Snapshot access or lazy capture failed.
     Snapshot(SnapshotError),
     /// Immutable blob storage failed.
@@ -1695,8 +2123,29 @@ pub enum VfsError {
         /// Non-empty directory.
         path: VPath,
     },
+    /// Complete directory enumeration would exceed the caller's entry cap.
+    DirectoryEntryLimit {
+        /// Directory path.
+        path: VPath,
+        /// Maximum number of visible entries to return.
+        limit: usize,
+        /// First rejected visible entry count, not a full directory count.
+        attempted: usize,
+    },
     /// The immutable virtual root cannot be mutated.
     RootMutation,
+    /// A mode request includes unsupported special or non-permission bits.
+    UnsupportedMode {
+        /// Requested path.
+        path: VPath,
+        /// Unsupported requested mode.
+        mode: u32,
+    },
+    /// Permission changes cannot target an opaque symbolic link.
+    SymlinkMode {
+        /// Requested path.
+        path: VPath,
+    },
     /// Source and destination subtrees overlap.
     InvalidRename {
         /// Source root.
@@ -1738,9 +2187,16 @@ impl From<VPathError> for VfsError {
     }
 }
 
+impl From<EvidenceLimitExceeded> for VfsError {
+    fn from(value: EvidenceLimitExceeded) -> Self {
+        Self::EvidenceLimit(value)
+    }
+}
+
 impl fmt::Display for VfsError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::EvidenceLimit(source) => write!(formatter, "{source}"),
             Self::Snapshot(source) => write!(formatter, "snapshot failure: {source}"),
             Self::Store(source) => write!(formatter, "blob store failure: {source}"),
             Self::Path(source) => write!(formatter, "virtual path failure: {source}"),
@@ -1765,7 +2221,25 @@ impl fmt::Display for VfsError {
             Self::DirectoryNotEmpty { path } => {
                 write!(formatter, "virtual directory is not empty: {path}")
             }
+            Self::DirectoryEntryLimit {
+                path,
+                limit,
+                attempted,
+            } => {
+                write!(
+                    formatter,
+                    "virtual directory entry limit at {path}: {attempted} > {limit}"
+                )
+            }
             Self::RootMutation => formatter.write_str("the virtual root cannot be mutated"),
+            Self::UnsupportedMode { path, mode } => write!(
+                formatter,
+                "unsupported virtual mode {mode:o} at {path}; only ordinary permission bits are supported"
+            ),
+            Self::SymlinkMode { path } => write!(
+                formatter,
+                "cannot change opaque symbolic-link permissions: {path}"
+            ),
             Self::InvalidRename { from, to } => {
                 write!(formatter, "rename subtrees overlap: {from} -> {to}")
             }
@@ -1783,6 +2257,7 @@ impl fmt::Display for VfsError {
 impl Error for VfsError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::EvidenceLimit(source) => Some(source),
             Self::Snapshot(source) => Some(source),
             Self::Store(source) => Some(source),
             Self::Path(source) => Some(source),
@@ -1793,7 +2268,10 @@ impl Error for VfsError {
             | Self::NotSymlink { .. }
             | Self::IsDirectory { .. }
             | Self::DirectoryNotEmpty { .. }
+            | Self::DirectoryEntryLimit { .. }
             | Self::RootMutation
+            | Self::UnsupportedMode { .. }
+            | Self::SymlinkMode { .. }
             | Self::InvalidRename { .. }
             | Self::RenameTypeMismatch { .. }
             | Self::InvalidCanonicalDiff { .. } => None,
@@ -2023,6 +2501,85 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_child_order_and_subtrees_match_the_canonical_node_map() {
+        let (_guard, store) = test_store("snapshot-ordered-index");
+        let names = [
+            " ",
+            "!",
+            "!/.hidden",
+            "-x",
+            "a",
+            "a-",
+            "a.",
+            "a0",
+            "aa",
+            "a/b",
+            "a/b/x",
+            "a/bb",
+            "a/c",
+            "a/c/x",
+            "a/c/y",
+            "a/z",
+            "é",
+            "é/δ",
+        ];
+        let mut builder = SnapshotBuilder::new(store);
+        for name in names.into_iter().rev() {
+            builder.add_directory(path(name), 0o755).unwrap();
+        }
+        let snapshot = builder.build().unwrap();
+        for root in snapshot.inner.nodes.keys() {
+            let expected_children: Vec<_> = snapshot
+                .inner
+                .nodes
+                .keys()
+                .filter(|child| child.parent().as_ref() == Some(root))
+                .cloned()
+                .collect();
+            assert_eq!(
+                snapshot.direct_children(root).cloned().collect::<Vec<_>>(),
+                expected_children
+            );
+            let expected_subtree: Vec<_> = snapshot
+                .inner
+                .nodes
+                .keys()
+                .filter(|child| child.is_within(root))
+                .cloned()
+                .collect();
+            assert_eq!(
+                snapshot.subtree_paths(root).cloned().collect::<Vec<_>>(),
+                expected_subtree
+            );
+            assert_eq!(
+                snapshot.directory_digest(root),
+                DirectoryDigest::digest_entries(
+                    expected_children
+                        .iter()
+                        .map(|child| { (child, snapshot.inner.nodes[child].expected_state()) })
+                )
+            );
+        }
+        assert!(snapshot.subtree_paths(&path("absent")).next().is_none());
+        let mut vfs = VirtualFs::new(snapshot);
+        vfs.remove_tree(&path("a")).unwrap();
+        let removed: Vec<_> = vfs
+            .canonical_diff()
+            .unwrap()
+            .entries()
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect();
+        assert_eq!(
+            removed,
+            ["a", "a/b", "a/b/x", "a/bb", "a/c", "a/c/x", "a/c/y", "a/z"].map(path)
+        );
+        for sibling in ["a-", "a.", "a0", "aa", "é"] {
+            assert!(vfs.exists(&path(sibling)).unwrap());
+        }
+    }
+
+    #[test]
     fn snapshot_rejects_missing_or_non_directory_parents() {
         let (_guard, store) = test_store("invalid-parent");
         let mut missing = SnapshotBuilder::new(store.clone());
@@ -2076,6 +2633,142 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(snapshot.metrics().materialized_content_nodes, 1);
         assert!(vfs.read_set()[&path("lazy.txt")].content.is_some());
+    }
+
+    #[test]
+    fn directory_identity_ignores_shared_lazy_capture_but_tracks_virtual_changes() {
+        let (_guard, store) = test_store("stable-lazy-directory");
+        let expected = stamp(NodeKind::File, 5, 44);
+        let mut builder = SnapshotBuilder::new(store);
+        builder
+            .add_lazy(path("lazy.txt"), expected, |stamp| {
+                Ok(CapturedContent {
+                    bytes: b"hello".to_vec(),
+                    before: stamp,
+                    after: stamp,
+                })
+            })
+            .unwrap();
+        let snapshot = builder.build().unwrap();
+        let mut listing = VirtualFs::new(snapshot.clone());
+        let root = VPath::root();
+        let children = listing.read_dir(&root).unwrap();
+        let original = listing.listing_digest(&children);
+        assert_eq!(original, snapshot.directory_digest(&root));
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut reader = VirtualFs::new(snapshot.clone());
+                assert_eq!(reader.read(&path("lazy.txt")).unwrap(), b"hello");
+            });
+            for _ in 0..100 {
+                assert_eq!(listing.listing_digest(&children), original);
+            }
+        });
+        assert_eq!(listing.listing_digest(&children), original);
+        listing.read_dir(&root).unwrap();
+        assert_eq!(listing.read_set()[&root].directory, Some(original));
+        listing.set_mode(&path("lazy.txt"), 0o600).unwrap();
+        let changed_mode = listing.listing_digest(&children);
+        assert_ne!(changed_mode, original);
+        listing.read_dir(&root).unwrap();
+        assert_eq!(listing.read_set()[&root].directory, Some(original));
+        listing.write(&path("lazy.txt"), b"different").unwrap();
+        let changed_content = listing.listing_digest(&children);
+        assert_ne!(changed_content, changed_mode);
+        listing
+            .rename(&path("lazy.txt"), &path("renamed.txt"))
+            .unwrap();
+        let renamed = listing.read_dir(&root).unwrap();
+        assert_eq!(renamed, vec![path("renamed.txt")]);
+        assert_ne!(listing.listing_digest(&renamed), changed_content);
+    }
+
+    #[test]
+    fn permission_changes_preserve_lazy_content_and_canonical_metadata_identity() {
+        let (_guard, store) = test_store("lazy-mode");
+        let expected = stamp(NodeKind::File, 5, 41);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let loader_calls = Arc::clone(&calls);
+        let mut builder = SnapshotBuilder::new(store);
+        builder
+            .add_lazy(path("lazy.txt"), expected, move |stamp| {
+                loader_calls.fetch_add(1, Ordering::Relaxed);
+                Ok(CapturedContent {
+                    bytes: b"hello".to_vec(),
+                    before: stamp,
+                    after: stamp,
+                })
+            })
+            .unwrap();
+        let mut vfs = VirtualFs::new(builder.build().unwrap());
+        vfs.set_mode(&path("lazy.txt"), 0o600).unwrap();
+        let diff = vfs.canonical_diff().unwrap();
+        assert_eq!(diff.entries().len(), 1);
+        assert_eq!(
+            diff.metrics(),
+            CanonicalDiffMetrics {
+                candidate_paths: 1,
+                expanded_delete_paths: 0,
+                changed_paths: 1,
+                materialized_after_bytes: 0,
+            }
+        );
+        let change = &diff.entries()[0];
+        assert_eq!(change.kind, DiffKind::MetadataChange);
+        assert_eq!(
+            change.before.unwrap().content(),
+            change.after.unwrap().content()
+        );
+        assert_eq!(change.after.unwrap().mode(), 0o600);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            vfs.write_set()[&path("lazy.txt")].expected,
+            Some(NodeState::from_stamp(expected))
+        );
+        assert!(matches!(
+            vfs.effects().last().unwrap().effect,
+            Effect::ModifyMetadata { .. }
+        ));
+        assert_eq!(vfs.read(&path("lazy.txt")).unwrap(), b"hello");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            vfs.canonical_diff().unwrap().entries()[0].kind,
+            DiffKind::MetadataChange
+        );
+        vfs.set_mode(&path("lazy.txt"), expected.mode).unwrap();
+        assert!(vfs.canonical_diff().unwrap().is_empty());
+    }
+
+    #[test]
+    fn permission_noops_and_unsupported_targets_never_mutate() {
+        let (_guard, store) = test_store("mode-constraints");
+        let mut vfs = VirtualFs::new(fixture_snapshot(store));
+        let file = path("src/a.txt");
+        vfs.set_mode(&file, 0o644).unwrap();
+        assert!(vfs.write_set().is_empty());
+        assert_eq!(vfs.effects().len(), 1);
+        for mode in [0o1644, 0o2644, 0o4644, 0o100_644, u32::MAX] {
+            assert!(matches!(
+                vfs.set_mode(&file, mode),
+                Err(VfsError::UnsupportedMode { .. })
+            ));
+        }
+        assert!(matches!(
+            vfs.set_mode(&VPath::root(), 0o700),
+            Err(VfsError::RootMutation)
+        ));
+        assert!(matches!(
+            vfs.set_mode(&path("missing"), 0o600),
+            Err(VfsError::NotFound { .. })
+        ));
+        assert!(vfs.write_set().is_empty());
+        assert!(vfs.canonical_diff().unwrap().is_empty());
+        vfs.set_mode(&path("src"), 0o700).unwrap();
+        assert_eq!(vfs.metadata(&path("src")).unwrap().mode(), 0o700);
+        assert_eq!(
+            vfs.canonical_diff().unwrap().entries()[0].kind,
+            DiffKind::MetadataChange
+        );
     }
 
     #[test]
@@ -2191,6 +2884,42 @@ mod tests {
     }
 
     #[test]
+    fn consuming_evidence_preserves_dependencies_and_moves_the_effect_buffer() {
+        let (_guard, store) = test_store("owned-evidence");
+        let mut vfs = VirtualFs::new(fixture_snapshot(store));
+        vfs.read(&path("src/a.txt")).unwrap();
+        vfs.write(&path("src/a.txt"), b"updated").unwrap();
+        vfs.remove_tree(&path("src/nested")).unwrap();
+        assert!(!vfs.canonical_diff().unwrap().is_empty());
+
+        let reads = vfs.read_set().clone();
+        let writes = vfs.write_set().clone();
+        let effects = vfs.effects().to_vec();
+        let effect_buffer = vfs.effects().as_ptr();
+        let evidence = vfs.into_evidence().unwrap();
+
+        assert_eq!(evidence.read_set, reads);
+        assert_eq!(evidence.write_set, writes);
+        assert_eq!(evidence.effects, effects);
+        assert_eq!(evidence.effects.as_ptr(), effect_buffer);
+    }
+
+    #[test]
+    fn consuming_evidence_rejects_a_sticky_resource_failure() {
+        let (_guard, store) = test_store("owned-incomplete-evidence");
+        let mut vfs = VirtualFs::new(fixture_snapshot(store));
+        vfs.limit_evidence(EvidenceLimits {
+            max_records: 0,
+            max_bytes: 0,
+        });
+        assert!(vfs.read(&path("src/a.txt")).is_err());
+        assert!(matches!(
+            vfs.into_evidence(),
+            Err(VfsError::EvidenceLimit(_))
+        ));
+    }
+
+    #[test]
     fn recursive_delete_expands_full_descendant_closure() {
         let (_guard, store) = test_store("delete-closure");
         let snapshot = fixture_snapshot(store);
@@ -2223,6 +2952,203 @@ mod tests {
     }
 
     #[test]
+    fn repeated_long_absence_observations_are_bounded_without_coalescing_effects() {
+        let (_directory, store) = test_store("evidence-repeated");
+        let base = fixture_snapshot(store);
+        let missing = path(&"x".repeat(8192));
+        let mut probe = VirtualFs::new(base.clone());
+        assert!(!probe.exists(&missing).unwrap());
+        let bytes_per_effect = accounted_bytes(2 * size_of::<EffectEvent>(), &[&missing], 1);
+        let limits = EvidenceLimits {
+            max_records: 1000,
+            max_bytes: probe.evidence_usage().bytes + 8 * bytes_per_effect,
+        };
+        let mut vfs = VirtualFs::new(base);
+        vfs.limit_evidence(limits);
+        for _ in 0..9 {
+            assert!(!vfs.exists(&missing).unwrap());
+        }
+        assert!(
+            matches!(vfs.exists(&missing), Err(VfsError::EvidenceLimit(EvidenceLimitExceeded::Bytes { limit, .. })) if limit == limits.max_bytes)
+        );
+        assert_eq!(vfs.read_set().len(), 1);
+        assert_eq!(vfs.effects().len(), 9);
+        assert_eq!(vfs.evidence_usage().records, 10);
+        assert_eq!(vfs.evidence_usage().bytes, limits.max_bytes);
+        for (index, event) in vfs.effects().iter().enumerate() {
+            assert_eq!(event.sequence, index as u64);
+            assert!(
+                matches!(&event.effect, Effect::MetadataRead { path, state: None } if path == &missing)
+            );
+        }
+        vfs.limit_evidence(EvidenceLimits {
+            max_records: u64::MAX,
+            max_bytes: u64::MAX,
+        });
+        assert!(matches!(
+            vfs.canonical_diff(),
+            Err(VfsError::EvidenceLimit(_))
+        ));
+        assert!(matches!(
+            vfs.rename(&missing, &missing),
+            Err(VfsError::EvidenceLimit(_))
+        ));
+        assert!(matches!(
+            vfs.exists(&path("src")),
+            Err(VfsError::EvidenceLimit(_))
+        ));
+        assert_eq!(vfs.effects().len(), 9);
+    }
+
+    #[test]
+    fn evidence_zero_limits_reject_before_retaining_paths() {
+        let (_directory, store) = test_store("evidence-zero");
+        let base = fixture_snapshot(store);
+        for limits in [
+            EvidenceLimits {
+                max_records: 0,
+                max_bytes: u64::MAX,
+            },
+            EvidenceLimits {
+                max_records: u64::MAX,
+                max_bytes: 0,
+            },
+        ] {
+            let mut vfs = VirtualFs::new(base.clone());
+            vfs.limit_evidence(limits);
+            assert!(matches!(
+                vfs.metadata(&path("missing")),
+                Err(VfsError::EvidenceLimit(_))
+            ));
+            assert!(vfs.read_set().is_empty());
+            assert!(vfs.effects().is_empty());
+            assert_eq!(vfs.evidence_usage(), EvidenceUsage::default());
+            assert!(vfs.canonical_diff().is_err());
+        }
+    }
+
+    #[test]
+    fn evidence_records_cover_unique_dependencies_writes_and_overlay_slots() {
+        let (_directory, store) = test_store("evidence-writes");
+        let mut vfs = VirtualFs::new(fixture_snapshot(store));
+        vfs.limit_evidence(EvidenceLimits {
+            max_records: 6,
+            max_bytes: 64 * 1024,
+        });
+        vfs.write(&path("first"), b"a").unwrap();
+        vfs.write(&path("second"), b"b").unwrap();
+        assert_eq!(vfs.evidence_usage().records, 5);
+        assert!(matches!(
+            vfs.write(&path("third"), b"c"),
+            Err(VfsError::EvidenceLimit(EvidenceLimitExceeded::Records {
+                limit: 6,
+                attempted: 7
+            }))
+        ));
+        assert_eq!(vfs.evidence_usage().records, 6);
+        assert_eq!(vfs.write_set().len(), 3);
+        assert_eq!(vfs.metrics().overlay_entries, 3);
+        assert_eq!(vfs.effects().len(), 2);
+        assert!(vfs.canonical_diff().is_err());
+        assert!(vfs.write(&path("fourth"), b"d").is_err());
+        assert_eq!(vfs.metrics().overlay_entries, 3);
+    }
+
+    #[test]
+    fn directory_and_subtree_collection_stop_before_oversized_path_copies() {
+        let (_directory, store) = test_store("evidence-collection");
+        let base = fixture_snapshot(store);
+        for operation in 0..3 {
+            let mut vfs = VirtualFs::new(base.clone());
+            let read_slot = 2 * size_of::<(VPath, ReadObservation)>() + 12 * size_of::<usize>();
+            let existing_bytes = if operation == 2 {
+                3 * read_slot + 3 + 5 + 1
+            } else {
+                read_slot + 3
+            };
+            vfs.limit_evidence(EvidenceLimits {
+                max_records: 1000,
+                max_bytes: existing_bytes as u64 + 1,
+            });
+            let result = match operation {
+                0 => vfs.read_dir(&path("src")).map(|_| ()),
+                1 => vfs.remove_tree(&path("src")),
+                _ => vfs.rename(&path("src"), &path("moved")),
+            };
+            assert!(matches!(
+                result,
+                Err(VfsError::EvidenceLimit(EvidenceLimitExceeded::Bytes { .. }))
+            ));
+            assert_eq!(vfs.metrics().overlay_entries, 0);
+            assert!(vfs.effects().is_empty());
+            assert!(vfs.canonical_diff().is_err());
+        }
+    }
+
+    #[test]
+    fn temporary_children_do_not_consume_retained_record_counts() {
+        let (_directory, store) = test_store("evidence-temporary-records");
+        let base = fixture_snapshot(store);
+        let mut listing = VirtualFs::new(base.clone());
+        listing.limit_evidence(EvidenceLimits {
+            max_records: 2,
+            max_bytes: 64 * 1024,
+        });
+        assert_eq!(listing.read_dir(&path("src")).unwrap().len(), 2);
+        assert_eq!(listing.evidence_usage().records, 2);
+        assert_eq!(listing.effects().len(), 1);
+        assert!(listing.canonical_diff().unwrap().is_empty());
+        let mut removal = VirtualFs::new(base);
+        removal.limit_evidence(EvidenceLimits {
+            max_records: 5,
+            max_bytes: 64 * 1024,
+        });
+        assert!(matches!(
+            removal.remove_tree(&path("src")),
+            Err(VfsError::EvidenceLimit(EvidenceLimitExceeded::Records {
+                limit: 5,
+                attempted: 6
+            }))
+        ));
+        assert_eq!(removal.metrics().overlay_entries, 0);
+        assert_eq!(removal.evidence_usage().records, 5);
+        assert!(!removal.effects().is_empty());
+        assert!(removal.canonical_diff().is_err());
+    }
+
+    #[test]
+    fn shortened_renames_still_charge_long_retained_and_temporary_origins() {
+        let (_directory, store) = test_store("evidence-origins");
+        let original = path(&"x".repeat(8192));
+        let mut builder = SnapshotBuilder::new(store);
+        builder.add_directory(original.clone(), 0o755).unwrap();
+        let base = builder.build().unwrap();
+        for set_mode in [true, false] {
+            let mut vfs = VirtualFs::new(base.clone());
+            let short = path("s");
+            vfs.rename(&original, &short).unwrap();
+            let retained = vfs.evidence_usage().bytes;
+            let limit =
+                retained + accounted_bytes(2 * size_of::<EffectEvent>(), &[&short], 1) + 1000;
+            vfs.limit_evidence(EvidenceLimits {
+                max_records: 1000,
+                max_bytes: limit,
+            });
+            let result = if set_mode {
+                vfs.set_mode(&short, 0o700)
+            } else {
+                vfs.remove_tree(&short)
+            };
+            assert!(
+                matches!(result, Err(VfsError::EvidenceLimit(EvidenceLimitExceeded::Bytes { limit: cap, .. })) if cap == limit)
+            );
+            assert!(vfs.evidence_usage().bytes <= limit);
+            assert_eq!(vfs.metrics().overlay_entries, 2);
+            assert!(vfs.canonical_diff().is_err());
+        }
+    }
+
+    #[test]
     fn subtree_expansion_is_component_aware_not_lexical_prefix_based() {
         let (_guard, store) = test_store("subtree-order");
         let mut builder = SnapshotBuilder::new(store);
@@ -2242,8 +3168,8 @@ mod tests {
             .map(|entry| entry.path.as_str())
             .collect();
         assert_eq!(paths, ["a", "a/in"]);
-        assert!(vfs.exists(&path("a-foreign")));
-        assert!(vfs.exists(&path("a.other")));
+        assert!(vfs.exists(&path("a-foreign")).unwrap());
+        assert!(vfs.exists(&path("a.other")).unwrap());
     }
 
     #[test]
@@ -2257,8 +3183,8 @@ mod tests {
 
         vfs.write(&path("src/overlay.txt"), b"overlay").unwrap();
         vfs.remove_tree(&path("src")).unwrap();
-        assert!(!vfs.exists(&path("src/a.txt")));
-        assert!(!vfs.exists(&path("src/overlay.txt")));
+        assert!(!vfs.exists(&path("src/a.txt")).unwrap());
+        assert!(!vfs.exists(&path("src/overlay.txt")).unwrap());
 
         vfs.mkdir(&path("src"), 0o755).unwrap();
         assert!(vfs.read_dir(&path("src")).unwrap().is_empty());
@@ -2292,10 +3218,66 @@ mod tests {
                 .cloned()
                 .collect();
             assert_eq!(
-                vfs.visible_direct_children(&directory),
+                vfs.visible_direct_children(&directory)
+                    .cloned()
+                    .collect::<Vec<_>>(),
                 expected,
                 "{directory}"
             );
+        }
+    }
+
+    #[test]
+    fn sibling_resolution_matches_full_lookup_after_ancestor_changes() {
+        let (_guard, store) = test_store("sibling-resolution");
+        let snapshot = fixture_snapshot(store);
+        for variant in 0..5 {
+            let mut vfs = VirtualFs::new(snapshot.clone());
+            match variant {
+                0 => {}
+                1 => {
+                    vfs.unlink(&path("src/nested/b.txt")).unwrap();
+                    vfs.write(&path("src/nested/new.txt"), b"new").unwrap();
+                }
+                2 => vfs.rename(&path("src/nested"), &path("moved")).unwrap(),
+                3 | 4 => {
+                    vfs.remove_tree(&path("src")).unwrap();
+                    if variant == 4 {
+                        vfs.write(&path("src"), b"not a directory").unwrap();
+                    }
+                    // Even an explicit child cannot outlive a hidden ancestor.
+                    let child = path("src/nested/b.txt");
+                    let node = VirtualFs::new(snapshot.clone()).resolve(&child).unwrap();
+                    vfs.overlay.insert(child, OverlayEntry::Present(node));
+                }
+                _ => unreachable!(),
+            }
+            let candidates: BTreeSet<_> = vfs
+                .base
+                .inner
+                .nodes
+                .keys()
+                .chain(vfs.overlay.keys())
+                .cloned()
+                .collect();
+            for parent in [".", "src", "src/nested", "moved", "missing"] {
+                let parent = path(parent);
+                let expected: Vec<_> = candidates
+                    .iter()
+                    .filter(|child| child.parent().as_ref() == Some(&parent))
+                    .filter(|child| vfs.resolve_ref(child).is_some())
+                    .cloned()
+                    .collect();
+                let actual: Vec<_> = vfs.visible_direct_children(&parent).cloned().collect();
+                assert_eq!(actual, expected, "variant {variant}, {parent}");
+                assert_eq!(
+                    vfs.listing_digest(&actual),
+                    DirectoryDigest::digest_entries(expected.iter().map(|child| {
+                        (child, vfs.resolve_ref(child).unwrap().node.expected_state())
+                    })),
+                    "variant {variant}, {parent}"
+                );
+            }
         }
     }
 
@@ -2321,14 +3303,14 @@ mod tests {
         vfs.write(&path("src/overlay.txt"), b"overlay").unwrap();
         vfs.rename(&path("src"), &path("destination")).unwrap();
 
-        assert!(!vfs.exists(&path("src/overlay.txt")));
+        assert!(!vfs.exists(&path("src/overlay.txt")).unwrap());
         assert_eq!(
             vfs.read(&path("destination/overlay.txt")).unwrap(),
             b"overlay"
         );
         vfs.mkdir(&path("src"), 0o755).unwrap();
         assert!(vfs.read_dir(&path("src")).unwrap().is_empty());
-        assert!(vfs.exists(&path("destination/nested/b.txt")));
+        assert!(vfs.exists(&path("destination/nested/b.txt")).unwrap());
     }
 
     #[test]
@@ -2370,7 +3352,7 @@ mod tests {
 
         vfs.read(&path("src/a.txt")).unwrap();
         vfs.read_dir(&path("src")).unwrap();
-        assert!(!vfs.exists(&path("missing")));
+        assert!(!vfs.exists(&path("missing")).unwrap());
         vfs.write(&path("created.txt"), b"new").unwrap();
 
         assert!(vfs.read_set()[&path("src/a.txt")].content.is_some());
@@ -2428,25 +3410,170 @@ mod tests {
 
     #[test]
     fn lazy_rename_diff_is_stable_across_repeated_generation() {
-        let (_guard, store) = test_store("lazy-rename");
-        let expected = stamp(NodeKind::File, 5, 91);
+        for (source, destination) in [("z.txt", "a.txt"), ("a.txt", "z.txt")] {
+            let (_guard, store) = test_store("lazy-rename");
+            let expected = stamp(NodeKind::File, 5, 91);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let loader_calls = Arc::clone(&calls);
+            let mut builder = SnapshotBuilder::new(store);
+            builder
+                .add_lazy(path(source), expected, move |stamp| {
+                    loader_calls.fetch_add(1, Ordering::Relaxed);
+                    Ok(CapturedContent {
+                        bytes: b"hello".to_vec(),
+                        before: stamp,
+                        after: stamp,
+                    })
+                })
+                .unwrap();
+            let mut vfs = VirtualFs::new(builder.build().unwrap());
+            vfs.rename(&path(source), &path(destination)).unwrap();
+
+            let first = vfs.canonical_diff().unwrap();
+            let second = vfs.canonical_diff().unwrap();
+            assert_eq!(first, second);
+            assert_eq!(
+                first.metrics(),
+                CanonicalDiffMetrics {
+                    candidate_paths: 2,
+                    expanded_delete_paths: 1,
+                    changed_paths: 2,
+                    materialized_after_bytes: 5,
+                }
+            );
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    #[test]
+    fn diff_candidates_match_full_scan_after_nested_deletes_and_recreation() {
+        let (_guard, store) = test_store("diff-candidate-oracle");
         let mut builder = SnapshotBuilder::new(store);
-        builder
-            .add_lazy(path("z.txt"), expected, move |stamp| {
-                Ok(CapturedContent {
-                    bytes: b"hello".to_vec(),
-                    before: stamp,
-                    after: stamp,
+        for directory in ["!", "a", "a!", "a-", "a0", "ab"] {
+            builder.add_directory(path(directory), 0o755).unwrap();
+            builder
+                .add_directory(path(&format!("{directory}/deep")), 0o755)
+                .unwrap();
+            builder
+                .add_file(path(&format!("{directory}/deep/file")), b"same", 0o644)
+                .unwrap();
+        }
+        let base = builder.build().unwrap();
+        let before = VirtualFs::new(base.clone())
+            .materialized_final_state()
+            .unwrap();
+        let mut vfs = VirtualFs::new(base);
+        vfs.remove_tree(&path("a")).unwrap();
+        vfs.remove_tree(&path("a!")).unwrap();
+        vfs.mkdir(&path("a"), 0o755).unwrap();
+        vfs.write(&path("a/new"), b"new").unwrap();
+        vfs.rename(&path("ab"), &path("a-moved")).unwrap();
+        vfs.mkdir(&path("new"), 0o755).unwrap();
+        vfs.write(&path("new/file"), b"temporary").unwrap();
+        vfs.remove_tree(&path("new")).unwrap();
+
+        let diff = vfs.canonical_diff().unwrap();
+        let after = vfs.materialized_final_state().unwrap();
+        let expected: Vec<_> = before
+            .keys()
+            .chain(after.keys())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|path| {
+                let before = before.get(path).copied();
+                let after = after.get(path).copied();
+                (before != after).then(|| DiffEntry {
+                    path: path.clone(),
+                    before,
+                    after,
+                    kind: classify_diff(before, after),
                 })
             })
-            .unwrap();
-        let mut vfs = VirtualFs::new(builder.build().unwrap());
-        vfs.rename(&path("z.txt"), &path("a.txt")).unwrap();
+            .collect();
+        assert_eq!(diff.entries(), expected);
+        let mut encoded = Vec::new();
+        for entry in &expected {
+            encode_diff_entry(entry, &mut encoded);
+        }
+        assert_eq!(diff.digest(), DiffDigest::digest_canonical(&encoded));
 
-        let first = vfs.canonical_diff().unwrap();
-        let second = vfs.canonical_diff().unwrap();
-        assert_eq!(first, second);
-        assert_eq!(first.entries().len(), 2);
+        // A deliberately unoptimized independent scan verifies the exact union,
+        // including tombstones for paths that never existed in the base.
+        let mut expanded = BTreeSet::new();
+        for (root, entry) in &vfs.overlay {
+            if matches!(entry, OverlayEntry::Tombstone) {
+                expanded.extend(before.keys().filter(|candidate| candidate.is_within(root)));
+            }
+        }
+        let candidates: BTreeSet<_> = vfs
+            .overlay
+            .keys()
+            .chain(expanded.iter().copied())
+            .filter(|path| !path.is_root())
+            .collect();
+        assert_eq!(diff.metrics().candidate_paths, candidates.len());
+        assert_eq!(diff.metrics().expanded_delete_paths, expanded.len());
+        assert_eq!(diff.metrics().changed_paths, expected.len());
+        assert_eq!(diff.metrics().materialized_after_bytes, 7);
+        assert_eq!(diff, vfs.canonical_diff().unwrap());
+    }
+
+    #[test]
+    fn point_resolution_matches_ancestor_first_oracle() {
+        for seed in 0..16 {
+            let (_guard, store) = test_store("point-resolution-oracle");
+            let mut vfs = VirtualFs::new(property_snapshot(store));
+            let mut random = Lcg::new(seed);
+            for _ in 0..24 {
+                let mut queries: BTreeSet<_> = vfs
+                    .base
+                    .inner
+                    .nodes
+                    .keys()
+                    .chain(vfs.overlay.keys())
+                    .cloned()
+                    .collect();
+                queries.extend(
+                    queries
+                        .clone()
+                        .into_iter()
+                        .map(|path| path.join("missing").unwrap()),
+                );
+                for query in queries {
+                    let shadowed =
+                        std::iter::successors(query.parent(), VPath::parent).any(|ancestor| {
+                            match vfs.overlay.get(&ancestor) {
+                                Some(OverlayEntry::Tombstone) => true,
+                                Some(OverlayEntry::Present(node)) => {
+                                    node.node.state.kind() != NodeKind::Directory
+                                }
+                                None => false,
+                            }
+                        });
+                    let expected = if shadowed {
+                        None
+                    } else {
+                        match vfs.overlay.get(&query) {
+                            Some(OverlayEntry::Tombstone) => None,
+                            Some(OverlayEntry::Present(node)) => {
+                                Some((node.node.state(), node.base_origin.clone()))
+                            }
+                            None => vfs
+                                .base
+                                .inner
+                                .nodes
+                                .get(&query)
+                                .map(|node| (node.state(), Some(query.clone()))),
+                        }
+                    };
+                    let actual = vfs
+                        .resolve_ref(&query)
+                        .map(|node| (node.node.state(), node.base_origin.cloned()));
+                    assert_eq!(actual, expected, "seed {seed}, path {query}");
+                }
+                apply_generated_operation(&mut vfs, &mut random);
+            }
+        }
     }
 
     #[test]

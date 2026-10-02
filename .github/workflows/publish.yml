@@ -79,7 +79,9 @@ jobs:
           before-script-linux: |
             mkdir -p python-data/scripts
             cargo build --package vsh-monty-worker --release --locked --target ${{ matrix.platform.target }}
+            cargo build --package vsh-bash --no-default-features --features worker --bin vsh-bash-worker --release --locked --target ${{ matrix.platform.target }}
             cp target/${{ matrix.platform.target }}/release/vsh-monty-worker python-data/scripts/vsh-monty-worker
+            cp target/${{ matrix.platform.target }}/release/vsh-bash-worker python-data/scripts/vsh-bash-worker
       - name: Install and exercise built wheel
         shell: bash
         env:
@@ -251,7 +253,7 @@ jobs:
         run: >-
           python3 release/validate_artifacts.py release-dist
           --version "${{ needs.metadata.outputs.version }}"
-          --wheel-count 20 --crate-count 10 --python-surface both --require-full-matrix
+          --wheel-count 20 --crate-count 12 --python-surface both --require-full-matrix
       - name: Upload verified manifest
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -303,6 +305,8 @@ jobs:
           publish_and_wait vsh-store
           publish_and_wait vsh-vfs
           publish_and_wait vsh-policy
+          publish_and_wait vsh-execution
+          publish_and_wait vsh-bash
           publish_and_wait vsh-commit
           publish_and_wait vsh-monty
           publish_and_wait vsh-runtime

@@ -22,7 +22,15 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.usage import UsageLimits
 from pydantic_core import to_jsonable_python
 
-from vsh import HookedRuntime, HookScope, RunMode, RunRequest, VshExecutionError, VshStaleError
+from vsh import (
+    BashConfig,
+    HookedRuntime,
+    HookScope,
+    RunMode,
+    RunRequest,
+    VshExecutionError,
+    VshStaleError,
+)
 from vsh.pydantic_ai import CommitJudge, DecisionCommitJudge, JudgeReport, VshCapability
 
 
@@ -54,6 +62,38 @@ def response(info: AgentInfo, data: dict[str, Any], **updates: object) -> ModelR
 
 def accepting_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     return response(info, payload(messages))
+
+
+def test_bash_judge_uses_bound_canonical_evidence_not_intent(tmp_path: Path) -> None:
+    (tmp_path / "config.txt").write_text("before")
+    observed: list[dict[str, Any]] = []
+
+    def inspect(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        data = payload(messages)
+        observed.append(data)
+        assert data["execution"]["language"] == "bash"
+        assert data["execution"]["exit_code"] == 0 and data["execution"]["complete"]
+        assert data["execution"]["evidence_digest"]
+        assert data["changes"][0]["path"] == "config.txt"
+        assert [item["text"] for item in data["contents"]] == ["before", "after"]
+        return response(info, data)
+
+    capability = VshCapability(
+        tmp_path,
+        bash=BashConfig(),
+        policy="strict",
+        hook_handler=CommitJudge(
+            FunctionModel(inspect), content_filter=lambda path: path == "config.txt"
+        ).hook_handler,
+        review_content_bytes=1024,
+    )
+    result = asyncio.run(
+        capability.vsh_run(
+            "printf after > config.txt", "replace the fixture config", language="bash"
+        )
+    )
+    assert result.state == "committed" and result.hook_verdict == "approve"
+    assert len(observed) == 1 and (tmp_path / "config.txt").read_text() == "after"
 
 
 def hooked(

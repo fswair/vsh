@@ -1,0 +1,23 @@
+[package]
+name = "vsh-execution"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+readme.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Shared policy-aware execution boundary for VSH guest adapters"
+publish = ["crates-io"]
+
+[dependencies]
+vsh-policy.workspace = true
+vsh-types.workspace = true
+vsh-vfs.workspace = true
+
+[dev-dependencies]
+vsh-store.workspace = true
+
+[lints]
+workspace = true
