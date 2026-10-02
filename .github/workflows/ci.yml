@@ -117,7 +117,17 @@ jobs:
           CARGO_TARGET_DIR=target/consumer-smoke cargo check
           --manifest-path release/rust-consumer-smoke/Cargo.toml
       - run: cargo install cargo-llvm-cov --version 0.9.0 --locked
+      - name: Verify coverage survives forced worker termination
+        env:
+          RUSTFLAGS: "-C llvm-args=-runtime-counter-relocation"
+          LLVM_PROFILE_FILE_NAME: "vsh-%p-%m%c.profraw"
+        run: python3 scripts/check_coverage_profiles.py
       - name: Enforce stable Rust core coverage floors
+        # Workers are deliberately killed on timeout/protocol failure. Persist
+        # counters continuously instead of racing an exit-time profile flush.
+        env:
+          RUSTFLAGS: "-C llvm-args=-runtime-counter-relocation"
+          LLVM_PROFILE_FILE_NAME: "vsh-%p-%m%c.profraw"
         run: >-
           cargo llvm-cov
           --workspace --all-features --all-targets --locked --json --summary-only
