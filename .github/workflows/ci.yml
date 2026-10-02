@@ -155,4 +155,4 @@ jobs:
         shell: bash
         run: rustup toolchain install 1.95.0 --profile minimal
       - name: Compile and test the complete Windows workspace
-        run: cargo test --workspace --all-targets --locked
+        run: cargo test --workspace --all-targets --locked -- --nocapture

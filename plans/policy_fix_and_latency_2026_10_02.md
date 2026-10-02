@@ -118,6 +118,24 @@ Logs and coverage JSON are in `target/stable-readiness-evidence/`.
 A clean hosted candidate run is still required for platform evidence after any
 authorized integration. No commit, push, PR, branch creation or release performed.
 
+### Hosted integration follow-up
+
+After explicit user approval, commit `37806ca465ffdfbe34e39ee0b2efdcc0956b21be`
+was pushed directly to `stable`; no PR/release or main update. CI run 37026031937
+exposed Windows gateway fixture cleanup failures followed by process abort. The
+fixture's Drop removed its directory while its own BaseSnapshot still held pinned
+blob-store directory handles. Release that owned snapshot before removal; retain
+the cleanup assertion and add an explicit release-before-remove regression test.
+Windows uses uncaptured test output so an abort cannot hide earlier failure details.
+This is test-fixture lifetime correction, not removal of production handle pinning.
+
+Linux tests completed, but llvm-profdata failed on a corrupt raw instrumentation
+profile. Preserve that failed log. Do not lower floors, expand source exclusions or
+silently ignore corrupt profiles. Run the corrected candidate through CI again;
+if profiling corruption repeats, investigate its producer rather than declaring
+the coverage check satisfied. All previous local acceptance evidence remains dated
+to its exact tested source. A hosted pass is still pending.
+
 ## System design
 
 Security first: `*` in a policy component always represents the wildcard, including

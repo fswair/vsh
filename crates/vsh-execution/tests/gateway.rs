@@ -14,7 +14,7 @@ static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
 struct Fixture {
     directory: PathBuf,
-    base: BaseSnapshot,
+    base: Option<BaseSnapshot>,
 }
 
 impl Fixture {
@@ -43,19 +43,30 @@ impl Fixture {
             .unwrap();
         Self {
             directory,
-            base: builder.build().unwrap(),
+            base: Some(builder.build().unwrap()),
         }
     }
 
     fn filesystem(&self) -> VirtualFs {
-        VirtualFs::new(self.base.clone())
+        VirtualFs::new(self.base.as_ref().unwrap().clone())
     }
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        // Windows keeps the data directory pinned while the snapshot owns its
+        // blob-store capability. Release it before removing fixture files.
+        drop(self.base.take());
         fs::remove_dir_all(&self.directory).unwrap();
     }
+}
+
+#[test]
+fn fixture_releases_snapshot_handles_before_removing_its_directory() {
+    let fixture = Fixture::new();
+    let directory = fixture.directory.clone();
+    drop(fixture);
+    assert!(!directory.exists());
 }
 
 #[test]
