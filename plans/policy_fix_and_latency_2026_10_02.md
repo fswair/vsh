@@ -1,5 +1,13 @@
 # Wildcard policy correction and remaining latency work — 2026-10-02
 
+Latest target correction: the user clarified that `stable` was a naming mistake
+and requested `main`. The reviewed integration commits are fast-forwarded to main;
+push main without a PR or force-push. The existing main CI and documentation Pages
+workflows apply normally. No package release, tag or deletion of the temporary
+stable branch is requested. Earlier stable references below record the actual
+sequence of decisions, not the final destination. The narrowly accepted performance
+exception remains unchanged.
+
 User authorization: fix the discovered literal-star policy defect and improve the
 remaining performance problems. Preserve the existing dirty worktree and prior raw
 measurements. No push, release, dependency update or paid/network model invocation.
