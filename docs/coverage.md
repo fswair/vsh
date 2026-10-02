@@ -50,7 +50,7 @@ Current stable-toolchain core result:
 | Functions | 77.34% | 70% |
 | Regions | 84.93% | 81% |
 
-The measurement executed 295 Rust tests. The ignore expression affects the threshold
+The measurement executed 296 Rust tests. The ignore expression affects the threshold
 report, not test execution. `vsh-python`
 is loaded and exercised by the Python/PyO3 suite. `vsh-worker` is exercised through
 real subprocess protocol/isolation tests. These boundaries require their own

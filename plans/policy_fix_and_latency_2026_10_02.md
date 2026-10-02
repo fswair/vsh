@@ -136,6 +136,17 @@ if profiling corruption repeats, investigate its producer rather than declaring
 the coverage check satisfied. All previous local acceptance evidence remains dated
 to its exact tested source. A hosted pass is still pending.
 
+Run 37027110708 verifies the fixture lifetime fix: the new cleanup regression and
+32 gateway tests pass on Windows. Four remaining assertions incorrectly require
+Unix-only creation modes (0700/0755 directories and 0644 new files), while the
+existing Windows VFS contract normalizes writable directories/files to 0777/0666.
+Use explicit platform expectations for those four assertions; do not skip tests
+or change production permission behavior. Existing synthetic-node mode preservation
+assertions remain unchanged. Linux coverage and Clippy passed on this run without
+loosening profile merge behavior, floors or exclusions; the prior invalid-profile
+failure remains recorded. Local full coverage after the fixture test: 296 tests,
+84.50691% lines, 77.33940% functions, 84.93183% regions.
+
 ## System design
 
 Security first: `*` in a policy component always represents the wildcard, including

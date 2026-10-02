@@ -940,7 +940,10 @@ fn metadata_absence_and_file_directory_lifecycle_use_normal_vfs_preconditions() 
     );
     gateway.mkdir(&root, 0o700).unwrap();
     gateway.write(&file, b"hello").unwrap();
-    assert_eq!(gateway.metadata(&root).unwrap().mode(), 0o700);
+    assert_eq!(
+        gateway.metadata(&root).unwrap().mode(),
+        if cfg!(windows) { 0o777 } else { 0o700 }
+    );
     assert!(gateway.rmdir(&root).is_err());
     gateway.unlink(&file).unwrap();
     gateway.rmdir(&root).unwrap();
@@ -1001,7 +1004,10 @@ fn tree_copy_preserves_directory_mode_and_preflights_payload_limits() {
             .unwrap(),
         b"hello"
     );
-    assert_eq!(filesystem.metadata(&destination).unwrap().mode(), 0o755);
+    assert_eq!(
+        filesystem.metadata(&destination).unwrap().mode(),
+        if cfg!(windows) { 0o777 } else { 0o755 }
+    );
     assert_eq!(budget.stats().read_bytes, 11);
     assert_eq!(budget.stats().write_bytes, 11);
     let mut filesystem = fixture.filesystem();
@@ -1301,7 +1307,7 @@ fn handle_preparation_preserves_modes_bytes_and_deferred_content_accounting() {
         assert!(filesystem.write_set().contains_key(&path), "{mode:?}");
         assert_eq!(
             filesystem.metadata(&path).unwrap().mode(),
-            0o644,
+            if cfg!(windows) { 0o666 } else { 0o644 },
             "{mode:?}"
         );
     }
@@ -1392,7 +1398,7 @@ fn directory_creation_preflights_ancestors_and_handles_existing_nodes_explicitly
             .metadata(&VPath::parse("blocked").unwrap())
             .unwrap()
             .mode(),
-        0o700
+        if cfg!(windows) { 0o777 } else { 0o700 }
     );
     assert!(
         gateway
