@@ -58,11 +58,10 @@ it is **not a model explanation**. Choose `CommitJudge` when detailed, cited fee
 is required. See the official [TypeSafe provider documentation](https://pydantic.dev/docs/ai/models/typesafe/).
 
 Install `vsh-python[typesafe]==0.6.0`, or use `uv sync --extra typesafe` in a checkout.
-The [detailed JEV tutorial](../tutorials/pydantic-ai-jev.md) uses the Experiential Labs
-endpoint with an explicit `TypeSafeProvider(base_url=..., api_key=...)`, synthetic-only
-preview reviews and capability wiring. The older TypeSafe shorthand below uses that
-provider's default endpoint and `TYPESAFE_API_KEY`; do not assume the two credentials
-or endpoints are interchangeable.
+Set `TYPESAFE_API_KEY` for Pydantic AI's standard TypeSafe provider. The
+[detailed JEV tutorial](../tutorials/pydantic-ai-jev.md) covers synthetic-only preview
+reviews and capability wiring using this same standard integration, without a custom
+endpoint or HTTP client.
 
 ```python
 from vsh.pydantic_ai import DecisionCommitJudge, VshCapability

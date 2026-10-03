@@ -4,7 +4,7 @@ This tutorial adds a separate Pydantic AI model as a VSH commit judge. The main 
 proposes filesystem work; the judge receives the exact simulated transaction and may
 approve it, request a corrected second review, or reject it.
 
-For JEV's categorical decision surface and the Experiential Labs endpoint, use the
+For JEV's categorical decision surface through the standard TypeSafe provider, use the
 [JEV tutorial](pydantic-ai-jev.md). This page uses `CommitJudge` and a generated,
 evidence-citing report instead.
 

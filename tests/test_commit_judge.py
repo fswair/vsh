@@ -832,7 +832,10 @@ def test_service_configuration_example_commits_safe_change_and_returns_review() 
     assert "Restore require_auth" in unsafe["feedback"]
 
 
-def test_jev_preview_tutorial_runs_offline_without_committing() -> None:
+def test_jev_preview_tutorial_runs_offline_without_committing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
         [
@@ -862,6 +865,24 @@ def test_jev_preview_tutorial_runs_offline_without_committing() -> None:
         "commit_calls": 0,
         "minimum_confidence": 0.69,
     }
+
+
+def test_jev_preview_tutorial_requires_typesafe_credentials_for_live_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, str(root / "examples/native/jev_preview_review.py")],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr.strip() == "Set TYPESAFE_API_KEY, or run --offline without credentials."
 
 
 @pytest.mark.parametrize("threshold", [None, 0.9, 0.7])

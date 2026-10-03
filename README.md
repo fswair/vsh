@@ -90,8 +90,8 @@ content, effects and intent together. A valid approval can directly commit pendi
 work; native hard-deny and stale checks remain enforced. Review returns actionable
 feedback to the main agent.
 
-For JEV's choice-based review, use `DecisionCommitJudge` with the explicit
-`TypeSafeModel` provider. The [JEV tutorial](https://fswair.github.io/vsh/tutorials/pydantic-ai-jev/)
+For JEV's choice-based review, use `DecisionCommitJudge` with Pydantic AI's standard
+TypeSafe model. The [JEV tutorial](https://fswair.github.io/vsh/tutorials/pydantic-ai-jev/)
 walks through preview-only experiments, evidence boundaries, confidence thresholds,
 and a commit-capable Pydantic AI agent.
 

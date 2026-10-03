@@ -1469,7 +1469,7 @@ This tutorial adds a separate Pydantic AI model as a VSH commit judge. The main 
 proposes filesystem work; the judge receives the exact simulated transaction and may
 approve it, request a corrected second review, or reject it.
 
-For JEV's categorical decision surface and the Experiential Labs endpoint, use the
+For JEV's categorical decision surface through the standard TypeSafe provider, use the
 [JEV tutorial](pydantic-ai-jev.md). This page uses `CommitJudge` and a generated,
 evidence-citing report instead.
 
@@ -1816,7 +1816,7 @@ The main agent or your application prepares a transaction; JEV classifies its ev
 VSH decides whether that response is eligible to authorize the exact transaction.
 
 This tutorial uses VSH **0.6.0**, Pydantic AI **2.52.0**, TypeSafe SDK **0.7.2**, and
-the Experiential Labs `jev-latest` endpoint. Python imports remain `vsh`.
+JEV through Pydantic AI's standard TypeSafe provider. Python imports remain `vsh`.
 
 You will first review synthetic previews **without committing anything**. Only after
 that boundary is clear will you attach the reviewer to a Pydantic AI capability.
@@ -1867,9 +1867,9 @@ Wheels bundle the matching Monty worker. A source checkout needs matching native
 artifacts; follow [Development](../development.md). Do not mix an old worker with
 a newly built extension.
 
-Set `EXPERIENTIAL_API_KEY` through your shell, secret manager, or an ignored `.env`
-file. The name is an application convention used by this example; the provider
-receives the key explicitly. VSH does not load `.env` automatically.
+Set `TYPESAFE_API_KEY` through your shell, secret manager, or an ignored `.env`
+file. Pydantic AI's TypeSafe provider reads this standard environment variable;
+VSH does not load `.env` automatically.
 
 ```bash
 uv run --env-file .env --no-sync python examples/native/jev_preview_review.py
@@ -1879,47 +1879,25 @@ Never commit a real credential or include it in `review_instructions`, intent,
 fixture content, request logs or an agent prompt. Live mode sends the synthetic
 evidence to the provider and may incur charges.
 
-## 2. Configure the endpoint, not just the model name
+## 2. Use the standard TypeSafe model
 
-Pydantic AI's adapter is named `TypeSafeModel`. That name does not mean that an
-Experiential key should be sent to the TypeSafe provider's default endpoint. Configure
-the provider explicitly:
+Use Pydantic AI's default TypeSafe provider. There is no need to set a custom
+endpoint, pass the key manually, or create an HTTP client:
 
 ```python
-import os
-
-import httpx2
 from pydantic_ai.models.typesafe import TypeSafeModel
-from pydantic_ai.providers.typesafe import TypeSafeProvider
 
-client = httpx2.AsyncClient(
-    trust_env=False,
-    follow_redirects=False,
-    timeout=httpx2.Timeout(30.0, connect=10.0),
-)
-jev_model = TypeSafeModel(
-    "jev-latest",
-    provider=TypeSafeProvider(
-        api_key=os.environ["EXPERIENTIAL_API_KEY"],
-        base_url="https://api.experientiallabs.ai",
-        http_client=client,
-    ),
-)
+jev_model = TypeSafeModel("jev-latest")
 ```
 
-The SDK appends `/v1/systemone`; do **not** put that path into `base_url` a second
-time. The pinned adapter accepts an `httpx2.AsyncClient`, not an `httpx.AsyncClient`.
-Close the client after all reviews complete, preferably with `async with`, as in the
-complete examples below. Keeping one client alive avoids reconnecting for every review.
-
-`trust_env=False` prevents ambient proxy configuration from silently rerouting the
-request. Redirects are disabled so this example does not follow a redirect to another
-destination. If your deployment requires a proxy, configure and audit that transport
-deliberately. Keep TLS verification enabled.
+The provider uses `TYPESAFE_API_KEY` and its standard TypeSafe endpoint. You can
+also pass the model name `"typesafe:jev-latest"` directly to `DecisionCommitJudge`,
+as the complete capability example below does. VSH does not override the provider's
+authentication or transport configuration.
 
 `jev-latest` is a moving model alias. Record the actual model/version reported by your
 provider when evaluating behavior; pin an available model version if reproducibility
-requires it. Do not assume a version identifier on one provider exists on another.
+requires it.
 
 ## 3. Write host-owned authorization rules
 
@@ -2151,71 +2129,56 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-import httpx2
 from pydantic_ai import Agent
-from pydantic_ai.models.typesafe import TypeSafeModel
-from pydantic_ai.providers.typesafe import TypeSafeProvider
 
 from vsh import HookScope
 from vsh.pydantic_ai import DecisionCommitJudge, VshCapability
 
 async def main() -> None:
-    async with httpx2.AsyncClient(
-        trust_env=False,
-        follow_redirects=False,
-        timeout=httpx2.Timeout(30.0, connect=10.0),
-    ) as client:
-        judge = DecisionCommitJudge(
-            TypeSafeModel(
-                "jev-latest",
-                provider=TypeSafeProvider(
-                    api_key=os.environ["EXPERIENTIAL_API_KEY"],
-                    base_url="https://api.experientiallabs.ai",
-                    http_client=client,
-                ),
-            ),
-            review_instructions=(
-                "Authorize only service.toml timeout_seconds changing from 10 to 30. "
-                "require_auth, verify_tls and audit_enabled must remain true. "
-                "Reading this config is allowed. Reject removing/disabling controls "
-                "or deleting the file, even temporarily. Other work needs review. "
-                "Inspect all effects, not intent alone; missing evidence needs review."
-            ),
-            content_filter=lambda path: path == "service.toml",
-            minimum_confidence=0.69,
+    judge = DecisionCommitJudge(
+        "typesafe:jev-latest",
+        review_instructions=(
+            "Authorize only service.toml timeout_seconds changing from 10 to 30. "
+            "require_auth, verify_tls and audit_enabled must remain true. "
+            "Reading this config is allowed. Reject removing/disabling controls "
+            "or deleting the file, even temporarily. Other work needs review. "
+            "Inspect all effects, not intent alone; missing evidence needs review."
+        ),
+        content_filter=lambda path: path == "service.toml",
+        minimum_confidence=0.69,
+    )
+    with TemporaryDirectory(prefix="vsh-jev-agent-") as directory:
+        workspace = Path(directory)
+        config = workspace / "service.toml"
+        config.write_text(
+            "timeout_seconds = 10\nrequire_auth = true\n"
+            "verify_tls = true\naudit_enabled = true\n",
+            encoding="utf-8",
         )
-        with TemporaryDirectory(prefix="vsh-jev-agent-") as directory:
-            workspace = Path(directory)
-            config = workspace / "service.toml"
-            config.write_text(
-                "timeout_seconds = 10\nrequire_auth = true\n"
-                "verify_tls = true\naudit_enabled = true\n",
-                encoding="utf-8",
-            )
-            filesystem = VshCapability(
-                workspace,
-                policy="strict",
-                hook_handler=judge.hook_handler,
-                hook_scope=HookScope.ALL_REQUESTS,
-                hook_id="jev-service-policy-v1",
-                review_content_bytes=16_384,
-            )
-            agent = Agent(
-                os.environ["VSH_MAIN_MODEL"],
-                capabilities=[filesystem],
-                instructions=(
-                    "Use the VSH tools for workspace work. Treat pending_approval "
-                    "as unresolved, not success. Follow review feedback; do not "
-                    "retry unchanged work repeatedly or claim your own approval. "
-                    "Report the exact tool outcome and transaction ID."
-                ),
-            )
-            result = await agent.run(
-                "Change service.toml timeout_seconds from 10 to 30. "
-                "Preserve all other settings."
-            )
-            print(result.output)
-            print(config.read_text(encoding="utf-8"))
+        filesystem = VshCapability(
+            workspace,
+            policy="strict",
+            hook_handler=judge.hook_handler,
+            hook_scope=HookScope.ALL_REQUESTS,
+            hook_id="jev-service-policy-v1",
+            review_content_bytes=16_384,
+        )
+        agent = Agent(
+            os.environ["VSH_MAIN_MODEL"],
+            capabilities=[filesystem],
+            instructions=(
+                "Use the VSH tools for workspace work. Treat pending_approval "
+                "as unresolved, not success. Follow review feedback; do not "
+                "retry unchanged work repeatedly or claim your own approval. "
+                "Report the exact tool outcome and transaction ID."
+            ),
+        )
+        result = await agent.run(
+            "Change service.toml timeout_seconds from 10 to 30. "
+            "Preserve all other settings."
+        )
+        print(result.output)
+        print(config.read_text(encoding="utf-8"))
 
 asyncio.run(main())
 ```
@@ -2268,7 +2231,7 @@ approval **can** approve a review-required transaction, subject to native checks
 | Symptom | Check |
 |---|---|
 | No API request occurs | Native/content completeness, content allowlist, written-version evidence, input/work budget and concurrency capacity |
-| Authentication or endpoint error | Correct provider credential; origin-only `base_url`; no duplicated `/v1/systemone`; `httpx2` client |
+| Authentication error | Set `TYPESAFE_API_KEY` for the TypeSafe provider; load `.env` explicitly if used |
 | Safe work remains pending | Both confidence values and evidence completeness; do not equate review with a harmful verdict |
 | Model says approve but hook returns review | Low/missing confidence, contradictory concern or invalid schema |
 | Main agent says “done” but file did not change | Trust the tool's state/transaction and host state, not the agent's narration |
@@ -2970,11 +2933,10 @@ it is **not a model explanation**. Choose `CommitJudge` when detailed, cited fee
 is required. See the official [TypeSafe provider documentation](https://pydantic.dev/docs/ai/models/typesafe/).
 
 Install `vsh-python[typesafe]==0.6.0`, or use `uv sync --extra typesafe` in a checkout.
-The [detailed JEV tutorial](../tutorials/pydantic-ai-jev.md) uses the Experiential Labs
-endpoint with an explicit `TypeSafeProvider(base_url=..., api_key=...)`, synthetic-only
-preview reviews and capability wiring. The older TypeSafe shorthand below uses that
-provider's default endpoint and `TYPESAFE_API_KEY`; do not assume the two credentials
-or endpoints are interchangeable.
+Set `TYPESAFE_API_KEY` for Pydantic AI's standard TypeSafe provider. The
+[detailed JEV tutorial](../tutorials/pydantic-ai-jev.md) covers synthetic-only preview
+reviews and capability wiring using this same standard integration, without a custom
+endpoint or HTTP client.
 
 ```python
 from vsh.pydantic_ai import DecisionCommitJudge, VshCapability

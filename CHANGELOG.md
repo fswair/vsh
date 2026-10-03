@@ -4,14 +4,19 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- JEV tutorials and the preview-only example now use Pydantic AI's standard
+  TypeSafe provider and `TYPESAFE_API_KEY`, without a test-only endpoint override.
+
 ## [0.6.0] - 2026-10-03
 
 ### Added
 
 - `DecisionCommitJudge` for JEV categorical review through Pydantic AI, with
   explicit host instructions, content-sharing authorization, a configurable 0.69
-  confidence threshold, and fail-closed decisions. Includes an Experiential Labs
-  provider setup and a guided synthetic-preview tutorial.
+  confidence threshold, and fail-closed decisions. Includes a guided
+  synthetic-preview tutorial.
 - Opt-in bounded Bash execution through a separate Bashkit worker, with a shared
   policy-aware filesystem gateway, binary-safe output, explicit language selection,
   cancellation and bounded execution evidence. Rust, Python, CLI, MCP and Pydantic AI
