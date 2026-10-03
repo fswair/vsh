@@ -4,8 +4,14 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-03
+
 ### Added
 
+- `DecisionCommitJudge` for JEV categorical review through Pydantic AI, with
+  explicit host instructions, content-sharing authorization, a configurable 0.69
+  confidence threshold, and fail-closed decisions. Includes an Experiential Labs
+  provider setup and a guided synthetic-preview tutorial.
 - Opt-in bounded Bash execution through a separate Bashkit worker, with a shared
   policy-aware filesystem gateway, binary-safe output, explicit language selection,
   cancellation and bounded execution evidence. Rust, Python, CLI, MCP and Pydantic AI
@@ -16,6 +22,14 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Commit judges now receive path-bound resolved before/after text and bounded line
+  diffs alongside canonical evidence, making removed content explicit without
+  changing approval thresholds or content-sharing permissions. Missing evidence or
+  exceeded rendering budgets remains pending review; metadata-only review is preserved.
+- Commit judges now fail closed before model invocation when a file-content write
+  references uncaptured bytes, including transient versions hidden by a safe final
+  diff. Native canonical/read completeness alone is not treated as proof that every
+  intermediate write can be reviewed.
 - Protected wildcard rules now match filenames containing literal `*` characters.
   The policy digest advances to v3; approval, preparation, hook resolution and direct
   commit reject artifacts evaluated under a different policy. Create a fresh preview
@@ -23,6 +37,12 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- Pydantic AI integration now pins version 2.52.0; the optional `typesafe` extra
+  pins TypeSafe SDK 0.7.2. Python imports remain `vsh`; distributions remain
+  `vsh-python` with metadata-only `vbash` mirrors.
+- Judges require path-bound evidence for every written version. Legitimate net-zero
+  writes and temporary-file-and-rename operations such as Bash `sed -i` may therefore
+  require application-owned review when their intermediate content is not captured.
 - Canonical diffs borrow candidate paths, avoid repeated expansion of nested deletion
   tombstones and avoid temporary node/path clones. Lazy materialization, metrics and
   canonical ordering are preserved.

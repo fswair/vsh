@@ -9,7 +9,7 @@ it does not implement a separate filesystem simulator.
 ## Install and launch
 
 ```bash
-python -m pip install 'vsh-python[mcp]==0.5.0'
+python -m pip install 'vsh-python[mcp]==0.6.0'
 vsh serve
 ```
 
@@ -23,10 +23,9 @@ vsh-codemode
 The ten in-program VSH functions and the existing `pathlib` surface are included in
 the current release. See [source installation](../development.md) when developing from a checkout.
 
-The Bash selector, `VSH_ENABLE_BASH`, and binary stream fields described below are
-source-checkout additions, **not included in the published 0.5.0 installation above**.
-Use the [Bash source setup](bash.md#enable-it-explicitly) for those features; the
-published installation remains Monty-only.
+The Bash selector, `VSH_ENABLE_BASH`, and binary stream fields are included in 0.6.0.
+Bash remains an explicit Linux/macOS opt-in; see [Bash setup](bash.md#enable-it-explicitly).
+Monty is the default and remains supported on Windows.
 
 ## Connect a client
 

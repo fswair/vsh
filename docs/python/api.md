@@ -29,7 +29,7 @@ assert normalize_path("src/vsh/./core/../lib.rs") == "src/vsh/lib.rs"
 
 ### `__version__: str`
 
-The Python distribution, extension, Rust workspace, and worker share version `0.5.0`.
+The Python distribution, extension, Rust workspace, and worker share version `0.6.0`.
 
 This is the package version exported by `vsh`; development changes can share that
 version string, so record the checkout revision for reproducible evidence.

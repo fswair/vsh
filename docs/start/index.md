@@ -1,6 +1,6 @@
 # Start with a transaction
 
-VSH runs a bounded Python program against a virtual copy of a workspace. You inspect
+VSH runs a bounded Monty Python or explicitly enabled Bash program against a virtual copy of a workspace. You inspect
 what it would change, then commit that exact result. Python and Rust use the same
 native engine; neither needs a second simulator.
 
@@ -13,24 +13,25 @@ native engine; neither needs a second simulator.
 | MCP client | `vsh-python[mcp]` | `vsh serve` |
 
 ```bash
-python -m pip install vsh-python==0.5.0
+python -m pip install vsh-python==0.6.0
 ```
 
 ```toml
 [dependencies]
-vsh = "=0.5.0"
+vsh = "=0.6.0"
 ```
 
 Python wheels bundle the worker. Rust applications must deploy a matching
 `vsh-monty-worker` executable; see [Rust setup](../rust/index.md). The `vbash`
 packages are metadata-only mirrors, not a different engine. Prefer the primary names.
 
-!!! note "VSH 0.5.0 surface"
+!!! note "VSH 0.6.0 surface"
 
-    The Monty 0.0.22 integration, ten in-sandbox `vsh_*` functions and the September 5
-    optimizations are part of VSH 0.5.0. The Python wheel bundles the matching worker;
-    native Rust deployments must supply it as described below. Contributors can use
-    the [source build](../development.md).
+    Monty 0.0.22 remains the default frontend. This release adds opt-in bounded Bash
+    on Unix and JEV commit review through Pydantic AI. Python wheels bundle matching
+    workers (Monty on all supported platforms, Bash on Linux/macOS); native Rust
+    deployments must supply their workers. See [Bash setup](../integrations/bash.md)
+    and the [JEV tutorial](../tutorials/pydantic-ai-jev.md).
 
 ## A complete first run
 

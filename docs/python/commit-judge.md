@@ -4,8 +4,7 @@
 transaction and can approve `pending_approval` work directly, without an additional
 human approval. Native hard-deny, stale detection and single-use commit still apply.
 
-This surface is in the unreleased development tree. Use the [checkout build](../development.md)
-until it is included in a registry release.
+VSH 0.6.0 includes both the general `CommitJudge` and categorical `DecisionCommitJudge`.
 
 Start with the [guided judge tutorial](../tutorials/pydantic-ai-judge.md) for a complete
 main-agent → simulation → judge → feedback flow. This page documents the Python surface
@@ -52,14 +51,18 @@ authorize sending it to an external provider.
 
 ## JEV decision-model reviewer
 
-The checkout-only `DecisionCommitJudge` supports TypeSafe JEV through Pydantic AI.
+`DecisionCommitJudge` supports JEV through Pydantic AI's TypeSafe model adapter.
 Unlike `CommitJudge`, it requests only categorical decisions, not generated prose
 or evidence citations. Feedback is application-written text for the selected category;
 it is **not a model explanation**. Choose `CommitJudge` when detailed, cited feedback
 is required. See the official [TypeSafe provider documentation](https://pydantic.dev/docs/ai/models/typesafe/).
 
-Install `vsh-python[typesafe]` once released, or use `uv sync --extra typesafe` in
-a checkout. Configure `TYPESAFE_API_KEY` without putting it in source control.
+Install `vsh-python[typesafe]==0.6.0`, or use `uv sync --extra typesafe` in a checkout.
+The [detailed JEV tutorial](../tutorials/pydantic-ai-jev.md) uses the Experiential Labs
+endpoint with an explicit `TypeSafeProvider(base_url=..., api_key=...)`, synthetic-only
+preview reviews and capability wiring. The older TypeSafe shorthand below uses that
+provider's default endpoint and `TYPESAFE_API_KEY`; do not assume the two credentials
+or endpoints are interchangeable.
 
 ```python
 from vsh.pydantic_ai import DecisionCommitJudge, VshCapability
@@ -385,6 +388,21 @@ The JSON packet assigns `change:N`, `effect:N` and `content:N` references. Appro
 must cite every changed entry and included content record; invalid references cannot
 authorize commit. This validates traceability, not the semantic correctness of a model.
 
+Both judge types also receive `resolved_changes`: a readable view of each non-metadata
+canonical change, linked to the same `change:N` reference. Each entry contains its
+path, kind, exact `before_text` and `after_text`, and a unified line diff. The model
+does not have to join blob hashes to discover that a security setting disappeared
+inside an otherwise routine edit. The original canonical nodes, content records and
+ordered effects remain in the packet; the readable view does not replace them.
+
+Text is resolved only from authorized evidence with the same **path and blob ID**.
+An absent node or directory has `null` text; an empty file has `""`. Diff headers use
+fixed `before`/`after` labels, with filenames kept in the JSON path field. Missing
+final newlines are marked explicitly. Metadata-only changes stay in `changes` and
+`effects`, without a `resolved_changes` entry: native review does not capture file
+bodies just to review a mode change. An empty textual diff never proves that an
+operation is harmless; node kinds, modes, deletions, and read effects still matter.
+
 When enabled, eligible old file contents are captured while the snapshot is alive,
 before final transaction binding. The canonical diff and policy are recomputed after
 capture. Hook delivery then uses hash-verified immutable blobs, including after restart;
@@ -395,6 +413,24 @@ Native `evidence_complete` describes structural hook evidence. The separate
 Oversized or read-protected content remains incomplete; no truncated blob is presented
 as a complete file. Metadata effects can retain stamps; they are observations rather
 than a promise that every intermediate file version was rendered.
+
+The judges additionally require every file-content write's resulting identity to
+resolve to authorized, path-bound content. A transient write overwritten or deleted
+before the final diff can be absent from native content evidence even when
+`content_complete` is true. In that case both judges return review **before calling
+the model**. They do not infer the missing bytes from intent or the safe final state,
+or fetch more content from the host. A legitimate net-zero or multi-step write may
+therefore need an application-owned reviewer. This check covers written versions;
+it does not turn metadata stamps into historical file contents.
+
+Temporary-file-and-rename edits, such as Bash `sed -i`, can also take this review
+path when only the destination's bytes were captured. Having the same blob at an
+authorized destination does not supply path-bound evidence for the temporary path.
+
+The readable diff is a presentation aid, not an independent safety check. A model
+can still misclassify clearly supplied evidence with high confidence. Keep exact
+security invariants in deterministic policy or hooks, and measure your model against
+both harmful changes and safe controls before enabling automatic approval.
 
 The original program and dependencies have bound digests; the packet does not contain
 the full original program or the main agent's conversation history. Supply review rules
@@ -451,6 +487,16 @@ queue. Output defaults to 2,048 tokens; reports and feedback have additional bou
 Set `max_output_tokens=None` only for model backends that reject a provider-level output
 limit. The structured report bounds, one-request usage limit, timeout and fail-closed
 behavior remain active, but the provider request itself is no longer pre-capped by VSH.
+
+Both judge types bound text-diff generation before making a model request. Identical
+text skips line comparison; otherwise the sum of
+`(before_line_count + 1) * (after_line_count + 1)` across changed entries must not exceed
+1,000,000. This bounds worst-case line matching rather than relying on the model-call
+timeout to interrupt synchronous CPU work. Exceeding this budget returns review.
+`max_input_bytes` includes all serialized evidence, including the resolved text and
+diff. Expanded evidence can therefore reach the limit sooner than raw content alone.
+Unresolvable content or an oversized packet also returns review; VSH never sends a
+silently truncated diff as complete evidence.
 
 Optional `usage_limits` accepts Pydantic AI `UsageLimits` and must retain a positive
 request limit. Token/cost accounting may only become available after a provider

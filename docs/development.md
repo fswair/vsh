@@ -15,8 +15,8 @@ locked in `uv.lock`. Zensical is exactly pinned to `0.0.57`.
 
 ## Build the current native surface
 
-This development tree identifies as `0.5.0` and includes the Monty 0.0.22 functions
-and September 5 optimizations. From a checkout with the environment bootstrapped,
+This development tree identifies as `0.6.0` and includes Monty 0.0.22, optional
+Unix Bash execution and JEV commit review. From a checkout with the environment bootstrapped,
 build matching optimized artifacts:
 
 ```bash

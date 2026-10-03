@@ -30,7 +30,7 @@ jobs:
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           version: "0.12.1"
-      - run: uv sync --frozen --all-groups --extra mcp
+      - run: uv sync --frozen --all-groups --extra mcp --extra typesafe
       - run: >-
           uv export --quiet --frozen --all-groups --extra mcp --extra typesafe
           --no-emit-project
@@ -145,7 +145,7 @@ jobs:
       - run: cargo audit --file release/rust-consumer-smoke/Cargo.lock
       - run: cargo install cargo-deny --version 0.20.2 --locked
       - run: cargo deny --all-features --locked check
-      - run: uv sync --frozen --all-groups --extra mcp
+      - run: uv sync --frozen --all-groups --extra mcp --extra typesafe
       - run: uv build
       - run: >-
           uv run pytest

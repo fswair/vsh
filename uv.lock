@@ -1835,7 +1835,7 @@ wheels = [
 
 [[package]]
 name = "vsh-python"
-version = "0.5.0"
+version = "0.6.0"
 source = { editable = "." }
 
 [package.optional-dependencies]

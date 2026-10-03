@@ -52,7 +52,7 @@ host mutation.
 
 ## Version and supply-chain contract
 
-All workspace packages share version `0.5.0`, Rust 1.95.0, edition 2024, and Apache-2.0.
+All workspace packages share version `0.6.0`, Rust 1.95.0, edition 2024, and Apache-2.0.
 Direct external crates are exact-pinned, the lockfile is committed, workspace crates
 forbid unsafe code, and CI runs RustSec plus license/source/duplicate policy checks.
 

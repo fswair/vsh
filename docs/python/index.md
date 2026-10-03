@@ -5,11 +5,11 @@ runtime used by native applications. It does not simulate files in Python or fal
 to a second implementation.
 
 ```bash
-python -m pip install vsh-python==0.5.0
+python -m pip install vsh-python==0.6.0
 ```
 
 CPython 3.11–3.14 wheels bundle a matching supervised worker. MCP is optional:
-`vsh-python[mcp]==0.5.0`. The metadata-only `vbash` mirror installer depends on
+`vsh-python[mcp]==0.6.0`. The metadata-only `vbash` mirror installer depends on
 the matching primary distribution and adds no import package.
 
 Pydantic AI support is optional too: install `vsh-python[pydantic-ai]` and attach

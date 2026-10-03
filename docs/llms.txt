@@ -10,7 +10,7 @@ Use the links below for focused documentation. Use llms-full.txt when a single c
 
 ## Start here
 
-- [Start with a transaction](https://fswair.github.io/vsh/start/): VSH runs a bounded Python program against a virtual copy of a workspace. You inspect what it would change, then commit that exact result. Python and Rust use the same native engine; neither needs...
+- [Start with a transaction](https://fswair.github.io/vsh/start/): VSH runs a bounded Monty Python or explicitly enabled Bash program against a virtual copy of a workspace. You inspect what it would change, then commit that exact result. Python and Rust use the...
 
 - [How VSH works](https://fswair.github.io/vsh/start/how-it-works/): Think of VSH as a transaction engine for workspace transformations, not a shell with a dry-run flag. The guest executes real supported operations. Their effects are recorded in a copy-on-write...
 
@@ -35,6 +35,8 @@ Use the links below for focused documentation. Use llms-full.txt when a single c
 - [Tutorial: deterministic Pydantic AI review](https://fswair.github.io/vsh/tutorials/pydantic-ai-deterministic/): This tutorial builds a Pydantic AI filesystem capability whose commit decision is made entirely by local Python code. The example permits exactly one final service.toml value and sends every other...
 
 - [Tutorial: evidence-first LLM commit review](https://fswair.github.io/vsh/tutorials/pydantic-ai-judge/): This tutorial adds a separate Pydantic AI model as a VSH commit judge. The main agent proposes filesystem work; the judge receives the exact simulated transaction and may approve it, request a...
+
+- [Tutorial: evidence-first commit review with JEV](https://fswair.github.io/vsh/tutorials/pydantic-ai-jev/): Use JEV as a separate, host-configured reviewer for changes proposed inside VSH. The main agent or your application prepares a transaction; JEV classifies its evidence; VSH decides whether that...
 
 ## Python SDK
 
@@ -88,7 +90,7 @@ Use the links below for focused documentation. Use llms-full.txt when a single c
 
 - [Development](https://fswair.github.io/vsh/development/): The workspace builds one Rust core, a PyO3 wheel, a supervised worker, and this Zensical documentation site.
 
-- [Release process](https://fswair.github.io/vsh/release/): The release workflow builds both language surfaces from one tag without publishing anything during an ordinary branch build or manual workflowdispatch run.
+- [Release process](https://fswair.github.io/vsh/release/): The release workflow builds both language surfaces from one tag. Ordinary branch builds and default manual dispatches do not publish packages. A separate, explicit source-distribution recovery...
 
 ## Additional reference
 

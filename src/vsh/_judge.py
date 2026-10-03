@@ -10,6 +10,8 @@ import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from difflib import unified_diff
+from io import StringIO
 from threading import BoundedSemaphore
 from typing import Annotated, Literal
 
@@ -23,6 +25,8 @@ from ._native import HookDecision, NodeSummary, RequestEvent
 
 _LOGGER = logging.getLogger("vsh.judge")
 _MAX_ITEMS = 128
+# Bound difflib's worst-case line matching across the entire transaction.
+_MAX_DIFF_WORK = 1_000_000
 
 
 class JudgeReport(BaseModel):
@@ -357,6 +361,7 @@ def _render_evidence(
             }
         )
     content_rows: list[dict[str, object]] = []
+    content_text: dict[tuple[str, str], str] = {}
     content_bytes = 0
     for index, content in enumerate(contents):
         if content_filter is None or content_filter(content.path) is not True:
@@ -377,6 +382,47 @@ def _render_evidence(
         references.add(ref)
         required.add(ref)
         content_rows.append({"ref": ref, "path": content.path, "blob": content.blob, "text": text})
+        content_text[content.path, content.blob] = text
+    # Native content_complete covers canonical sides and reads, not every write.
+    # A safe final state cannot stand in for an uncaptured intermediate version.
+    for effect in effects:
+        if effect.operation in {"create", "modify_content"}:
+            for path in effect.paths:
+                _node_text(effect.after, path, content_text)
+    resolved_changes: list[dict[str, object]] = []
+    diff_work = 0
+    for index, change in enumerate(changes):
+        # Native review intentionally omits file bytes for metadata-only changes.
+        # The canonical nodes and ordered effects already describe those changes.
+        if change.kind == "metadata_change":
+            continue
+        before = _node_text(change.before, change.path, content_text)
+        after = _node_text(change.after, change.path, content_text)
+        display = ""
+        if before != after:
+            # StringIO splits only at LF, preserving CRLF and other UTF-8 text.
+            before_lines = StringIO(before or "").readlines()
+            after_lines = StringIO(after or "").readlines()
+            diff_work += (len(before_lines) + 1) * (len(after_lines) + 1)
+            if diff_work > _MAX_DIFF_WORK:
+                raise _EvidenceError("Text diff exceeds the judge comparison-work budget.")
+            # Keep untrusted filenames in the JSON path field, not diff headers.
+            display = "".join(
+                line if line.endswith("\n") else line + "\n\\ No newline at end of file\n"
+                for line in unified_diff(
+                    before_lines, after_lines, fromfile="before", tofile="after"
+                )
+            )
+        resolved_changes.append(
+            {
+                "ref": f"change:{index}",
+                "path": change.path,
+                "kind": change.kind,
+                "before_text": before,
+                "after_text": after,
+                "unified_diff": display,
+            }
+        )
     payload = {
         "transaction": event.transaction,
         "event_id": event.event_id,
@@ -422,6 +468,7 @@ def _render_evidence(
         "changes": change_rows,
         "effects": effect_rows,
         "contents": content_rows,
+        "resolved_changes": resolved_changes,
         "required_approval_references": sorted(required or {"policy"}),
     }
     prompt = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
@@ -434,6 +481,19 @@ def _render_evidence(
         frozenset(required or {"policy"}),
         hashlib.sha256(encoded).hexdigest(),
     )
+
+
+def _node_text(
+    node: NodeSummary | None, path: str, content_text: dict[tuple[str, str], str]
+) -> str | None:
+    if node is None or node.kind == "directory":
+        return None
+    text = content_text.get((path, node.content or ""))
+    if text is None:
+        raise _EvidenceError(
+            "Changed or written content cannot be resolved from authorized path-bound evidence."
+        )
+    return text
 
 
 def _node(node: NodeSummary | None) -> dict[str, object] | None:

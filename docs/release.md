@@ -1,11 +1,13 @@
 # Release process
 
-The release workflow builds both language surfaces from one tag without publishing
-anything during an ordinary branch build or manual `workflow_dispatch` run.
+The release workflow builds both language surfaces from one tag. Ordinary branch
+builds and default manual dispatches do not publish packages. A separate, explicit
+source-distribution recovery option is described below.
 
 ## Artifact matrix
 
-`workflow_dispatch` is the safe build-only rehearsal. It produces and validates:
+`workflow_dispatch` with `publish_sdist_only=false` is the build-only rehearsal.
+It produces and validates:
 
 - CPython 3.11, 3.12, 3.13, and 3.14 wheels;
 - manylinux 2.28 x86_64 and aarch64;
@@ -14,7 +16,8 @@ anything during an ordinary branch build or manual `workflow_dispatch` run.
 - one installable sdist containing the complete locked Rust workspace needed to build
   the matching extension and worker;
 - one metadata-only `vbash` mirror wheel and sdist exact-pinned to `vsh-python`;
-- ten crates.io archives, explicitly excluding the non-published PyO3 build crate;
+- twelve crates.io archives, including `vsh-execution` and `vsh-bash`, explicitly
+  excluding the non-published PyO3 build crate;
 - a deterministic `SHA256SUMS` manifest.
 
 Every wheel is installed into an empty environment and must complete a real native
@@ -26,8 +29,8 @@ before a publish job is eligible.
 
 ## Publication authority
 
-Only a pushed `v<project.version>` tag enables publication. A manual workflow run does
-not publish. The tag path requires protected GitHub environments:
+Normal full publication requires a pushed `v<project.version>` tag. Creating a GitHub
+Release alone is not the trigger. The tag path uses these GitHub environments:
 
 - `crates-io` with `CARGO_REGISTRY_TOKEN`;
 - `pypi` configured as a PyPI trusted publisher for both `vsh-python` and `vbash`.
@@ -35,14 +38,21 @@ not publish. The tag path requires protected GitHub environments:
 The workflow publishes crates in dependency order and waits for every exact version to
 be visible through the crates.io API before publishing its dependents. `vsh-runtime`
 precedes `vsh`, and `vsh` precedes the mirror crate `vbash`. PyPI publication
-runs only after all ten crates succeed; `vsh-python` is published before the empty
+runs only after all twelve crates succeed; `vsh-python` is published before the empty
 `vbash` mirror distribution. Python artifacts receive GitHub build provenance
 and are uploaded with uv trusted publishing.
 
 Before the first irreversible tag, recheck registry ownership/availability and review
-the release environments. The `vsh`, `vbash`, and `vsh-runtime` crate handles were
-owned by the project account when checked on 2026-09-02, but registry state is not a
-permanent build-time assumption.
+the release environments. On 2026-10-03, all ten existing crate handles were owned
+by `fswair`; `vsh-execution` and `vsh-bash` were available for first publication.
+Registry state is not a permanent build-time assumption.
+
+### Source-distribution recovery
+
+Setting `publish_sdist_only=true` on a manual dispatch is an explicit publishing
+operation, not a rehearsal. It rebuilds, validates, attests and publishes only the
+`vsh-python` sdist through the `pypi` environment. Use it only for deliberate release
+recovery at the intended revision; it does not publish wheels, crates or the mirror.
 
 ## Pinned build supply chain
 
@@ -54,4 +64,6 @@ each `uses:` line in `.github/workflows/publish.yml`. The build tools are exact:
 - Maturin 1.15.0;
 - the dependency versions in `Cargo.lock` and `uv.lock`.
 
-Registry publication occurs only through the explicitly dispatched release workflow.
+Keep the full build-only matrix and main CI green before pushing an immutable release
+tag. Registry publication uses the workflow's scoped token/trusted-publishing authority;
+do not publish from an ad hoc local credential path.

@@ -80,7 +80,7 @@ mod tests {
 
     #[test]
     fn facade_exports_one_versioned_rust_engine() {
-        assert_eq!(VERSION, "0.5.0");
+        assert_eq!(VERSION, "0.6.0");
         assert_eq!(engine_kind(), "rust");
         assert_eq!(VPath::parse("src/lib.rs").unwrap().as_str(), "src/lib.rs");
     }

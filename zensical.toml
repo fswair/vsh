@@ -30,6 +30,7 @@ nav = [
   { "Tutorials" = [
     { "Pydantic AI: deterministic review" = "tutorials/pydantic-ai-deterministic.md" },
     { "Pydantic AI: LLM judge" = "tutorials/pydantic-ai-judge.md" },
+    { "JEV: evidence-first commit review" = "tutorials/pydantic-ai-jev.md" },
   ] },
   { "Python SDK" = [
     "python/index.md",

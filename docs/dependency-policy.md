@@ -222,20 +222,20 @@ The same-workspace VSH packages are project-owned code, not admitted third-party
 dependencies. On 2026-09-02 the crates.io owner API identified `fswair` as owner of
 the transferred `vsh` and `vbash` handles as well as the already published `vsh-*`
 graph. Each manifest permits only `crates-io` publication, and every inter-package
-requirement is the exact lockstep version `=0.5.0`.
+requirement is the exact lockstep version `=0.6.0`.
 
 The intended first-publish order is:
 
 ```text
-vsh-types → vsh-store → vsh-vfs → vsh-policy
-          → vsh-commit + vsh-monty → vsh-runtime → vsh → vbash
-                                                └→ vsh-monty-worker
+vsh-types → vsh-store → vsh-vfs → vsh-policy → vsh-execution → vsh-bash
+          → vsh-commit → vsh-monty → vsh-runtime → vsh → vbash → vsh-monty-worker
 ```
 
 `cargo package --workspace --exclude vsh-python --offline --no-verify --locked` produces
-all ten registry source archives. The explicit exclusion matters because Cargo 1.95
+all twelve registry source archives. The explicit exclusion matters because Cargo 1.95
 also packages a `publish = false` workspace member when a whole workspace is selected.
-Cargo 1.95.0 verifies the dependency-free `vsh-types` archive, then its temporary
+During the earlier 0.5.0 packaging rehearsal, Cargo 1.95.0 verified the dependency-free
+`vsh-types` archive, then its temporary
 multi-package registry currently stops with Cargo's internal `no hash listed for
 vsh-types 0.5.0` error. Dependent dry-runs therefore become executable only in the
 normal publish order after each predecessor exists in crates.io; this is not waived and
@@ -252,5 +252,6 @@ tags remain comments beside each SHA for auditability. setup-uv installs exact u
 The release job builds wheels before it receives any publish authority, installs and
 exercises every wheel, verifies the sdist can rebuild the extension plus separate
 worker from the locked workspace, validates all crate archives, and emits SHA-256
-hashes. Manual dispatch is build-only. Only an
-exact version tag can enter protected crates.io and PyPI environments.
+hashes. Default manual dispatch is build-only. An exact version tag enables the full
+crates.io/PyPI publish path. The separate `publish_sdist_only=true` manual recovery
+option intentionally publishes only the Python sdist; see the [release process](release.md).

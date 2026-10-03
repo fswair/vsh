@@ -22,7 +22,7 @@ vsh = { workspace = true, features = ["bash"] }
 
 [build-dependencies]
 # Keep the separately installed worker package in Maturin's sdist workspace graph.
-vsh-monty-worker = { path = "../vsh-worker", version = "=0.5.0" }
+vsh-monty-worker = { path = "../vsh-worker", version = "=0.6.0" }
 
 [lints]
 workspace = true

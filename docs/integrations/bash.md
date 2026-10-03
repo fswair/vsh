@@ -11,7 +11,7 @@ gets the host's filesystem, environment, executables or network.
 
 ## Enable it explicitly
 
-Python wheels bundle two separate workers. Enabling Bash does not start a worker
+VSH 0.6.0 Python wheels on Linux/macOS bundle two separate workers. Enabling Bash does not start a worker
 until the first Bash call. `worker_path` still selects Monty; the Bash executable is
 selected by `BashConfig.worker_path`, `VSH_BASH_WORKER`, or the wheel's script directory.
 There is no implicit download, shell command lookup or fallback to real filesystem I/O.
@@ -47,8 +47,7 @@ Rust enables only the lightweight host adapter in the application:
 
 ```toml
 [dependencies]
-# Replace this path with the location of your VSH checkout (unpublished feature).
-vsh = { path = "/path/to/vsh/crates/vsh", features = ["bash"] }
+vsh = { version = "=0.6.0", features = ["bash"] }
 ```
 
 ```rust
@@ -66,9 +65,10 @@ let preview = runtime.preview(
 let committed = runtime.commit(preview.transaction, 0)?;
 ```
 
-This surface is implemented in the checkout; it is not a claim that an already
-published 0.5.0 artifact includes these additions. Publishing requires a new release.
-The initial Bash profile is for Unix hosts (Linux/macOS). Windows Bash opt-in is
+This surface is included in VSH 0.6.0. Rust hosts deploy a matching worker separately;
+install it with `cargo install vsh-bash --version '=0.6.0' --locked --no-default-features
+--features worker --bin vsh-bash-worker` or build it from the matching checkout.
+The Bash profile is for Unix hosts (Linux/macOS). Windows Bash opt-in is
 rejected; the existing Monty platform support is unchanged.
 
 Relative Bash worker paths are resolved against the host's current directory when

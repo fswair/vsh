@@ -4,6 +4,10 @@ This tutorial adds a separate Pydantic AI model as a VSH commit judge. The main 
 proposes filesystem work; the judge receives the exact simulated transaction and may
 approve it, request a corrected second review, or reject it.
 
+For JEV's categorical decision surface and the Experiential Labs endpoint, use the
+[JEV tutorial](pydantic-ai-jev.md). This page uses `CommitJudge` and a generated,
+evidence-citing report instead.
+
 Use a judge only after deterministic policy and hooks have handled rules that can be
 expressed exactly. An LLM adds semantic coverage, latency, cost, and model error—it is
 not a replacement for native hard-deny, capability, or stale-state enforcement.

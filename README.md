@@ -19,13 +19,13 @@ Monty / bounded Bash → immutable snapshot → Rust VirtualFs → canonical dif
 VSH is not a host POSIX shell. Monty and the opt-in bounded Bashkit frontend never
 receive a host filesystem mount, process-spawn, network, or ambient environment capability.
 
-The checkout adds `Runtime.open(workspace, bash=BashConfig())` with
+VSH 0.6.0 adds `Runtime.open(workspace, bash=BashConfig())` with
 `runtime.preview(source, language=Language.BASH)`. Rust uses the optional `bash`
 feature and `RuntimeConfig::with_bash`. Both use the same canonical diff, policy,
 review, stale checking and recoverable commit pipeline. See the
 [Bash compatibility guide](docs/integrations/bash.md) for explicit limitations and
-binary-safe examples. These additions require a new release; they do not alter an
-already published wheel/crate.
+binary-safe examples. Bash is opt-in on Linux/macOS; Monty remains the default
+and supports Windows as well.
 
 ## Python
 
@@ -90,11 +90,16 @@ content, effects and intent together. A valid approval can directly commit pendi
 work; native hard-deny and stale checks remain enforced. Review returns actionable
 feedback to the main agent.
 
+For JEV's choice-based review, use `DecisionCommitJudge` with the explicit
+`TypeSafeModel` provider. The [JEV tutorial](https://fswair.github.io/vsh/tutorials/pydantic-ai-jev/)
+walks through preview-only experiments, evidence boundaries, confidence thresholds,
+and a commit-capable Pydantic AI agent.
+
 ## Rust
 
 ```toml
 [dependencies]
-vsh = "=0.5.0"
+vsh = "=0.6.0"
 ```
 
 ```rust,no_run
@@ -182,8 +187,8 @@ See the [threat model](https://fswair.github.io/vsh/threat-model/),
 
 ## Package names
 
-Existing declarations may install `vbash==0.5.0` from PyPI or depend on
-`vbash = "=0.5.0"` from crates.io. Both names are implementation-free mirrors of
+Existing declarations may install `vbash==0.6.0` from PyPI or depend on
+`vbash = "=0.6.0"` from crates.io. Both names are implementation-free mirrors of
 the exact matching VSH release. New projects should use `vsh-python` and `vsh`
 directly; Python code continues to write `import vsh` either way.
 

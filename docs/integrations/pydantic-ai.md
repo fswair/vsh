@@ -11,8 +11,8 @@ Use this page as the integration reference. For a guided build, continue with ei
 
 ## Choose the control layer
 
-The Bash options on this page describe the current source checkout, not the published
-0.5.0 packages. Follow the [Bash source setup](bash.md#enable-it-explicitly) to try them.
+The Bash options on this page are included in VSH 0.6.0. Follow the
+[Bash setup](bash.md#enable-it-explicitly) to enable them on Linux/macOS.
 
 Optional Unix Bash uses `VshCapability(workspace, bash=BashConfig(...))`. The same
 `vsh_run(code, intent, language="bash")` tool enters the shared native transaction

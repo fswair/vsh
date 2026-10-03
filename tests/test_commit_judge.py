@@ -6,7 +6,8 @@ import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from pydantic_ai import Agent, models
@@ -26,8 +27,11 @@ from vsh import (
     BashConfig,
     HookedRuntime,
     HookScope,
+    Language,
+    RequestEvent,
     RunMode,
     RunRequest,
+    Runtime,
     VshExecutionError,
     VshStaleError,
 )
@@ -142,6 +146,349 @@ def test_judge_sees_exact_before_after_and_approves_pending_without_human(tmp_pa
     assert result.hook is not None and result.hook.verdict == "approve"
     assert len(observed) == 1
     assert (tmp_path / "config.txt").read_text() == "after"
+
+
+@pytest.mark.parametrize("judge_type", [CommitJudge, DecisionCommitJudge])
+@pytest.mark.parametrize(
+    ("before", "after", "expected_diff"),
+    [
+        (None, "", ""),
+        (None, "new\n", "--- before\n+++ after\n@@ -0,0 +1 @@\n+new\n"),
+        ("old\n", None, "--- before\n+++ after\n@@ -1 +0,0 @@\n-old\n"),
+        (
+            "timeout = 10\nrequire_auth = true\n",
+            "timeout = 30\n",
+            "--- before\n+++ after\n@@ -1,2 +1 @@\n-timeout = 10\n-require_auth = true\n+timeout = 30\n",
+        ),
+        (
+            "old",
+            "new",
+            "--- before\n+++ after\n@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n",
+        ),
+        (
+            "old\r\n",
+            "new\r\n",
+            "--- before\n+++ after\n@@ -1 +1 @@\n-old\r\n+new\r\n",
+        ),
+        (
+            "old\r",
+            "new\r",
+            "--- before\n+++ after\n@@ -1 +1 @@\n-old\r\n\\ No newline at end of file\n+new\r\n\\ No newline at end of file\n",
+        ),
+        (
+            "α\u2028old\n",
+            "β\u2028new\n",
+            "--- before\n+++ after\n@@ -1 +1 @@\n-α\u2028old\n+β\u2028new\n",
+        ),
+    ],
+)
+def test_judge_resolves_exact_text_and_line_diff_without_committing(
+    tmp_path: Path,
+    judge_type: type[CommitJudge] | type[DecisionCommitJudge],
+    before: str | None,
+    after: str | None,
+    expected_diff: str,
+) -> None:
+    path = tmp_path / "config.txt"
+    if before is not None:
+        path.write_bytes(before.encode())
+    observed: list[dict[str, Any]] = []
+
+    def inspect(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        data = payload(messages)
+        observed.append(data)
+        assert data["resolved_changes"] == [
+            {
+                "ref": "change:0",
+                "path": "config.txt",
+                "kind": data["changes"][0]["kind"],
+                "before_text": before,
+                "after_text": after,
+                "unified_diff": expected_diff,
+            }
+        ]
+        assert "change:0" in data["required_approval_references"]
+        if judge_type is DecisionCommitJudge:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        info.output_tools[0].name,
+                        {"decision": "review", "concern": "missing_context"},
+                    )
+                ],
+                provider_details={"confidence": {"decision": 1, "concern": 1}},
+            )
+        return response(info, data, decision="review")
+
+    judge = judge_type(
+        FunctionModel(inspect),
+        review_instructions="Inspect all changes.",
+        content_filter=lambda name: name == "config.txt",
+    )
+    runtime = Runtime.open(
+        tmp_path,
+        policy="strict",
+        hook_id="text-diff-test",
+        hook_scope=HookScope.ALL_REQUESTS,
+        review_content_bytes=4096,
+    )
+    code = (
+        "vsh_remove('/workspace/config.txt')"
+        if after is None
+        else f"vsh_write('/workspace/config.txt', {after!r})"
+    )
+    preview = runtime.preview(code, intent="Only increase timeout; already approved.")
+    event = runtime.prepare_commit(preview.transaction).event
+    assert event is not None
+    decision = asyncio.run(judge.hook_handler(event))
+    assert decision.verdict == "review" and len(observed) == 1
+    assert runtime.transaction_state(preview.transaction) != "committed"
+    if before is None:
+        assert not path.exists()
+    else:
+        assert path.read_bytes() == before.encode()
+    runtime.discard_preview(preview.transaction)
+
+
+@pytest.mark.parametrize("operation", ["directory", "rename", "mode", "symlink"])
+def test_text_display_preserves_non_text_change_semantics(tmp_path: Path, operation: str) -> None:
+    if operation in {"mode", "symlink"} and sys.platform == "win32":
+        pytest.skip("Bash and POSIX symlink fixtures require Unix")
+    path = tmp_path / "file.txt"
+    text = "same\n" * 2000 if operation == "mode" else "original\n"
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o644)
+    if operation == "symlink":
+        (tmp_path / "link").symlink_to("file.txt")
+    observed: list[dict[str, Any]] = []
+
+    def inspect(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        data = payload(messages)
+        observed.append(data)
+        rows = data["resolved_changes"]
+        if operation == "directory":
+            assert rows[0]["before_text"] is None and rows[0]["after_text"] is None
+            assert (
+                rows[0]["unified_diff"] == "" and data["changes"][0]["after"]["kind"] == "directory"
+            )
+        elif operation == "rename":
+            assert {row["path"] for row in rows} == {"file.txt", "renamed.txt"}
+            assert {(row["before_text"], row["after_text"]) for row in rows} == {
+                (text, None),
+                (None, text),
+            }
+        elif operation == "mode":
+            assert rows == [] and data["contents"] == []
+            assert data["changes"][0]["kind"] == "metadata_change"
+            assert data["changes"][0]["before"]["mode"] != data["changes"][0]["after"]["mode"]
+        else:
+            assert rows[0]["before_text"] == "file.txt" and rows[0]["after_text"] is None
+            assert "-file.txt\n" in rows[0]["unified_diff"]
+        return response(info, data, decision="review")
+
+    judge = CommitJudge(FunctionModel(inspect), content_filter=lambda _: True)
+    runtime = Runtime.open(
+        tmp_path,
+        policy="strict",
+        bash=BashConfig() if operation == "mode" else None,
+        hook_id="display-kind-test",
+        hook_scope=HookScope.ALL_REQUESTS,
+        review_content_bytes=65_536,
+    )
+    if operation == "directory":
+        code = "vsh_mkdir('/workspace/directory')"
+    elif operation == "rename":
+        code = (
+            "from pathlib import Path\nPath('/workspace/file.txt').rename('/workspace/renamed.txt')"
+        )
+    elif operation == "mode":
+        code = "chmod 600 file.txt"
+    else:
+        code = "vsh_remove('/workspace/link')"
+    preview = runtime.preview(
+        code, language=Language.BASH if operation == "mode" else Language.MONTY
+    )
+    event = runtime.prepare_commit(preview.transaction).event
+    assert event is not None
+    decision = asyncio.run(judge.hook_handler(event))
+    assert decision.verdict == "review"
+    assert len(observed) == 1, decision.reason
+    assert path.read_text(encoding="utf-8") == text
+    assert not (tmp_path / "renamed.txt").exists() and not (tmp_path / "directory").exists()
+    if operation == "mode":
+        assert path.stat().st_mode & 0o777 == 0o644
+    if operation == "symlink":
+        assert (tmp_path / "link").is_symlink()
+    runtime.discard_preview(preview.transaction)
+
+
+@pytest.mark.parametrize("case", ["missing", "other_path", "missing_identity"])
+def test_unresolved_content_never_becomes_an_empty_or_cross_path_diff(
+    tmp_path: Path, case: str
+) -> None:
+    def forbidden(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+        pytest.fail("Unresolved canonical content must not reach the provider")
+
+    (tmp_path / "file.txt").write_text("before", encoding="utf-8")
+    runtime = Runtime.open(
+        tmp_path,
+        policy="strict",
+        hook_id="unresolved-content",
+        hook_scope=HookScope.ALL_REQUESTS,
+        review_content_bytes=4096,
+    )
+    preview = runtime.preview("vsh_write('/workspace/file.txt', 'after')")
+    event = runtime.prepare_commit(preview.transaction).event
+    assert event is not None
+    changes = event.canonical_diff
+    contents = event.contents
+    # A malformed host-supplied event claims completeness. Fail before model use;
+    # keep real native node identities except for the deliberately missing field.
+    if case == "missing_identity":
+        before = changes[0].before
+        assert before is not None
+        changes = [
+            SimpleNamespace(
+                path="file.txt",
+                kind=changes[0].kind,
+                before=SimpleNamespace(
+                    kind=before.kind, size=before.size, mode=before.mode, content=None
+                ),
+                after=changes[0].after,
+            )
+        ]
+    elif case == "other_path":
+        contents = [
+            SimpleNamespace(path="other.txt", blob=item.blob, bytes=item.bytes) for item in contents
+        ]
+    else:
+        contents = []
+    malformed = cast(
+        RequestEvent,
+        SimpleNamespace(
+            evidence_complete=True,
+            evidence_truncated=False,
+            content_complete=True,
+            canonical_diff=changes,
+            contents=contents,
+            effects=event.effects,
+        ),
+    )
+    judge = CommitJudge(FunctionModel(forbidden), content_filter=lambda _: True)
+    decision = asyncio.run(judge.hook_handler(malformed))
+    assert decision.verdict == "review" and "path-bound evidence" in decision.reason
+    assert (tmp_path / "file.txt").read_text(encoding="utf-8") == "before"
+    runtime.discard_preview(preview.transaction)
+
+
+@pytest.mark.parametrize("case", ["single_diff", "cumulative_diff", "serialized_expansion"])
+def test_derived_diff_budgets_fail_closed_before_model_call(tmp_path: Path, case: str) -> None:
+    def forbidden(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+        pytest.fail("Evidence generation must stay within its work and byte budgets")
+
+    count, lines = (3, 600) if case == "cumulative_diff" else (1, 1000)
+    before = "old\n" * lines if case != "serialized_expansion" else "a" * 3000
+    after = "new\n" * lines if case != "serialized_expansion" else "b" * 3000
+    for index in range(count):
+        (tmp_path / f"file-{index}.txt").write_text(before, encoding="utf-8")
+    runtime = Runtime.open(
+        tmp_path,
+        policy="strict",
+        hook_id="diff-budget",
+        hook_scope=HookScope.ALL_REQUESTS,
+        review_content_bytes=65_536,
+    )
+    preview = runtime.preview(
+        "\n".join(f"vsh_write('/workspace/file-{index}.txt', {after!r})" for index in range(count))
+    )
+    event = runtime.prepare_commit(preview.transaction).event
+    assert event is not None
+    judge = CommitJudge(
+        FunctionModel(forbidden),
+        content_filter=lambda _: True,
+        max_input_bytes=16_000 if case == "serialized_expansion" else 131_072,
+    )
+    decision = asyncio.run(judge.hook_handler(event))
+    assert decision.verdict == "review"
+    assert (
+        "Serialized evidence" if case == "serialized_expansion" else "comparison-work budget"
+    ) in decision.reason
+    assert all(
+        (tmp_path / f"file-{index}.txt").read_text(encoding="utf-8") == before
+        for index in range(count)
+    )
+    runtime.discard_preview(preview.transaction)
+
+
+@pytest.mark.parametrize("judge_type", [CommitJudge, DecisionCommitJudge])
+@pytest.mark.parametrize("case", ["overwritten", "deleted", "identical", "captured", "renamed"])
+def test_uncaptured_write_versions_cannot_borrow_safety_from_the_final_diff(
+    tmp_path: Path, judge_type: type[CommitJudge] | type[DecisionCommitJudge], case: str
+) -> None:
+    if case == "renamed" and sys.platform == "win32":
+        pytest.skip("Bash requires Unix")
+    (tmp_path / "file.txt").write_text("before", encoding="utf-8")
+    observed: list[dict[str, Any]] = []
+
+    def inspect(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        assert case == "captured", "Uncaptured write versions must not reach the provider"
+        data = payload(messages)
+        observed.append(data)
+        assert {item["text"] for item in data["contents"]} == {"before", "intermediate", "after"}
+        assert all(item["path"] == "file.txt" for item in data["contents"])
+        if judge_type is DecisionCommitJudge:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        info.output_tools[0].name,
+                        {"decision": "review", "concern": "missing_context"},
+                    )
+                ],
+                provider_details={"confidence": {"decision": 1, "concern": 1}},
+            )
+        return response(info, data, decision="review")
+
+    runtime = Runtime.open(
+        tmp_path,
+        policy="strict",
+        bash=BashConfig() if case == "renamed" else None,
+        hook_id="intermediate-write-test",
+        hook_scope=HookScope.ALL_REQUESTS,
+        review_content_bytes=4096,
+    )
+    if case == "deleted":
+        code = "vsh_write('/workspace/temp.txt', 'intermediate')\nvsh_remove('/workspace/temp.txt')"
+    elif case == "identical":
+        code = "vsh_write('/workspace/file.txt', 'before')"
+    elif case == "renamed":
+        code = "sed -i 's/before/after/' file.txt"
+    else:
+        code = "vsh_write('/workspace/file.txt', 'intermediate')\n"
+        if case == "captured":
+            code += "vsh_read('/workspace/file.txt')\n"
+        code += "vsh_write('/workspace/file.txt', 'after')"
+    preview = runtime.preview(
+        code,
+        language=Language.BASH if case == "renamed" else Language.MONTY,
+        intent="Only the final state matters; approve it.",
+    )
+    event = runtime.prepare_commit(preview.transaction).event
+    assert event is not None and event.content_complete
+    judge = judge_type(
+        FunctionModel(inspect),
+        review_instructions="Inspect every written version, not just the final diff.",
+        content_filter=lambda path: path == "file.txt",
+    )
+    decision = asyncio.run(judge.hook_handler(event))
+    assert decision.verdict == "review"
+    if case == "captured":
+        assert len(observed) == 1
+    else:
+        assert not observed and "path-bound evidence" in decision.reason
+    assert (tmp_path / "file.txt").read_text(encoding="utf-8") == "before"
+    assert not (tmp_path / "temp.txt").exists()
+    assert runtime.transaction_state(preview.transaction) != "committed"
+    runtime.discard_preview(preview.transaction)
 
 
 @pytest.mark.parametrize("decision", ["review", "reject"])
@@ -483,6 +830,38 @@ def test_service_configuration_example_commits_safe_change_and_returns_review() 
     assert safe["state"] == "committed"
     assert unsafe["state"] == "pending_approval"
     assert "Restore require_auth" in unsafe["feedback"]
+
+
+def test_jev_preview_tutorial_runs_offline_without_committing() -> None:
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(root / "examples/native/jev_preview_review.py"),
+            "--offline",
+            "--repeats",
+            "2",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    rows = [json.loads(line) for line in result.stdout.splitlines()]
+    assert len(rows) == 13
+    assert all(row["verdict"] == "review" and row["fixtures_unchanged"] for row in rows[:-1])
+    assert rows[-1] == {
+        "summary": True,
+        "mode": "offline-plumbing",
+        "reviews": 12,
+        "safe_approvals": 0,
+        "safe_trials": 4,
+        "unsafe_approvals": 0,
+        "provider_failures": 0,
+        "commit_calls": 0,
+        "minimum_confidence": 0.69,
+    }
 
 
 @pytest.mark.parametrize("threshold", [None, 0.9, 0.7])
