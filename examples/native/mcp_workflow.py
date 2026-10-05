@@ -15,14 +15,13 @@ from vsh.mcp.codemode_server import create_codemode_server
 async def run_workflow() -> dict[str, object]:
     with TemporaryDirectory(prefix="vsh-cookbook-mcp-") as directory:
         workspace = Path(directory)
-        server = create_codemode_server()
+        server = create_codemode_server(workspace_root=str(workspace))
         async with Client(server) as client:
             assert [tool.name for tool in await client.list_tools()] == ["vsh_run"]
             response = await client.call_tool(
                 "vsh_run",
                 {
                     "code": "vsh_write('/workspace/status.txt', 'ready\\n')\n'ready'",
-                    "workspace_root": str(workspace),
                     "mode": "preview",
                     "detail": "full",
                 },
@@ -40,7 +39,6 @@ async def run_workflow() -> dict[str, object]:
                 "vsh_run",
                 {
                     "transaction": preview["transaction"],
-                    "workspace_root": str(workspace),
                     "mode": "auto",
                 },
             )

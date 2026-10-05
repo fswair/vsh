@@ -30,8 +30,10 @@ from vsh import (
     RunMode,
     RunRequest,
     Runtime,
+    SnapshotLimits,
     VshBashError,
     VshExecutionError,
+    VshRuntimeError,
     VshStaleError,
     VshStateError,
 )
@@ -159,8 +161,9 @@ def test_async_native_join_and_commit_arbitration(tmp_path: Path) -> None:
     assert not (tmp_path / "cancelled.txt").exists()
 
 
+@pytest.mark.parametrize("nested", [False, True])
 def test_mcp_client_cancellation_cannot_commit_later(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nested: bool
 ) -> None:
     from fastmcp import Client, FastMCP
     from fastmcp.server.dependencies import get_context
@@ -186,7 +189,7 @@ def test_mcp_client_cancellation_cannot_commit_later(
 
     monkeypatch.setattr(_PreparedRun, "execute", execute)
     server = FastMCP("cancel-native-run")
-    register_vsh_surface(server)
+    register_vsh_surface(server, workspace_root=str(tmp_path))
 
     async def scenario() -> None:
         async with Client(server) as client:
@@ -194,9 +197,12 @@ def test_mcp_client_cancellation_cannot_commit_later(
                 client.call_tool(
                     "vsh_run",
                     {
-                        "code": "sleep 0.7; printf late > after.txt",
-                        "language": "bash",
-                        "workspace_root": str(tmp_path),
+                        "code": (
+                            "vsh_write('/workspace/staged.txt', 'temporary')\nvsh_bash('sleep 0.7; printf late > after.txt')"
+                            if nested
+                            else "sleep 0.7; printf late > after.txt"
+                        ),
+                        "language": "monty" if nested else "bash",
                         "mode": "auto",
                     },
                 )
@@ -213,6 +219,7 @@ def test_mcp_client_cancellation_cannot_commit_later(
             # Cancellation was processed by the registered tool, not merely by
             # the transport. Native execution has joined before this assertion.
             assert not (tmp_path / "after.txt").exists()
+            assert not (tmp_path / "staged.txt").exists()
 
     asyncio.run(scenario())
 
@@ -237,7 +244,7 @@ def test_mcp_cancellation_after_commit_entry_returns_actual_result(
         assert release.wait(5)
         return receipt
 
-    arguments: dict[str, object] = {"workspace_root": str(tmp_path), "mode": "auto"}
+    arguments: dict[str, object] = {"mode": "auto"}
     code = "vsh_write('/workspace/entered.txt', 'committed')"
     if resume:
         preview = vsh_run(code, workspace_root=str(tmp_path))
@@ -246,7 +253,7 @@ def test_mcp_cancellation_after_commit_entry_returns_actual_result(
         arguments["code"] = code
     monkeypatch.setattr(_PreparedRun, "execute", execute)
     server = FastMCP("commit-arbitration")
-    register_vsh_surface(server)
+    register_vsh_surface(server, workspace_root=str(tmp_path))
 
     async def scenario() -> None:
         tool = (await server.list_tools())[0]
@@ -346,6 +353,134 @@ def test_cli_bash_profile_failure_has_nonzero_status(
     diagnostics = json.loads(capsys.readouterr().err)
     assert diagnostics["state"] == "failed"
     assert diagnostics["committable"] is False
+
+
+@pytest.mark.skipif(os.name != "posix", reason="initial Bash profile requires a Unix host")
+def test_monty_bash_tool_shares_one_overlay_and_one_commit_hook(tmp_path: Path) -> None:
+    events: list[RequestEvent] = []
+
+    def approve(event: RequestEvent) -> HookDecision:
+        events.append(event)
+        return HookDecision.approve("all changes reviewed together")
+
+    runtime = HookedRuntime.open(
+        tmp_path, bash=BashConfig(), hook_handler=approve, hook_scope=HookScope.ALL_REQUESTS
+    )
+    preview = runtime.preview("""
+vsh_write('/workspace/input.txt', 'one')
+first = vsh_bash('cat input.txt; printf two > output.txt')
+assert first['stdout'] == b'one'
+assert first['exit_code'] == 0
+assert vsh_read('/workspace/output.txt') == 'two'
+second = vsh_bash('cat output.txt; printf three >> output.txt')
+assert second['stdout'] == b'two'
+assert vsh_read('/workspace/output.txt') == 'twothree'
+vsh_mkdir('/workspace/sub')
+vsh_bash('cd sub')
+assert vsh_bash('pwd')['stdout'] == b'/workspace\\n'
+'one transaction'
+""")
+    assert not (tmp_path / "input.txt").exists()
+    assert not (tmp_path / "output.txt").exists()
+    assert not events
+    result = runtime.commit(preview.transaction)
+    assert result.receipt.state == "committed"
+    assert len(events) == 1
+    assert {effect.origin for effect in events[0].effects} >= {"monty_tool_call", "bash_call"}
+    assert (tmp_path / "output.txt").read_text() == "twothree"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="initial Bash profile requires a Unix host")
+@pytest.mark.parametrize(
+    "code,budget",
+    [
+        ("vsh_write('/workspace/a', 'abc')\nvsh_bash('printf def > b')", {"max_write_bytes": 5}),
+        ("vsh_bash('printf abc > a')\nvsh_bash('printf def > b')", {"max_write_bytes": 5}),
+        ("vsh_bash('printf abc')\nvsh_bash('printf def')", {"max_output_bytes": 5}),
+        ("vsh_bash('printf abc')\nprint('def')", {"max_output_bytes": 5}),
+        ("vsh_bash('printf abc > a')", {"max_os_calls": 1}),
+        ("try:\n    vsh_bash('printf abc > a; false')\nexcept Exception:\n    pass", {}),
+        ("try:\n    vsh_bash('touch unsupported || true')\nexcept Exception:\n    pass", {}),
+    ],
+)
+def test_nested_bash_failures_and_shared_budgets_are_noncommittable(tmp_path, code, budget) -> None:
+    runtime = Runtime.open(tmp_path, bash=BashConfig())
+    with pytest.raises(VshExecutionError):
+        runtime.run(RunRequest(code, mode=RunMode.AUTO, budget=ExecutionBudget(**budget)))
+    assert not (tmp_path / "a").exists()
+    assert not (tmp_path / "b").exists()
+    assert not (tmp_path / "unsupported").exists()
+
+
+def test_host_snapshot_limits_are_separate_from_guest_read_budget(tmp_path: Path) -> None:
+    (tmp_path / "large.txt").write_bytes(b"x" * 8192)
+    limits = SnapshotLimits(max_materialized_bytes=1, max_materialized_file_bytes=8192)
+    assert limits.max_nodes == 250_000 and limits.max_depth == 128
+    assert limits.max_total_file_bytes == 16 * 1024**3
+    assert limits.max_materialized_bytes == 1 and limits.max_materialized_file_bytes == 8192
+    runtime = Runtime.open(tmp_path, snapshot_limits=limits)
+    with pytest.raises(VshRuntimeError, match="host materialized-bytes limit exceeded"):
+        runtime.preview("vsh_move('/workspace/large.txt', '/workspace/moved.txt')")
+    assert not (tmp_path / "moved.txt").exists()
+    with pytest.raises(ValueError, match="unknown result format"):
+        Runtime.open(
+            tmp_path, result_compatibility=cast(Literal["python", "agent_json"], "invalid")
+        )
+
+
+def test_literal_search_sees_overlay_with_unicode_columns_and_tracks_negative_reads(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "source.txt").write_text("original\n")
+    runtime = Runtime.open(tmp_path)
+    receipt = runtime.preview(r"""
+vsh_write('/workspace/source.txt', 'é東京 needle\r\nnext needle\n')
+hits = vsh_search('needle', path='/workspace/source.txt', max_results=1)
+assert len(hits) == 1
+assert str(hits[0]['path']) == '/workspace/source.txt'
+assert (hits[0]['line'], hits[0]['column'], hits[0]['text']) == (1, 5, 'é東京 needle')
+assert vsh_search('needle\n', path='/workspace/source.txt') == []
+hits
+""")
+    assert (tmp_path / "source.txt").read_text() == "original\n"
+    assert runtime.discard_preview(receipt.transaction)
+    negative = runtime.preview("vsh_search('absent', path='/workspace/source.txt')")
+    assert negative.result == []
+    (tmp_path / "source.txt").write_text("absent is now present\n")
+    with pytest.raises(VshStaleError):
+        runtime.commit(negative.transaction, 0)
+
+
+@pytest.mark.parametrize(
+    ("code", "bash"),
+    [
+        pytest.param(
+            "try:\n    vsh_search('secret', path='/workspace/.env')\nexcept PermissionError:\n    pass",
+            None,
+            id="search",
+        ),
+        pytest.param(
+            "vsh_bash('cat .env || true')",
+            BashConfig(),
+            id="nested-bash",
+            marks=pytest.mark.skipif(
+                os.name != "posix", reason="initial Bash profile requires a Unix host"
+            ),
+        ),
+    ],
+)
+def test_search_and_nested_bash_cannot_bypass_protected_reads(
+    tmp_path: Path, code: str, bash: BashConfig | None
+) -> None:
+    (tmp_path / ".env").write_text("synthetic-secret")
+    runtime = Runtime.open(tmp_path, bash=bash)
+    receipt = runtime.run(
+        RunRequest(code + "\nvsh_write('/workspace/blocked', 'no')", mode=RunMode.AUTO)
+    )
+    assert receipt.state == "denied"
+    assert receipt.denied_accesses > 0
+    assert "synthetic-secret" not in receipt.stdout
+    assert not (tmp_path / "blocked").exists()
 
 
 def test_hook_preview_conflict_and_resolve_failure_remain_non_mutating(tmp_path: Path) -> None:
@@ -583,6 +718,7 @@ def test_evidence_limits_are_terminal_and_auto_mode_never_commits_partial_work(
         "budgeted_analysis.py",
         "workflows.py",
         "mcp_workflow.py",
+        "monty_bash_workflow.py",
         "cli_workflow.py",
     ],
 )

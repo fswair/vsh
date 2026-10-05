@@ -27,6 +27,7 @@ _LOGGER = logging.getLogger("vsh.judge")
 _MAX_ITEMS = 128
 # Bound difflib's worst-case line matching across the entire transaction.
 _MAX_DIFF_WORK = 1_000_000
+_MAX_DIFF_DISPLAY_BYTES = 4096
 
 
 class JudgeReport(BaseModel):
@@ -362,6 +363,7 @@ def _render_evidence(
         )
     content_rows: list[dict[str, object]] = []
     content_text: dict[tuple[str, str], str] = {}
+    content_refs: dict[tuple[str, str], str] = {}
     content_bytes = 0
     for index, content in enumerate(contents):
         if content_filter is None or content_filter(content.path) is not True:
@@ -383,6 +385,7 @@ def _render_evidence(
         required.add(ref)
         content_rows.append({"ref": ref, "path": content.path, "blob": content.blob, "text": text})
         content_text[content.path, content.blob] = text
+        content_refs[content.path, content.blob] = ref
     # Native content_complete covers canonical sides and reads, not every write.
     # A safe final state cannot stand in for an uncaptured intermediate version.
     for effect in effects:
@@ -413,14 +416,22 @@ def _render_evidence(
                     before_lines, after_lines, fromfile="before", tofile="after"
                 )
             )
+        display_bytes = display.encode()
         resolved_changes.append(
             {
                 "ref": f"change:{index}",
                 "path": change.path,
                 "kind": change.kind,
-                "before_text": before,
-                "after_text": after,
-                "unified_diff": display,
+                "before_content": None
+                if before is None or change.before is None or change.before.content is None
+                else content_refs[change.path, change.before.content],
+                "after_content": None
+                if after is None or change.after is None or change.after.content is None
+                else content_refs[change.path, change.after.content],
+                "unified_diff": display_bytes[:_MAX_DIFF_DISPLAY_BYTES].decode(
+                    "utf-8", errors="ignore"
+                ),
+                "diff_display_truncated": len(display_bytes) > _MAX_DIFF_DISPLAY_BYTES,
             }
         )
     payload = {
@@ -469,6 +480,7 @@ def _render_evidence(
         "effects": effect_rows,
         "contents": content_rows,
         "resolved_changes": resolved_changes,
+        "content_contract": "before_content/after_content reference complete path-bound contents rows. A truncated unified_diff is display-only: inspect the complete referenced text before deciding.",
         "required_approval_references": sorted(required or {"policy"}),
     }
     prompt = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))

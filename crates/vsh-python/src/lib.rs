@@ -1242,11 +1242,62 @@ struct PyRuntime {
     inner: Arc<vsh::Runtime>,
 }
 
+/// Trusted-host snapshot enumeration and lazy capture limits, not guest read quotas.
+#[pyclass(name = "SnapshotLimits", frozen, get_all, from_py_object)]
+#[derive(Clone, Copy)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "mirror the public native SnapshotLimits field names"
+)]
+struct PySnapshotLimits {
+    max_nodes: usize,
+    max_depth: usize,
+    max_total_file_bytes: u64,
+    max_materialized_bytes: u64,
+    max_materialized_file_bytes: u64,
+}
+
+#[pymethods]
+impl PySnapshotLimits {
+    #[new]
+    #[pyo3(signature = (*, max_nodes=None, max_depth=None, max_total_file_bytes=None, max_materialized_bytes=None, max_materialized_file_bytes=None))]
+    fn new(
+        max_nodes: Option<usize>,
+        max_depth: Option<usize>,
+        max_total_file_bytes: Option<u64>,
+        max_materialized_bytes: Option<u64>,
+        max_materialized_file_bytes: Option<u64>,
+    ) -> Self {
+        let defaults = vsh::SnapshotLimits::default();
+        Self {
+            max_nodes: max_nodes.unwrap_or(defaults.max_nodes),
+            max_depth: max_depth.unwrap_or(defaults.max_depth),
+            max_total_file_bytes: max_total_file_bytes.unwrap_or(defaults.max_total_file_bytes),
+            max_materialized_bytes: max_materialized_bytes
+                .unwrap_or(defaults.max_materialized_bytes),
+            max_materialized_file_bytes: max_materialized_file_bytes
+                .unwrap_or(defaults.max_materialized_file_bytes),
+        }
+    }
+}
+
+impl From<PySnapshotLimits> for vsh::SnapshotLimits {
+    fn from(value: PySnapshotLimits) -> Self {
+        Self {
+            max_nodes: value.max_nodes,
+            max_depth: value.max_depth,
+            max_total_file_bytes: value.max_total_file_bytes,
+            max_materialized_bytes: value.max_materialized_bytes,
+            max_materialized_file_bytes: value.max_materialized_file_bytes,
+        }
+    }
+}
+
 #[pymethods]
 impl PyRuntime {
     /// Open a capability-rooted workspace and recover interrupted commits.
     #[staticmethod]
-    #[pyo3(signature = (workspace, *, data_directory=None, policy="balanced", worker_path=None, bash=None, hook_id=None, hook_scope=None, review_content_bytes=0))]
+    #[pyo3(signature = (workspace, *, data_directory=None, policy="balanced", worker_path=None, bash=None, hook_id=None, hook_scope=None, review_content_bytes=0, result_compatibility="python", snapshot_limits=None))]
     // Preserve Python's keyword-only options without a redundant config wrapper.
     #[allow(clippy::too_many_arguments)]
     fn open(
@@ -1259,6 +1310,8 @@ impl PyRuntime {
         hook_id: Option<&str>,
         hook_scope: Option<PyHookScope>,
         review_content_bytes: usize,
+        result_compatibility: &str,
+        snapshot_limits: Option<PySnapshotLimits>,
     ) -> PyResult<Self> {
         let profile = match policy {
             "balanced" => vsh::PolicyProfile::Balanced,
@@ -1270,11 +1323,23 @@ impl PyRuntime {
                 )));
             }
         };
+        let compatibility = match result_compatibility {
+            "python" => vsh::ResultCompatibility::Python,
+            "agent_json" => vsh::ResultCompatibility::AgentJson,
+            value => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown result format {value:?}; expected python or agent_json"
+                )));
+            }
+        };
         let mut config = vsh::RuntimeConfig::new(workspace)
             .with_policy_profile(profile)
-            .with_result_compatibility(vsh::ResultCompatibility::Python);
+            .with_result_compatibility(compatibility);
         if let Some(data_directory) = data_directory {
             config = config.with_data_directory(data_directory);
+        }
+        if let Some(limits) = snapshot_limits {
+            config = config.with_snapshot_limits(limits.into());
         }
         if hook_id.is_some() || hook_scope.is_some() {
             config = config.with_commit_hook(
@@ -1859,6 +1924,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyCommitResolution>()?;
     module.add_class::<PyRecoveryReport>()?;
     module.add_class::<PyRuntime>()?;
+    module.add_class::<PySnapshotLimits>()?;
     module.add_function(wrap_pyfunction!(version, module)?)?;
     module.add_function(wrap_pyfunction!(engine_kind, module)?)?;
     module.add_function(wrap_pyfunction!(normalize_path, module)?)?;

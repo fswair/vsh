@@ -4,6 +4,8 @@ use std::fmt;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use vsh_execution::ExecutionCancellation;
 
 #[cfg(windows)]
 use cap_fs_ext::MetadataExt as CapMetadataExt;
@@ -28,6 +30,11 @@ pub struct SnapshotLimits {
     pub max_depth: usize,
     /// Maximum sum of file and symlink byte sizes represented by metadata.
     pub max_total_file_bytes: u64,
+    /// Maximum cumulative lazy host content captured per snapshot, including diff construction.
+    /// Distinct from bytes returned to the guest and charged before reading or blob storage.
+    pub max_materialized_bytes: u64,
+    /// Maximum content bytes captured from any one host file or symlink.
+    pub max_materialized_file_bytes: u64,
 }
 
 impl Default for SnapshotLimits {
@@ -36,6 +43,8 @@ impl Default for SnapshotLimits {
             max_nodes: 250_000,
             max_depth: 128,
             max_total_file_bytes: 16 * 1024 * 1024 * 1024,
+            max_materialized_bytes: 64 * 1024 * 1024,
+            max_materialized_file_bytes: 4 * 1024 * 1024,
         }
     }
 }
@@ -331,6 +340,30 @@ fn node_kind(path: &VPath, metadata: &Metadata) -> Result<NodeKind, HostError> {
 }
 
 pub(crate) fn stable_content(root: &Dir, path: &VPath) -> Result<CapturedContent, HostError> {
+    stable_content_checked(root, path, None, None)
+}
+
+fn check_capture_cancellation(
+    cancellation: Option<&ExecutionCancellation>,
+    path: &VPath,
+) -> Result<(), HostError> {
+    if cancellation.is_some_and(ExecutionCancellation::is_cancelled) {
+        return Err(HostError::io(
+            "capture cancelled",
+            path,
+            io::Error::from(io::ErrorKind::Interrupted),
+        ));
+    }
+    Ok(())
+}
+
+fn stable_content_checked(
+    root: &Dir,
+    path: &VPath,
+    expected: Option<FileStamp>,
+    cancellation: Option<&ExecutionCancellation>,
+) -> Result<CapturedContent, HostError> {
+    check_capture_cancellation(cancellation, path)?;
     let before = stamp_at(root, path)?.ok_or_else(|| {
         HostError::io(
             "capture content",
@@ -338,6 +371,15 @@ pub(crate) fn stable_content(root: &Dir, path: &VPath) -> Result<CapturedContent
             io::Error::new(io::ErrorKind::NotFound, "node disappeared"),
         )
     })?;
+    if let Some(expected) = expected
+        && before != expected
+    {
+        return Err(HostError::Unstable {
+            path: path.clone(),
+            before: Box::new(expected),
+            after: Box::new(before),
+        });
+    }
     let bytes = match before.kind {
         NodeKind::File => {
             let mut file = root
@@ -351,11 +393,7 @@ pub(crate) fn stable_content(root: &Dir, path: &VPath) -> Result<CapturedContent
                     after: Box::new(opened_before),
                 });
             }
-            let mut bytes = Vec::new();
-            Read::by_ref(&mut file)
-                .take(before.size.saturating_add(1))
-                .read_to_end(&mut bytes)
-                .map_err(|source| HostError::io("read file content", path, source))?;
+            let bytes = read_content_cancellable(&mut file, path, before.size, cancellation)?;
             let opened_after = stamp_file(&file, path)?;
             if opened_after != before {
                 return Err(HostError::Unstable {
@@ -412,6 +450,30 @@ pub(crate) fn stable_content(root: &Dir, path: &VPath) -> Result<CapturedContent
         before,
         after,
     })
+}
+
+fn read_content_cancellable(
+    file: &mut File,
+    path: &VPath,
+    expected_bytes: u64,
+    cancellation: Option<&ExecutionCancellation>,
+) -> Result<Vec<u8>, HostError> {
+    let mut bytes = Vec::new();
+    let mut reader = file.take(expected_bytes.saturating_add(1));
+    let mut chunk = [0; 16 * 1024];
+    loop {
+        check_capture_cancellation(cancellation, path)?;
+        let count = reader
+            .read(&mut chunk)
+            .map_err(|source| HostError::io("read file content", path, source))?;
+        if count == 0 {
+            return Ok(bytes);
+        }
+        bytes.try_reserve(count).map_err(|source| {
+            HostError::io("allocate captured content", path, io::Error::other(source))
+        })?;
+        bytes.extend_from_slice(&chunk[..count]);
+    }
 }
 
 #[cfg(unix)]
@@ -639,15 +701,25 @@ pub(crate) fn capture_snapshot(
     root: &Arc<Dir>,
     store: BlobStore,
     limits: SnapshotLimits,
+    cancellation: &ExecutionCancellation,
 ) -> Result<BaseSnapshot, HostError> {
+    if limits.max_nodes == 0 {
+        return Err(HostError::SnapshotLimit {
+            limit: "node-count",
+            observed: 1,
+            maximum: 0,
+        });
+    }
     let root_path = VPath::root();
     let root_stamp = stamp_dir(root, &root_path)?;
     let mut builder = SnapshotBuilder::with_root_stamp(store, root_stamp);
     let mut pending = vec![(root_path, 0_usize)];
     let mut node_count = 1_usize;
     let mut total_bytes = 0_u64;
+    let materialized_bytes = Arc::new(AtomicU64::new(0));
 
     while let Some((parent, depth)) = pending.pop() {
+        check_capture_cancellation(Some(cancellation), &parent)?;
         let before = stamp_at(root, &parent)?.ok_or_else(|| {
             HostError::io(
                 "capture directory",
@@ -660,6 +732,7 @@ pub(crate) fn capture_snapshot(
             .map_err(|source| HostError::io("enumerate snapshot directory", &parent, source))?;
         let mut children = Vec::new();
         for entry in iterator {
+            check_capture_cancellation(Some(cancellation), &parent)?;
             let entry = entry
                 .map_err(|source| HostError::io("enumerate snapshot directory", &parent, source))?;
             let raw_name = entry.file_name();
@@ -669,6 +742,16 @@ pub(crate) fn capture_snapshot(
             })?;
             if parent.is_root() && name == RUNTIME_DIRECTORY {
                 continue;
+            }
+            // Charge before statting or retaining an entry, not after collecting
+            // and sorting the entire attacker-controlled directory.
+            node_count = node_count.saturating_add(1);
+            if node_count > limits.max_nodes {
+                return Err(HostError::SnapshotLimit {
+                    limit: "node-count",
+                    observed: node_count as u64,
+                    maximum: limits.max_nodes as u64,
+                });
             }
             let child = parent.join(name).map_err(|source| {
                 HostError::io("normalize snapshot path", &parent, io::Error::other(source))
@@ -693,14 +776,6 @@ pub(crate) fn capture_snapshot(
         }
 
         for (child, stamp) in children {
-            node_count = node_count.saturating_add(1);
-            if node_count > limits.max_nodes {
-                return Err(HostError::SnapshotLimit {
-                    limit: "node-count",
-                    observed: node_count as u64,
-                    maximum: limits.max_nodes as u64,
-                });
-            }
             match stamp.kind {
                 NodeKind::Directory => {
                     let next_depth = depth.saturating_add(1);
@@ -727,10 +802,35 @@ pub(crate) fn capture_snapshot(
                     }
                     let loader_root = Arc::clone(root);
                     let loader_path = child.clone();
+                    let materialized_bytes = Arc::clone(&materialized_bytes);
+                    let cancellation = cancellation.clone();
                     builder
-                        .add_lazy(child, stamp, move |expected| {
-                            let captured = stable_content(&loader_root, &loader_path)
-                                .map_err(|source| ContentLoadError::new(source.to_string()))?;
+                        .add_lazy(child, stamp, move |expected: FileStamp| {
+                            if expected.size > limits.max_materialized_file_bytes {
+                                return Err(ContentLoadError::new(format!(
+                                    "host materialized-file-bytes limit exceeded: {} > {}",
+                                    expected.size, limits.max_materialized_file_bytes
+                                )));
+                            }
+                            materialized_bytes
+                                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                                    used.checked_add(expected.size)
+                                        .filter(|&next| next <= limits.max_materialized_bytes)
+                                })
+                                .map_err(|used| {
+                                    ContentLoadError::new(format!(
+                                        "host materialized-bytes limit exceeded: {} > {}",
+                                        used.saturating_add(expected.size),
+                                        limits.max_materialized_bytes
+                                    ))
+                                })?;
+                            let captured = stable_content_checked(
+                                &loader_root,
+                                &loader_path,
+                                Some(expected),
+                                Some(&cancellation),
+                            )
+                            .map_err(|source| ContentLoadError::new(source.to_string()))?;
                             if captured.before != expected || captured.after != expected {
                                 return Err(ContentLoadError::new(
                                     "snapshot node changed before lazy capture",

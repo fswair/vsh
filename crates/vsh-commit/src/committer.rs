@@ -727,6 +727,18 @@ impl Committer {
     ///
     /// Returns an error for unsupported nodes, unstable enumeration, or a size bound.
     pub fn snapshot(&self, limits: SnapshotLimits) -> Result<BaseSnapshot, CommitError> {
+        self.snapshot_cancellable(limits, &vsh_execution::ExecutionCancellation::default())
+    }
+
+    /// Capture a bounded snapshot whose enumeration and lazy reads observe cancellation.
+    ///
+    /// # Errors
+    /// Returns an error for cancellation, unstable host state, or exceeded bounds.
+    pub fn snapshot_cancellable(
+        &self,
+        limits: SnapshotLimits,
+        cancellation: &vsh_execution::ExecutionCancellation,
+    ) -> Result<BaseSnapshot, CommitError> {
         let _guard = WorkspaceLockGuard::shared(&self.coordination).map_err(|source| {
             CommitError::InternalIo {
                 operation: "acquire shared workspace lock",
@@ -734,7 +746,8 @@ impl Committer {
             }
         })?;
         self.validate_runtime_directory()?;
-        let snapshot = capture_snapshot(&self.root, self.blobs.clone(), limits).map_err(Into::into);
+        let snapshot = capture_snapshot(&self.root, self.blobs.clone(), limits, cancellation)
+            .map_err(Into::into);
         self.validate_runtime_directory()?;
         snapshot
     }
@@ -1065,6 +1078,16 @@ impl Committer {
             Err(error) => return Err(error),
         };
         Self::check_fault(faults, FaultPoint::Revalidated)?;
+        for (path, parent) in &pinned_parents {
+            if let Err(error) = self.validate_pinned_parent(path, parent) {
+                store.compare_and_transition(
+                    transaction,
+                    TransactionState::Revalidating,
+                    TransactionState::Stale,
+                )?;
+                return Err(error);
+            }
+        }
         store.compare_and_transition(
             transaction,
             TransactionState::Revalidating,
@@ -1100,6 +1123,7 @@ impl Committer {
                     source,
                 })?;
             Self::check_fault(faults, FaultPoint::IntentSynced(index))?;
+            self.validate_pinned_parent(&parent_path, parent)?;
             let applied = Self::apply_operation(
                 transaction,
                 index,
@@ -1127,6 +1151,11 @@ impl Committer {
             Self::check_fault(faults, FaultPoint::DoneSynced(index))?;
         }
         for (index, operation) in prepared.operations.iter().enumerate().rev() {
+            if let Operation::CreateDirectory { path, .. } = operation
+                && let Some(directory) = pinned_parents.get(path)
+            {
+                self.validate_pinned_parent(path, directory)?;
+            }
             let index =
                 u32::try_from(index).map_err(|_| CommitPlanError::OperationCountOverflow)?;
             Self::clear_operation_marker(
@@ -1163,6 +1192,26 @@ impl Committer {
             verified_paths: prepared.final_states.len(),
             // The outer commit frame retries after all transaction handles close.
             cleanup_pending: true,
+        })
+    }
+
+    /// Detect relocation/replacement at each mutation checkpoint. This is defense
+    /// in depth, not an OS containment primitive: an uncooperative external writer
+    /// can still rename a directory between this check and a relative syscall.
+    fn validate_pinned_parent(&self, path: &VPath, pinned: &Dir) -> Result<(), CommitError> {
+        let expected = stamp_dir(pinned, path)?;
+        let actual = stamp_at(&self.root, path)?;
+        if actual.is_some_and(|stamp| {
+            stamp.kind == NodeKind::Directory && stamp.file_id == expected.file_id
+        }) {
+            return Ok(());
+        }
+        Err(CommitError::Stale {
+            conflicts: vec![RevalidationConflict::Metadata {
+                path: path.clone(),
+                expected: Some(NodeState::from_stamp(expected)),
+                actual: actual.map(NodeState::from_stamp),
+            }],
         })
     }
 

@@ -492,9 +492,15 @@ impl RuntimeExecution {
         filesystem: &mut VirtualFs,
         adapter: &InProcessConfig,
         cancellation: &ExecutionCancellation,
+        #[cfg(feature = "bash")] bash: Option<&vsh_bash::SubprocessBash>,
     ) -> Result<ExecutionOutcome, ExecutionError> {
         match self {
             Self::Subprocess(worker) => {
+                #[cfg(feature = "bash")]
+                {
+                    worker.execute_with_bash(code, filesystem, adapter, cancellation, bash)
+                }
+                #[cfg(not(feature = "bash"))]
                 worker.execute_cancellable(code, filesystem, adapter, cancellation)
             }
             #[cfg(feature = "bash")]
@@ -508,9 +514,17 @@ impl RuntimeExecution {
                 }
                 let worker = Arc::clone(slot.as_ref().expect("initialized worker"));
                 drop(slot);
-                worker.execute_cancellable(code, filesystem, adapter, cancellation)
+                worker.execute_with_bash(code, filesystem, adapter, cancellation, bash)
             }
-            Self::InProcess(_) => InProcessMonty::new(adapter.clone()).execute(code, filesystem),
+            Self::InProcess(_) => {
+                let executor = InProcessMonty::new(adapter.clone());
+                #[cfg(feature = "bash")]
+                {
+                    executor.execute_with_bash(code, filesystem, cancellation, bash)
+                }
+                #[cfg(not(feature = "bash"))]
+                executor.execute(code, filesystem)
+            }
         }
     }
 }
@@ -624,7 +638,7 @@ impl Runtime {
         validate_program_size(request.code, request.budget)?;
         let total_started = Instant::now();
         let (mut filesystem, base_snapshot, base_node_count, snapshot_ns) =
-            self.snapshot_filesystem()?;
+            self.snapshot_filesystem(cancellation)?;
 
         let execute_started = Instant::now();
         let (outcome, runtime_config) =
@@ -641,7 +655,7 @@ impl Runtime {
             base_snapshot,
             runtime_config,
             &evaluated,
-        );
+        )?;
         let evidence = filesystem.into_evidence()?;
         let review = ReviewEvidence::capture(
             request.intent,
@@ -1314,8 +1328,16 @@ impl Runtime {
     }
 
     fn runtime_config_digest(&self, monty_config: &InProcessConfig) -> RuntimeConfigDigest {
+        let guest = self.execution.security_digest(monty_config);
+        #[cfg(feature = "bash")]
+        let guest = self.config.bash.as_ref().map_or(guest, |bash| {
+            let mut bytes = b"vsh-monty-with-bash-tool-v1".to_vec();
+            bytes.extend_from_slice(guest.as_bytes());
+            bytes.extend_from_slice(bash.security_digest(monty_config.limits()).as_bytes());
+            RuntimeConfigDigest::digest_canonical(&bytes)
+        });
         aggregate_runtime_digest(
-            self.execution.security_digest(monty_config),
+            guest,
             self.config.snapshot_limits,
             self.config.commit_config,
             self.config.store_config,
@@ -1325,9 +1347,14 @@ impl Runtime {
         )
     }
 
-    fn snapshot_filesystem(&self) -> Result<(VirtualFs, SnapshotId, usize, u64), VshError> {
+    fn snapshot_filesystem(
+        &self,
+        cancellation: &ExecutionCancellation,
+    ) -> Result<(VirtualFs, SnapshotId, usize, u64), VshError> {
         let started = Instant::now();
-        let snapshot = self.committer.snapshot(self.config.snapshot_limits)?;
+        let snapshot = self
+            .committer
+            .snapshot_cancellable(self.config.snapshot_limits, cancellation)?;
         let id = snapshot.id();
         let nodes = snapshot.len();
         Ok((VirtualFs::new(snapshot), id, nodes, elapsed_ns(started)))
@@ -1509,22 +1536,7 @@ impl Runtime {
                 .ok_or(VshError::LanguageUnavailable {
                     language: Language::Bash,
                 })?;
-            let mut slot = self
-                .bash_execution
-                .lock()
-                .map_err(|_| VshError::PendingPoisoned)?;
-            if slot.is_none() {
-                *slot = Some(Arc::new(
-                    vsh_bash::SubprocessBash::new_cancellable(config.clone(), cancellation)
-                        .map_err(|source| VshError::Bash {
-                            source,
-                            changes: Vec::new(),
-                            changes_complete: true,
-                        })?,
-                ));
-            }
-            let worker = Arc::clone(slot.as_ref().expect("initialized Bash worker"));
-            drop(slot);
+            let worker = self.bash_worker(cancellation)?.expect("host enabled Bash");
             let result = worker.execute_cancellable(
                 request.code,
                 filesystem,
@@ -1568,9 +1580,16 @@ impl Runtime {
         }
         let config = self.monty_config(request.budget);
         let digest = self.runtime_config_digest(&config);
-        let outcome = self
-            .execution
-            .execute(request.code, filesystem, &config, cancellation)?;
+        #[cfg(feature = "bash")]
+        let bash = self.bash_worker(cancellation)?;
+        let outcome = self.execution.execute(
+            request.code,
+            filesystem,
+            &config,
+            cancellation,
+            #[cfg(feature = "bash")]
+            bash.as_deref(),
+        )?;
         validate_result_compatibility(&outcome.value, self.config.result_compatibility)?;
         Ok((
             GuestOutcome {
@@ -1605,7 +1624,43 @@ impl Runtime {
         Err(VshError::LanguageUnavailable { language })
     }
 
+    #[cfg(feature = "bash")]
+    fn bash_worker(
+        &self,
+        cancellation: &ExecutionCancellation,
+    ) -> Result<Option<Arc<vsh_bash::SubprocessBash>>, VshError> {
+        let Some(config) = self.config.bash.as_ref() else {
+            return Ok(None);
+        };
+        let mut slot = self
+            .bash_execution
+            .lock()
+            .map_err(|_| VshError::PendingPoisoned)?;
+        if slot.is_none() {
+            *slot = Some(Arc::new(
+                vsh_bash::SubprocessBash::new_cancellable(config.clone(), cancellation).map_err(
+                    |source| VshError::Bash {
+                        source,
+                        changes: Vec::new(),
+                        changes_complete: true,
+                    },
+                )?,
+            ));
+        }
+        Ok(slot.as_ref().map(Arc::clone))
+    }
+
     fn validate_policy(&self, artifact: &PendingTransaction) -> Result<(), VshError> {
+        if artifact.binding.invocation.is_none() {
+            return Err(ArtifactError::Unsupported {
+                reason: "legacy pending artifact has no persisted invocation/hook binding; create a fresh preview",
+            }.into());
+        }
+        if artifact.binding.commit_hook != self.config.commit_hook.map(hook_config_digest) {
+            return Err(VshError::HookConfigurationChanged {
+                transaction: artifact.binding.transaction_id(),
+            });
+        }
         if artifact.binding.policy != self.config.policy.digest() {
             return Err(VshError::PolicyChanged {
                 transaction: artifact.binding.transaction_id(),
@@ -1628,9 +1683,9 @@ impl Runtime {
         base_snapshot: SnapshotId,
         runtime_config: RuntimeConfigDigest,
         evaluated: &EvaluatedDiff,
-    ) -> (vsh_types::TransactionBinding, RuntimeDecision) {
+    ) -> Result<(vsh_types::TransactionBinding, RuntimeDecision), VshError> {
         let decision = RuntimeDecision::from(evaluated.decision.clone());
-        let binding = bind_transaction(TransactionIdentityInput {
+        let mut binding = bind_transaction(TransactionIdentityInput {
             base_snapshot,
             diff: &evaluated.diff,
             read_set: filesystem.read_set(),
@@ -1640,7 +1695,11 @@ impl Runtime {
             runtime_config,
             intent: request.intent,
         });
-        (binding, decision)
+        let mut invocation = [0; 32];
+        getrandom::fill(&mut invocation).map_err(VshError::InvocationEntropy)?;
+        binding.invocation = Some(vsh_types::InvocationId::from_bytes(invocation));
+        binding.commit_hook = self.config.commit_hook.map(hook_config_digest);
+        Ok((binding, decision))
     }
 
     fn seal_denied_evidence(
@@ -1718,11 +1777,13 @@ fn aggregate_runtime_digest(
     commit_hook: Option<HookConfig>,
 ) -> RuntimeConfigDigest {
     let mut canonical = Vec::with_capacity(66 + 8 * 23);
-    canonical.extend_from_slice(b"vsh-runtime-config-v6");
+    canonical.extend_from_slice(b"vsh-runtime-config-v7");
     canonical.extend_from_slice(monty.as_bytes());
     encode_usize(snapshot.max_nodes, &mut canonical);
     encode_usize(snapshot.max_depth, &mut canonical);
     canonical.extend_from_slice(&snapshot.max_total_file_bytes.to_le_bytes());
+    canonical.extend_from_slice(&snapshot.max_materialized_bytes.to_le_bytes());
+    canonical.extend_from_slice(&snapshot.max_materialized_file_bytes.to_le_bytes());
     encode_usize(commit.max_operations, &mut canonical);
     encode_usize(commit.max_dependencies, &mut canonical);
     encode_usize(commit.max_path_bytes, &mut canonical);
@@ -1744,6 +1805,7 @@ fn aggregate_runtime_digest(
     canonical.push(match result_compatibility {
         ResultCompatibility::Native => 0,
         ResultCompatibility::Python => 1,
+        ResultCompatibility::AgentJson => 2,
     });
     match commit_hook {
         None => canonical.push(0),
@@ -1756,6 +1818,17 @@ fn aggregate_runtime_digest(
             encode_usize(hook.max_content_bytes(), &mut canonical);
         }
     }
+    RuntimeConfigDigest::digest_canonical(&canonical)
+}
+
+fn hook_config_digest(hook: HookConfig) -> RuntimeConfigDigest {
+    let mut canonical = Vec::with_capacity(80);
+    canonical.extend_from_slice(b"vsh-commit-hook-v1");
+    canonical.extend_from_slice(hook.id().as_bytes());
+    canonical.push(hook.scope().tag());
+    canonical.extend_from_slice(&hook.approval_ttl_ms().to_le_bytes());
+    encode_usize(hook.max_reason_bytes(), &mut canonical);
+    encode_usize(hook.max_content_bytes(), &mut canonical);
     RuntimeConfigDigest::digest_canonical(&canonical)
 }
 
@@ -1887,6 +1960,8 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum VshError {
+    /// The operating system could not supply a fresh execution identity.
+    InvocationEntropy(getrandom::Error),
     /// Cancellation won before the host commit boundary.
     Cancelled,
     /// The requested frontend was not enabled by the host.
@@ -2029,6 +2104,9 @@ impl fmt::Display for VshError {
     )]
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvocationEntropy(source) => {
+                write!(formatter, "cannot create invocation identity: {source}")
+            }
             Self::Cancelled => formatter.write_str("VSH request cancelled before commit"),
             Self::LanguageUnavailable { language } => write!(
                 formatter,
@@ -2143,6 +2221,7 @@ impl fmt::Display for VshError {
 impl Error for VshError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::InvocationEntropy(source) => Some(source),
             Self::Cancelled | Self::LanguageUnavailable { .. } => None,
             #[cfg(feature = "bash")]
             Self::Bash { source, .. } => Some(source),
@@ -2282,6 +2361,49 @@ mod tests {
             "build vsh-bash-worker before public runtime tests"
         );
         crate::BashConfig::new(executable)
+    }
+
+    #[cfg(all(unix, feature = "bash"))]
+    #[test]
+    fn nested_bash_in_process_uses_the_active_overlay_and_sticky_limits() {
+        let workspace = TestDirectory::new("nested-bash-native");
+        let config = RuntimeConfig::new(workspace.path())
+            .with_in_process_execution()
+            .with_bash(bash_config());
+        let runtime = Runtime::open(config).unwrap();
+        let preview = runtime.preview(RunRequest::new("vsh_write('/workspace/a', 'one')\nr = vsh_bash('cat a; printf two > b')\nassert r['stdout'] == b'one'\nassert vsh_read('/workspace/b') == 'two'\n42")).unwrap();
+        assert_eq!(preview.changed_paths, 2);
+        assert!(!workspace.path().join("b").exists());
+        runtime.commit(preview.transaction, 1000).unwrap();
+        assert_eq!(fs::read(workspace.path().join("b")).unwrap(), b"two");
+        let error = runtime
+            .run(
+                RunRequest::new("vsh_bash('printf abc > c')\nvsh_bash('printf def > d')")
+                    .with_mode(RunMode::Auto)
+                    .with_budget(ExecutionBudget {
+                        max_write_bytes: 5,
+                        ..ExecutionBudget::default()
+                    }),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            VshError::Execution(ExecutionError::Bash(_))
+        ));
+        assert!(!workspace.path().join("c").exists());
+        let error = runtime
+            .run(
+                RunRequest::new(
+                    "try:\n    vsh_bash('printf no > e; false')\nexcept Exception:\n    pass",
+                )
+                .with_mode(RunMode::Auto),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            VshError::Execution(ExecutionError::Bash(_))
+        ));
+        assert!(!workspace.path().join("e").exists());
     }
 
     #[cfg(all(unix, feature = "bash"))]
@@ -2468,6 +2590,87 @@ mod tests {
     }
 
     #[test]
+    fn repeated_invocations_are_distinct_but_each_commit_is_single_use() {
+        let directory = TestDirectory::new("repeat-invocations");
+        let config = RuntimeConfig::new(directory.path()).with_in_process_execution();
+        let runtime = Runtime::open(config.clone()).unwrap();
+        let first = runtime.preview(RunRequest::new("None")).unwrap();
+        let second = runtime.preview(RunRequest::new("None")).unwrap();
+        assert_eq!(first.diff, second.diff);
+        assert_eq!(first.base_snapshot, second.base_snapshot);
+        assert_ne!(first.transaction, second.transaction);
+        runtime.commit(first.transaction, 1000).unwrap();
+        assert!(runtime.commit(first.transaction, 1001).is_err());
+        runtime.commit(second.transaction, 1002).unwrap();
+        drop(runtime);
+        let runtime = Runtime::open(config).unwrap();
+        let repeated = runtime
+            .run(RunRequest::new("None").with_mode(RunMode::Auto))
+            .unwrap();
+        assert_eq!(repeated.state, TransactionState::Committed);
+        assert_ne!(repeated.transaction, first.transaction);
+        let identities = std::thread::scope(|scope| {
+            let tasks: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        runtime
+                            .run(RunRequest::new("None").with_mode(RunMode::Auto))
+                            .unwrap()
+                            .transaction
+                    })
+                })
+                .collect();
+            tasks
+                .into_iter()
+                .map(|task| task.join().unwrap())
+                .collect::<std::collections::BTreeSet<_>>()
+        });
+        assert_eq!(identities.len(), 8);
+    }
+
+    #[test]
+    fn persisted_hook_requirement_cannot_be_removed_or_weakened_on_reopen() {
+        let directory = TestDirectory::new("hook-reopen-binding");
+        let config = RuntimeConfig::new(directory.path()).with_in_process_execution();
+        let hook = HookConfig::new("required").with_scope(HookScope::AllRequests);
+        let runtime = Runtime::open(config.clone().with_commit_hook(hook)).unwrap();
+        let receipt = runtime
+            .preview(RunRequest::new(
+                "vsh_write('/workspace/result.txt', 'review me')",
+            ))
+            .unwrap();
+        runtime.prepare_commit(receipt.transaction).unwrap();
+        drop(runtime);
+        for changed in [
+            config.clone(),
+            config.clone().with_commit_hook(HookConfig::new("required")),
+        ] {
+            let reopened = Runtime::open(changed).unwrap();
+            assert!(matches!(
+                reopened.prepare_commit(receipt.transaction),
+                Err(VshError::HookConfigurationChanged { .. })
+            ));
+            assert!(matches!(
+                reopened.commit(receipt.transaction, 1000),
+                Err(VshError::HookConfigurationChanged { .. })
+            ));
+            assert!(!directory.path().join("result.txt").exists());
+        }
+        let reopened = Runtime::open(config.with_commit_hook(hook)).unwrap();
+        assert!(
+            reopened
+                .prepare_commit(receipt.transaction)
+                .unwrap()
+                .event()
+                .is_some()
+        );
+        assert!(matches!(
+            reopened.commit(receipt.transaction, 1000),
+            Err(VshError::HookRequired(_))
+        ));
+    }
+
+    #[test]
     fn cached_monty_adapter_preserves_policy_namespace_and_request_limits() {
         use vsh_policy::{AccessSet, CallPolicy, ProtectedRule, TransactionPolicy};
 
@@ -2609,6 +2812,68 @@ len(value)
         assert!(runtime.discard_preview(first.transaction).unwrap());
         assert!(!runtime.discard_preview(first.transaction).unwrap());
         runtime.preview(RunRequest::new("1")).unwrap();
+    }
+
+    #[test]
+    fn rename_diff_materialization_obeys_host_capture_limits() {
+        let directory = TestDirectory::new("bounded-rename-capture");
+        fs::write(directory.path().join("large.txt"), vec![b'x'; 8192]).unwrap();
+        let runtime = Runtime::open(
+            RuntimeConfig::new(directory.path())
+                .with_in_process_execution()
+                .with_snapshot_limits(SnapshotLimits {
+                    max_materialized_bytes: 1,
+                    ..SnapshotLimits::default()
+                }),
+        )
+        .unwrap();
+        let error = runtime
+            .preview(RunRequest::new(
+                "vsh_move('/workspace/large.txt', '/workspace/moved.txt')",
+            ))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("host materialized-bytes limit exceeded"),
+            "{error}"
+        );
+        assert!(!directory.path().join("moved.txt").exists());
+        assert!(directory.path().join("large.txt").exists());
+    }
+
+    #[test]
+    fn agent_json_validation_precedes_auto_commit() {
+        let directory = TestDirectory::new("agent-json-result");
+        let runtime = Runtime::open(
+            RuntimeConfig::new(directory.path())
+                .with_result_compatibility(ResultCompatibility::AgentJson)
+                .with_in_process_execution(),
+        )
+        .unwrap();
+        for value in [
+            "{1, 2}",
+            "frozenset([1])",
+            "{1: 'one', '1': 'string'}",
+            "float('nan')",
+            "{'nested': [set([1])]}",
+        ] {
+            let code = format!("vsh_write('/workspace/created.txt', 'blocked')\n{value}");
+            assert!(matches!(
+                runtime.run(RunRequest::new(&code).with_mode(RunMode::Auto)),
+                Err(VshError::ResultCompatibility(_))
+            ));
+            assert!(!directory.path().join("created.txt").exists());
+        }
+        let valid = runtime
+            .run(
+                RunRequest::new(
+                    "{'sequence': (1, True, None), 'bytes': b'content', 'number': 1.25}",
+                )
+                .with_mode(RunMode::Auto),
+            )
+            .unwrap();
+        assert_eq!(valid.state, TransactionState::Committed);
     }
 
     #[test]

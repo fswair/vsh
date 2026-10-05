@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+from dataclasses import asdict
 
 import pytest
 from pydantic_ai import Agent
@@ -11,7 +12,8 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
 
-from vsh import BashConfig, HookDecision, HookScope, RequestEvent
+from vsh import BashConfig, HookDecision, HookScope, RequestEvent, VshRuntimeError
+from vsh._response import response_size
 from vsh.pydantic_ai import VshCapability
 
 
@@ -57,6 +59,21 @@ def test_capability_exposes_native_vsh_filesystem_toolset(tmp_path) -> None:
     assert "never JSON objects" in (toolset.tools["vsh_run"].description or "")
 
 
+def test_run_only_keeps_guest_functions_and_one_agent_tool(tmp_path) -> None:
+    capability = VshCapability(tmp_path, run_only=True)
+    toolset = capability.get_toolset()
+    assert isinstance(toolset, FunctionToolset)
+    assert set(toolset.tools) == {"vsh_run"}
+    result = asyncio.run(
+        capability.vsh_run(
+            "vsh_write('/workspace/item.txt', 'value')\nvsh_read('/workspace/item.txt')",
+            intent="write and verify one item",
+        )
+    )
+    assert result.state == "committed"
+    assert result.result == "value"
+
+
 def test_capability_runs_real_write_and_read_transactions(tmp_path) -> None:
     capability = VshCapability(tmp_path)
 
@@ -68,6 +85,41 @@ def test_capability_runs_real_write_and_read_transactions(tmp_path) -> None:
     assert not written.requires_review
     assert read.result == "hello"
     assert (tmp_path / "hello.txt").read_text() == "hello"
+    repeated = asyncio.run(capability.vsh_read("/workspace/hello.txt"))
+    assert repeated.result == read.result
+    assert repeated.transaction != read.transaction
+
+
+@pytest.mark.parametrize("hooked", [False, True])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "{1, 2}",
+        "frozenset([1, 2])",
+        "{1: 'one', '1': 'string'}",
+        "float('nan')",
+        "{'nested': [set([1])]} ",
+    ],
+)
+def test_agent_result_validation_precedes_host_mutation(tmp_path, hooked, value) -> None:
+    events = []
+
+    def approve(event: RequestEvent) -> HookDecision:
+        events.append(event)
+        return HookDecision.approve("test")
+
+    capability = VshCapability(
+        tmp_path, hook_handler=approve if hooked else None, hook_scope=HookScope.ALL_REQUESTS
+    )
+    with pytest.raises(VshRuntimeError, match="agent JSON"):
+        asyncio.run(
+            capability.vsh_run(
+                f"vsh_write('/workspace/created.txt', 'must not commit')\n{value}",
+                intent="test result projection",
+            )
+        )
+    assert not (tmp_path / "created.txt").exists()
+    assert not events
 
 
 def test_capability_returns_hook_feedback_without_new_transaction_state(tmp_path) -> None:
@@ -86,6 +138,33 @@ def test_capability_returns_hook_feedback_without_new_transaction_state(tmp_path
     assert result.hook_verdict == "review"
     assert result.feedback == "Confirm that replacing the production manifest is intended."
     assert not (tmp_path / "manifest.txt").exists()
+
+
+def test_agent_response_budget_preserves_commit_outcome(tmp_path) -> None:
+    capability = VshCapability(tmp_path, max_response_bytes=4096)
+    result = asyncio.run(
+        capability.vsh_run(
+            "vsh_write('/workspace/ok.txt', 'ok')\nprint('🙂' * 10000)\n'large' * 10000",
+            "bounded presentation",
+        )
+    )
+    assert result.state == "committed" and result.response_truncated
+    assert (tmp_path / "ok.txt").read_text() == "ok"
+    assert response_size(asdict(result)) <= 4096
+    assert result.result is None and result.stdout == ""
+
+    reviewed = VshCapability(
+        tmp_path,
+        max_response_bytes=4096,
+        hook_scope=HookScope.ALL_REQUESTS,
+        hook_handler=lambda _: HookDecision.review("🙂" * 3000),
+    )
+    result = asyncio.run(reviewed.vsh_run("None", "bounded review feedback"))
+    assert result.state == "pending_approval" and result.response_truncated
+    assert response_size(asdict(result)) <= 4096
+    assert result.feedback is not None and result.feedback.endswith("[feedback truncated]")
+    with pytest.raises(ValueError, match="max_response_bytes"):
+        VshCapability(tmp_path, max_response_bytes=1)
 
 
 def test_capability_runs_through_a_real_pydantic_ai_agent(tmp_path) -> None:
@@ -195,6 +274,8 @@ def test_capability_rejects_non_json_native_result() -> None:
 
     with pytest.raises(TypeError, match="cannot be sent to Pydantic AI"):
         normalize(object())
+    with pytest.raises(TypeError, match="keys must be strings"):
+        normalize({1: "integer", "1": "string"})
 
 
 def test_bash_capability_opt_in_bytes_and_review_output_gate(tmp_path) -> None:

@@ -112,6 +112,39 @@ def hooked(
     )
 
 
+@pytest.mark.parametrize("size", [12 * 1024, 48 * 1024])
+def test_large_text_evidence_is_not_triplicated_and_keeps_complete_content(
+    tmp_path: Path, size: int
+) -> None:
+    before, after = "a" * size, "b" * size
+    (tmp_path / "data.txt").write_text(before)
+    observed: list[dict[str, Any]] = []
+
+    def inspect(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        data = payload(messages)
+        observed.append(data)
+        assert [content["text"] for content in data["contents"]] == [before, after]
+        change = data["resolved_changes"][0]
+        assert change["before_content"] == "content:0"
+        assert change["after_content"] == "content:1"
+        assert change["diff_display_truncated"] is True
+        assert len(change["unified_diff"].encode()) <= 4096
+        assert "before_text" not in change and "after_text" not in change
+        assert len(json.dumps(data).encode()) < 2 * size + 16 * 1024
+        return response(info, data, decision="review", reason="Human review requested")
+
+    runtime = hooked(
+        tmp_path,
+        CommitJudge(FunctionModel(inspect), content_filter=lambda _: True),
+        content_bytes=128 * 1024,
+    )
+    result = asyncio.run(
+        runtime.arun(RunRequest(f"vsh_write('/workspace/data.txt', {after!r})", mode=RunMode.AUTO))
+    )
+    assert result.state == "pending_approval" and len(observed) == 1
+    assert (tmp_path / "data.txt").read_text() == before
+
+
 def test_judge_sees_exact_before_after_and_approves_pending_without_human(tmp_path: Path) -> None:
     (tmp_path / "config.txt").write_text("before")
     observed: list[dict[str, Any]] = []
@@ -197,14 +230,16 @@ def test_judge_resolves_exact_text_and_line_diff_without_committing(
     def inspect(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         data = payload(messages)
         observed.append(data)
+        content_refs = {(row["path"], row["text"]): row["ref"] for row in data["contents"]}
         assert data["resolved_changes"] == [
             {
                 "ref": "change:0",
                 "path": "config.txt",
                 "kind": data["changes"][0]["kind"],
-                "before_text": before,
-                "after_text": after,
+                "before_content": None if before is None else content_refs["config.txt", before],
+                "after_content": None if after is None else content_refs["config.txt", after],
                 "unified_diff": expected_diff,
+                "diff_display_truncated": False,
             }
         ]
         assert "change:0" in data["required_approval_references"]
@@ -266,14 +301,17 @@ def test_text_display_preserves_non_text_change_semantics(tmp_path: Path, operat
         data = payload(messages)
         observed.append(data)
         rows = data["resolved_changes"]
+        texts = {row["ref"]: row["text"] for row in data["contents"]}
         if operation == "directory":
-            assert rows[0]["before_text"] is None and rows[0]["after_text"] is None
+            assert rows[0]["before_content"] is None and rows[0]["after_content"] is None
             assert (
                 rows[0]["unified_diff"] == "" and data["changes"][0]["after"]["kind"] == "directory"
             )
         elif operation == "rename":
             assert {row["path"] for row in rows} == {"file.txt", "renamed.txt"}
-            assert {(row["before_text"], row["after_text"]) for row in rows} == {
+            assert {
+                (texts.get(row["before_content"]), texts.get(row["after_content"])) for row in rows
+            } == {
                 (text, None),
                 (None, text),
             }
@@ -282,7 +320,9 @@ def test_text_display_preserves_non_text_change_semantics(tmp_path: Path, operat
             assert data["changes"][0]["kind"] == "metadata_change"
             assert data["changes"][0]["before"]["mode"] != data["changes"][0]["after"]["mode"]
         else:
-            assert rows[0]["before_text"] == "file.txt" and rows[0]["after_text"] is None
+            assert (
+                texts[rows[0]["before_content"]] == "file.txt" and rows[0]["after_content"] is None
+            )
             assert "-file.txt\n" in rows[0]["unified_diff"]
         return response(info, data, decision="review")
 
@@ -406,7 +446,7 @@ def test_derived_diff_budgets_fail_closed_before_model_call(tmp_path: Path, case
     judge = CommitJudge(
         FunctionModel(forbidden),
         content_filter=lambda _: True,
-        max_input_bytes=16_000 if case == "serialized_expansion" else 131_072,
+        max_input_bytes=8_000 if case == "serialized_expansion" else 131_072,
     )
     decision = asyncio.run(judge.hook_handler(event))
     assert decision.verdict == "review"

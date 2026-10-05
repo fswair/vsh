@@ -6,6 +6,12 @@ overlay, one canonical change set and one policy
 decision. The Python adapter constructs a native request and projects the receipt;
 it does not implement a separate filesystem simulator.
 
+!!! note "Development checkout hardening"
+
+    Host-fixed tool configuration, aggregate payload budgets and automatic read-only
+    preview cleanup on this page are unreleased changes after 0.6.0. Build this checkout
+    to use them; the installation command below installs the published release.
+
 ## Install and launch
 
 ```bash
@@ -45,9 +51,13 @@ inside the environment where VSH is installed:
 ```
 
 Use the environment's `vsh-codemode` executable with empty `args` for CodeMode guidance.
-Client configuration formats vary; `cwd` selects the default workspace, **not an
-authorization allowlist**. The raw tool still accepts `workspace_root`, policy and
-budget arguments. Constrain those in a trusted wrapper for an untrusted client.
+Client configuration formats vary. The server captures `VSH_WORKSPACE_ROOT` (or its
+startup working directory) as its authorized workspace when registering the tool.
+The model cannot replace the root, policy, worker or execution budget. Python hosts
+can configure these with `register_vsh_surface(server, workspace_root=..., policy=...,
+budget=...)` or `create_codemode_server(...)`. These are host constructor options,
+not tool arguments. The Python `native_tools.vsh_run` helper and CLI remain explicit
+trusted-host interfaces.
 
 ## Request contract
 
@@ -57,12 +67,9 @@ vsh_run(
     *,
     language: "monty" | "bash" = "monty",
     transaction: str | None = None,
-    workspace_root: str | None = None,
     intent: str | None = None,
     mode: "preview" | "auto" = "preview",
-    policy: "balanced" | "strict" | "paranoid" = "balanced",
     detail: "compact" | "full" = "compact",
-    budget: BudgetOverrides | None = None,
 ) -> dict[str, object]
 ```
 
@@ -75,7 +82,7 @@ See [bounded Bash](bash.md) for the supported Unix profile and noncommittable fa
 For new work pass `code`. For promotion pass `transaction`, no code, and `mode="auto"`.
 Resolve the same workspace/profile/worker identity as the preview. Promotion does not
 rerun source or create a different detail/budget configuration for the existing artifact.
-The budget keys match the [Python execution budget](../python/api.md#executionbudget).
+Host-configured budget keys match the [Python execution budget](../python/api.md#executionbudget).
 
 ## Preview, review, promote
 
@@ -122,13 +129,15 @@ MCP returns `result_repr`, not the Python SDK's arbitrary typed `result`. Do not
 that representation. `diff` is not a textual diff; request bounded before/after content
 when reviewing a transformation.
 
-The adapter retains **65,536 Python characters plus an ellipsis** independently for
-result representation, stdout and stderr. This is not 64 KiB of UTF-8, a whole-envelope cap or
-a token limit. JSON escaping and full change lists add transport bytes. Truncation
-happens after constructing the representation; return small results in the first place.
-The separate `bash` object encodes at most 65,536 **raw bytes** per stream before
-base64 conversion and marks `output_truncated` if either stream exceeds that bound.
-Do not use the top-level lossy display text for binary comparison or approval.
+The registered agent tool has an aggregate **16 KiB compact ASCII-JSON payload budget**,
+including escaping and field names. The host can set `max_response_bytes` when registering
+the surface (minimum 4096). This is a byte budget, not a token guarantee or a bound on
+MCP transport wrappers. Large result/output/change-list display fields are omitted with
+`response_truncated=true`; state, transaction identity and commit outcome remain truthful.
+Return selected fields or short slices from Monty when you need useful bounded output.
+Bash streams appear once as base64 in `bash`, not again as repr and lossy text.
+The trusted Python helper and CLI retain their separate per-field 65,536-character/raw-byte
+display limits; they do not claim the registered tool's aggregate bound.
 
 ## Lifetime and retention limits
 
@@ -154,9 +163,12 @@ encoded artifacts. Capacity fails closed; previews are not silently evicted with
 runtime to make room. The **runtime LRU can evict a whole runtime**, losing its
 auto-approved handles even while the server process remains alive.
 
-Restart also loses those handles. Read-only previews consume capacity too, and the raw
-MCP surface has no discard tool. For high-rate analysis, use an SDK-owned service that
-can discard completed previews; do not treat the raw cache as a durable queue.
+Restart also loses those handles. The registered tool automatically discards completed
+auto-approved previews with no canonical changes: their response has `preview_retained=false`
+and cannot be promoted. Mutating or approval-required previews remain retained. A host
+which needs read-only promotion can register `retain_read_only_previews=True` and own the
+cleanup lifecycle explicitly. This releases preview retention, not general blob-store
+garbage collection; do not treat the cache as a durable queue.
 
 Pending approval artifacts are durable. MCP does not expose approval minting: a trusted
 Python/Rust service must authenticate the reviewer and call `approve`. Model-authored

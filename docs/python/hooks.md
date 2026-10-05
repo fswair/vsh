@@ -40,6 +40,12 @@ would return `pending_approval`. Select `HookScope.ALL_REQUESTS` to inspect succ
 read-only and auto-approved simulations too. Denied access and denied mutation remain
 unhookable.
 
+`HookedRuntime.open` also forwards the host-only `snapshot_limits` and
+`result_compatibility` options from [Runtime.open](api.md). Agent integrations choose
+`agent_json` so result conversion cannot first fail after a successful commit.
+The hook configuration is transaction-bound: reopening without the hook, or changing
+its identity, scope or evidence limits, cannot bypass an existing review requirement.
+
 ## Evidence contract
 
 `RequestEvent` is immutable and transaction-bound. It includes:

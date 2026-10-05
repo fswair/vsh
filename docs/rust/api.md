@@ -7,6 +7,9 @@ Use the [complete Rust cookbook](examples.md) for a compiled example. Unlike Pyt
 the Rust preview API accepts a borrowed `RunRequest`; it does not emulate Python's
 source-string overload. The guest `vsh_*` surface is included in VSH.
 
+The `AgentJson` compatibility mode, extra host materialization limits and nested
+Monty `vsh_bash` support below are unreleased development-checkout additions.
+
 ## Constants and diagnostics
 
 ```rust
@@ -34,12 +37,12 @@ let config = RuntimeConfig::new(workspace_root)
 | `with_worker_path(path)` | Select the exact supervised worker executable |
 | `with_bash(BashConfig)` | Opt into the separate bounded Bash frontend (`bash` feature) |
 | `with_max_idle_workers(count)` | Bound reusable clean workers; zero disables pooling |
-| `with_result_compatibility(kind)` | Require native or Python-projectable result values |
+| `with_result_compatibility(kind)` | Require `Native`, `Python`, or pre-commit `AgentJson` result compatibility |
 | `with_in_process_execution()` | Trusted-only correctness/benchmark harness |
 | `with_virtual_root(root)` | Change the synthetic absolute namespace shown to Monty |
 | `with_policy(policy)` | Supply a custom validated deterministic policy |
 | `with_policy_profile(profile)` | Select balanced, strict, or paranoid presets |
-| `with_snapshot_limits(limits)` | Replace eager traversal and snapshot ceilings |
+| `with_snapshot_limits(limits)` | Bound metadata traversal plus aggregate/per-file lazy host capture |
 | `with_commit_config(config)` | Replace trusted commit/recovery ceilings |
 | `with_store_config(config)` | Replace durable transaction-log ceilings |
 | `with_artifact_limits(limits)` | Replace pending-artifact and cache ceilings |
@@ -50,6 +53,12 @@ let config = RuntimeConfig::new(workspace_root)
 | `policy()` | Borrow the deterministic transaction policy |
 
 Builder values contribute to runtime configuration identity where security relevant.
+
+`SnapshotLimits::max_materialized_bytes` (64 MiB) and
+`max_materialized_file_bytes` (4 MiB) bound host reads including content captured during
+canonical diff generation. They are separate from guest read counters. Nested
+`vsh_bash(code)` is enabled by the same `bash` feature and `with_bash` configuration as
+top-level Bash; it borrows the current VFS and budget, not another `Runtime`.
 Idle-pool capacity is not an admission limit on concurrent calls. Reusing a runtime
 retains clean workers and capabilities, but every execution captures a fresh snapshot.
 

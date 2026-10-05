@@ -29,7 +29,7 @@ trusted committer without exposing unauthorized host data or mutation paths.
 | Fresh judge | advisory/separate principal | It cannot reverse deterministic deny. |
 | Transaction store | trusted state | CAS transitions enforce single-use commit. |
 | Committer | smallest trusted host writer | It alone may mutate the real workspace. |
-| External concurrent process | adversarial race source | Revalidation must detect dependency changes. |
+| External concurrent process | adversarial race source with a host-containment limitation | Dependency checks and mutation checkpoints detect observed changes; they are not OS isolation against arbitrary directory relocation. |
 | Third-party dependencies | supply-chain risk | Exact pins and continuous advisory/license/source checks apply. |
 
 ## Attacker capabilities
@@ -65,6 +65,17 @@ Controls:
 - no path resolution fallback to ambient process CWD,
 - symlink policy applied before data exposure and again at commit,
 - adversarial platform/path tests.
+
+!!! warning "Concurrent directory relocation requires an OS boundary"
+
+    A descriptor pinned inside the workspace can be moved outside it by another host
+    process that has sufficient directory permissions. Revalidation and per-mutation
+    parent-identity checks reject observed relocation/replacement, including the
+    post-revalidation regression scenario, but a rename can still occur between a check
+    and its filesystem syscall. Advisory VSH locks do not stop an uncooperative process.
+    Do not deploy commit against a workspace writable by an adversarial external process
+    and claim absolute path containment. That deployment requires OS-enforced isolation
+    or exclusive host-controlled directory ownership. VSH alone does not provide it.
 
 ### Confidentiality and output exfiltration
 

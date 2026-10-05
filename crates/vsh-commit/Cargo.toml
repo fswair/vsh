@@ -15,6 +15,7 @@ publish = ["crates-io"]
 blake3.workspace = true
 cap-std.workspace = true
 vsh-policy.workspace = true
+vsh-execution.workspace = true
 vsh-store.workspace = true
 vsh-types.workspace = true
 vsh-vfs.workspace = true

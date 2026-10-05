@@ -82,7 +82,7 @@ Use the links below for focused documentation. Use llms-full.txt when a single c
 
 - [Rust and Python API parity](https://fswair.github.io/vsh/language-parity/): The PyO3 SDK is an adapter over the native crate. This document defines what “same engine” means in tests and releases.
 
-- [Performance and optimization evidence](https://fswair.github.io/vsh/performance/): The latest local candidate also avoids an unsuccessful mkdir for every existing blob shard. It inspects the entry without following links and creates only missing directories. Opened/named...
+- [Performance and optimization evidence](https://fswair.github.io/vsh/performance/): The unreleased development checkout now uses exact-pinned memchr 2.8.3 directly for case-sensitive search. This keeps the existing SIMD-capable literal finder and replaces the experimental...
 
 - [Dependency policy](https://fswair.github.io/vsh/dependency-policy/): Checked: 2026-09-05
 

@@ -8,6 +8,9 @@ start with the [cookbook](examples.md), not isolated API fragments.
 The shipped `vsh._native.pyi` is the static signature contract. Guest `vsh_*` functions
 are a separate [Monty program surface](../integrations/monty-tools.md), not module exports.
 
+`SnapshotLimits` and `result_compatibility` are unreleased additions in this checkout,
+not options provided by the published 0.6.0 wheel.
+
 ## Module functions
 
 ### `engine_kind() -> str`
@@ -78,6 +81,23 @@ available as a read-only property with the same name. See
 calls. The functions available in every `code` program are documented in
 [VSH functions inside Monty](../integrations/monty-tools.md).
 
+## `SnapshotLimits`
+
+Trusted-host limits for metadata enumeration and lazy content capture. Pass an immutable
+`SnapshotLimits(...)` to `Runtime.open`, `HookedRuntime.open`, or `VshCapability`.
+Every keyword is optional and exposed as a read-only property:
+
+| Keyword | Default |
+|---|---:|
+| `max_nodes` | 250,000, including the root |
+| `max_depth` | 128 |
+| `max_total_file_bytes` | 16 GiB represented by snapshot metadata |
+| `max_materialized_bytes` | 64 MiB captured host bytes per snapshot |
+| `max_materialized_file_bytes` | 4 MiB per captured file/link |
+
+Lazy reads performed while producing canonical changes consume these capture bounds,
+even without guest read calls. See [budget semantics](../guides/policies-and-budgets.md).
+
 ## `RunRequest`
 
 `Language.MONTY` (default) and `Language.BASH` select the guest frontend. Bash
@@ -121,12 +141,23 @@ Runtime.open(
     hook_id: str | None = ...,
     hook_scope: HookScope | None = ...,
     review_content_bytes: int = 0,
+    result_compatibility: "python" | "agent_json" = "python",
+    snapshot_limits: SnapshotLimits | None = None,
 ) -> Runtime
 ```
 
 Opens capability roots, validates separation, creates bounded stores, starts worker
 supervision, and performs startup recovery. The workspace must already exist and be a
 directory.
+
+`result_compatibility` selects a **pre-commit acceptance contract**, not a new serializer.
+The default keeps the rich native Python result surface. `"agent_json"` allows finite
+scalars, strings, bytes, paths, sequences, and string-keyed dictionaries; it rejects
+sets, arbitrary-precision Monty integers, non-finite floats, non-string keys, and other
+unsupported values before committing. Return giant numbers as strings and sets as
+explicit lists. `VshCapability` selects this contract automatically, then projects
+bytes to base64 objects and paths to strings. It never silently merges keys such as
+`1` and `"1"`. The ordinary Python SDK still supports richer Python values.
 
 ### `run(request: RunRequest) -> Receipt`
 

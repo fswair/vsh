@@ -10,12 +10,14 @@ authenticate users or determine whether an agent understood the task.
 | Integration | Good fit | Host responsibility |
 |---|---|---|
 | Python/Rust SDK wrapper | Managed services and high-rate workflows | Own runtime lifecycle, fixed roots/budgets, review and discard |
-| `vsh serve` | An MCP host with its own workflow guidance | Restrict raw arguments and manage server lifetime |
+| `vsh serve` | An MCP host with its own workflow guidance | Fix the workspace/configuration at registration; manage server lifetime |
 | `vsh-codemode` | MCP clients consuming server instructions/prompts | Same controls; instructions are not policy enforcement |
 
-The raw MCP tool exposes workspace, policy and budget choices. Do not assume its
-working directory confines an untrusted caller. Run with appropriate operating-system
-permissions and place an authorization layer around those arguments.
+The registered MCP tool fixes workspace, policy and budget on the trusted host;
+these are not model arguments. Its default root is captured at registration from
+`VSH_WORKSPACE_ROOT` or the working directory. Set it explicitly in a service and
+enforce session authentication and appropriate operating-system permissions. The
+Python helper and CLI still accept these choices as trusted host APIs.
 
 ## Keep trusted choices out of the model schema
 
@@ -89,9 +91,11 @@ Reuse one runtime per authorized workspace/configuration. Complete every auto-ap
 preview lifecycle; read-only requests must be discarded after consumption. Use strict
 durable artifacts for asynchronous human review, not process-local auto-preview caches.
 
-The raw MCP LRU retains 16 runtimes and can lose handles on eviction. Its one-tool
-surface has no discard action. SDK wrappers are better suited to continuous analysis
-and long-lived services. Bound concurrent active requests independently of idle worker
+The MCP LRU retains 16 runtimes and can lose handles on eviction. Registered MCP
+automatically discards auto-approved previews without canonical changes; its response
+reports `preview_retained`. Mutating and pending previews remain available for promotion.
+SDK callers own explicit discard, and SDK wrappers are better suited to durable
+long-lived workflows. Bound concurrent active requests independently of idle worker
 pool capacity, and expect stale conflicts for concurrent work on one workspace.
 
 Guest bytecode/heap limits are not whole-service deadlines or memory quotas. Monitor

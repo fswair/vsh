@@ -1,5 +1,86 @@
 # Performance and optimization evidence
 
+## Literal search: direct memchr decision — 2026-10-05
+
+The **unreleased development checkout** now uses exact-pinned `memchr` 2.8.3 directly
+for case-sensitive search. This keeps the existing SIMD-capable literal finder and
+replaces the experimental `fff-grep` line/callback adapter with a small matching-line
+iterator. It does not revert to the original per-line `str::find` scan. Unicode
+case-insensitive matching, policy authorization, VFS reads and evidence are unchanged.
+
+The decision follows a separate controlled comparison on Apple M1 / 8 GiB / macOS
+26.1: the same native release-profile harness, fixtures and transaction path, with
+only the matcher adapter selected between runs. There were 12 paired observations
+per end-to-end cell across 200 / 2,000 / 5,000 files and common / rare / absent queries.
+The paired median improvement for direct `memchr` ranged from **−0.73% to +0.33%**.
+Some cells slightly favored FFF; this is not a claim that either implementation is
+universally faster, or a formal equivalence bound on other systems.
+
+| Matcher-only case | FFF median | Direct memchr median |
+| --- | ---: | ---: |
+| 5,000 files, common | 0.026660 ms | 0.025735 ms |
+| 5,000 files, rare | 0.744408 ms | 0.744108 ms |
+| 5,000 files, absent | 0.736219 ms | 0.734239 ms |
+| Dense matching lines | 0.006910 ms | 0.005697 ms |
+| Unicode / CRLF lines | 0.008319 ms | 0.006202 ms |
+
+Seven additional input shapes included large no-hit/tail-hit files, dense/sparse
+matches, Unicode/CRLF, empty files and overlapping needles. The scratch comparison
+also checked 397,800 oracle comparisons over 3,825 generated texts. Measurements
+preceded promotion of the direct iterator into production; they are not a second
+post-integration benchmark. No process-memory or agent-token savings are claimed.
+Removing FFF removes one otherwise-exclusive crate from the measured dependency graph;
+its other dependencies were already shared elsewhere.
+
+Separate profiling of a 5,000-file rare query attributed approximately **61.82%** of
+native time to lazy host capture, **32.52%** to blob insertion/verification and **0.10%**
+to FFF matching. These are instrumented attribution results, not an additive speedup
+promise. They explain why changing the line adapter barely affects transaction latency.
+Capture/blob optimizations need their own correctness and performance gates; this
+change does not weaken stale detection, hash verification or authorization.
+
+Local replay artifacts (ignored by Git): `target/fff_memchr_2026_10_05/README.md`,
+`run1/summary.json`, `shapes.jsonl`, `correctness.log` and
+`target/FFF_DETAILED_MEASUREMENT_2026_10_05.md`.
+
+## Earlier exploratory FFF comparison — 2026-10-05
+
+This measurement covers **unreleased working-tree changes**, not published 0.6.0.
+This earlier candidate used `fff-grep` 0.11.0 over authorized VFS byte slices, before
+the direct-memchr decision above. There was no host-side FFF index, watcher or mmap in
+VSH. Unicode-insensitive matching retained its existing semantics. Snapshot, policy,
+content capture, read dependencies and canonical evidence stayed on the transaction path.
+
+On an Apple M1 / 8 GiB / macOS 26.1 machine, the same Python harness searched
+deterministic 4096-byte files (seed 63227). Each size used three fresh engine/store
+rounds, alternating engines, with nine warm queries per case: 27 samples per cell.
+Common matches stop at 100; rare matches occur in the final two files; absent returns
+zero. Result counts and fixture SHA-256 identities were verified. Times are medians
+in milliseconds, including VSH preview rather than just the matching loop.
+
+| Files | VSH before: common / rare / absent | VSH after: common / rare / absent | Standalone indexed FFF after: common / rare / absent |
+| ---: | ---: | ---: | ---: |
+| 200 | 14.960 / 27.666 / 27.757 | 15.500 / 28.757 / 28.469 | 1.416 / 2.551 / 2.282 |
+| 2,000 | 21.561 / 292.038 / 295.911 | 20.915 / 273.640 / 276.504 | 1.219 / 13.130 / 12.815 |
+| 5,000 | 37.215 / 1737.027 / 1688.226 | 32.238 / 731.120 / 729.393 | 1.256 / 36.586 / 35.693 |
+
+The 5,000-file baseline varied substantially: rare-query round medians were about
+1926, 1808 and 743 ms. The candidate's 731 ms is close to that fastest baseline
+round. **Do not attribute the pooled 2.4× ratio to FFF**, or treat this observational
+before/after series as an isolated causal performance gate. Other audit fixes changed
+the checkout, and system/cache variation matters. The 200-file cases did not improve.
+
+Fresh engine/store plus first rare query took approximately 1.81 / 16.97 / 42.19 s
+for VSH versus 48 / 56 / 119 ms for standalone FFF at these sizes. OS page caches
+were not flushed; process startup/imports were excluded. Standalone indexed FFF is
+still much faster for repeated search, but it does not do VSH transaction/evidence
+work or search uncommitted VSH overlays. This is not security-equivalent replacement
+evidence. No commit-inclusive latency, whole-process memory reduction or agent token
+savings is claimed. The later attribution and controlled comparison are summarized above.
+
+Raw local artifacts: `target/fff_search_benchmark_2026_10_05/results.json` (baseline),
+`after-integration.json` (candidate), and `compare.py` (unchanged harness).
+
 ## Stable integration decision — 2026-10-02
 
 The latest local candidate also avoids an unsuccessful `mkdir` for every existing

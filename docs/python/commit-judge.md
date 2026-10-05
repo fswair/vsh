@@ -389,13 +389,17 @@ authorize commit. This validates traceability, not the semantic correctness of a
 
 Both judge types also receive `resolved_changes`: a readable view of each non-metadata
 canonical change, linked to the same `change:N` reference. Each entry contains its
-path, kind, exact `before_text` and `after_text`, and a unified line diff. The model
-does not have to join blob hashes to discover that a security setting disappeared
-inside an otherwise routine edit. The original canonical nodes, content records and
-ordered effects remain in the packet; the readable view does not replace them.
+path, kind, `before_content` and `after_content` references into `contents`, and a
+unified line diff for convenience. Exact file bodies occur in the path-bound content
+records, not again in each resolved change. The diff display is capped at 4096 UTF-8
+bytes per change and marked with `diff_display_truncated`; complete referenced contents
+remain authoritative and must be inspected even when the display is shortened.
+The canonical nodes and ordered effects remain in the packet. Missing or unauthorized
+required content still prevents judge approval; display compaction never fabricates it.
 
 Text is resolved only from authorized evidence with the same **path and blob ID**.
-An absent node or directory has `null` text; an empty file has `""`. Diff headers use
+An absent node or directory has a `null` content reference; an empty file references
+an explicit `""` content body. Diff headers use
 fixed `before`/`after` labels, with filenames kept in the JSON path field. Missing
 final newlines are marked explicitly. Metadata-only changes stay in `changes` and
 `effects`, without a `resolved_changes` entry: native review does not capture file

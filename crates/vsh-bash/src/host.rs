@@ -379,6 +379,36 @@ impl SubprocessBash {
         let deadline = Instant::now()
             .checked_add(self.config.timeout(limits))
             .ok_or_else(|| BashError::Configuration("wall deadline overflow".into()))?;
+        self.execute_with_budget(
+            code,
+            filesystem,
+            policy,
+            &mut ExecutionBudget::new(limits),
+            cancellation,
+            deadline,
+        )
+    }
+
+    /// Run a fresh shell against an existing transaction and its cumulative I/O ledger.
+    /// The deadline and cancellation belong to the outer invocation; no snapshot or
+    /// commit is created here. Bash interpreter work limits apply to each shell.
+    ///
+    /// # Errors
+    /// Any failure is terminal for the entire outer transaction, not guest-catchable.
+    pub fn execute_with_budget(
+        &self,
+        code: &str,
+        filesystem: &mut VirtualFs,
+        policy: &CallPolicy,
+        budget: &mut ExecutionBudget,
+        cancellation: &BashCancellation,
+        outer_deadline: Instant,
+    ) -> Result<BashOutcome, BashError> {
+        let limits = budget.limits();
+        let deadline = Instant::now()
+            .checked_add(self.config.timeout(limits))
+            .ok_or_else(|| BashError::Configuration("wall deadline overflow".into()))?
+            .min(outer_deadline);
         let control = ExecutionControl {
             deadline,
             cancellation,
@@ -406,7 +436,7 @@ impl SubprocessBash {
             code,
             filesystem,
             policy,
-            limits,
+            budget,
             self.config.limits,
             &control,
         );
@@ -655,10 +685,11 @@ impl Worker {
         code: &str,
         filesystem: &mut VirtualFs,
         policy: &CallPolicy,
-        limits: ExecutionLimits,
+        budget: &mut ExecutionBudget,
         bash_limits: BashLimits,
         control: &ExecutionControl<'_>,
     ) -> Result<BashOutcome, BashError> {
+        let limits = budget.limits();
         let session = NEXT_SESSION
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 value.checked_add(1)
@@ -693,7 +724,9 @@ impl Worker {
                     duration_us: u64::try_from(limits.max_duration.as_micros()).unwrap_or(u64::MAX),
                     max_program_bytes: limits.max_program_bytes,
                     max_memory_bytes: limits.max_memory_bytes,
-                    max_output_bytes: limits.max_output_bytes,
+                    max_output_bytes: limits
+                        .max_output_bytes
+                        .saturating_sub(budget.stats().output_bytes),
                     max_recursion_depth: limits.max_recursion_depth,
                 }),
             },
@@ -701,7 +734,6 @@ impl Worker {
             control,
         )?;
         let mut sequence = 1;
-        let mut budget = ExecutionBudget::new(limits);
         let mut denied_accesses = Vec::new();
         let root = VirtualRoot::default();
         let mut profile_failure = None;
@@ -714,7 +746,7 @@ impl Worker {
                 Message::Call(request) => {
                     control.remaining()?;
                     budget.charge_os_call()?;
-                    let response = dispatch(request, filesystem, policy, &mut budget, &root);
+                    let response = dispatch(request, filesystem, policy, budget, &root);
                     control.remaining()?;
                     let reply = match response {
                         Ok(value) => Ok(value),
@@ -831,8 +863,8 @@ impl Worker {
                             denied_accesses,
                         });
                     }
+                    budget.charge_output(output_bytes)?;
                     let mut stats = budget.stats();
-                    stats.output_bytes = output_bytes;
                     stats.result_bytes = 4;
                     if limits.max_result_bytes < 4 {
                         return Err(ExecutionLimitExceeded::ResultBytes {

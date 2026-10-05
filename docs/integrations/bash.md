@@ -11,10 +11,24 @@ gets the host's filesystem, environment, executables or network.
 
 ## Enable it explicitly
 
-VSH 0.6.0 Python wheels on Linux/macOS bundle two separate workers. Enabling Bash does not start a worker
-until the first Bash call. `worker_path` still selects Monty; the Bash executable is
+!!! note "Development checkout additions"
+
+    The nested Monty `vsh_bash` function described here is an
+    unreleased addition after 0.6.0. Standalone `language=Language.BASH` is available
+    in 0.6.0; the new guest function requires a build from this checkout.
+
+VSH 0.6.0 Python wheels on Linux/macOS bundle two separate workers. In this development
+checkout, the first execution on a Bash-enabled runtime initializes the Bash worker
+pool, including a Monty execution that could call `vsh_bash`. `worker_path` still selects Monty; the Bash executable is
 selected by `BashConfig.worker_path`, `VSH_BASH_WORKER`, or the wheel's script directory.
 There is no implicit download, shell command lookup or fallback to real filesystem I/O.
+
+In the development checkout, the same opt-in also enables `vsh_bash(code)` inside
+Monty. It borrows the active VFS and shares I/O, evidence, output and outer deadline
+budgets; parser/work-unit limits apply to each fresh shell. There is no nested snapshot,
+approval or commit. Each shell starts at `/workspace` without prior shell variables.
+Run `examples/native/monty_bash_workflow.py` for a complete disposable example that
+stages a Monty write, copies it in Bash, searches the staged result and commits once.
 
 ```python
 from vsh import BashConfig, BashResult, Language, ReceiptDetail, Runtime

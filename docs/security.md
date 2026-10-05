@@ -24,6 +24,8 @@ and revalidating before one trusted writer commits.
 - Protected paths are denied before their names or bytes reach the worker.
 - Program, intent, snapshot, dependencies, diff, policy, and configuration bind the
   transaction ID.
+- A fresh invocation nonce separates repeated executions from replay of one artifact;
+  persisted hook requirements cannot be dropped by reopening without the hook.
 - Commit consumes a single-use reservation and verifies read/write preconditions.
 - State logs and commit metadata are checksummed and bounded; complete corrupt frames
   fail rather than being treated as torn appends.
@@ -67,6 +69,12 @@ VSH is not:
 - protection against a malicious trusted host or replaced VSH binary;
 - a substitute for filesystem permissions, backups, deployment rollback, or secrets
   management.
+
+In particular, parent-identity checks detect observed directory relocation but cannot
+atomically freeze the host namespace against another equally privileged process.
+Use host-controlled workspace ownership or OS isolation; see the precise
+[external-writer limitation](threat-model.md). A pinned directory handle alone does not
+prove that the directory remains at its original pathname.
 
 ## Deployment rules
 

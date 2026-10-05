@@ -1120,6 +1120,8 @@ pub fn bind_transaction(input: TransactionIdentityInput<'_>) -> TransactionBindi
         policy: input.policy.digest(),
         runtime_config: input.runtime_config,
         intent: input.intent.map(IntentDigest::digest_text),
+        invocation: None,
+        commit_hook: None,
         execution_evidence: None,
     }
 }

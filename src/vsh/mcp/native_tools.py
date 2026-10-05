@@ -257,6 +257,7 @@ async def _vsh_run_async(
     policy: PolicyName = "balanced",
     detail: DetailName = "compact",
     budget: BudgetOverrides | None = None,
+    discard_read_only_preview: bool = False,
 ) -> dict[str, object]:
     # Opening the runtime can spawn a worker and touch durable state too.
     prepared = await native_call(
@@ -278,7 +279,16 @@ async def _vsh_run_async(
         token,
         on_cancel=lambda receipt: prepared.runtime._cancel_receipt(receipt.transaction),
     )
-    return _receipt_payload(receipt)
+    payload = _receipt_payload(receipt)
+    retained = receipt.state in {"auto_approved", "pending_approval"}
+    if (
+        discard_read_only_preview
+        and receipt.state == "auto_approved"
+        and receipt.changed_paths == 0
+    ):
+        retained = not prepared.runtime.discard_preview(receipt.transaction)
+    payload["preview_retained"] = retained
+    return payload
 
 
 __all__ = ("BudgetOverrides", "vsh_run")

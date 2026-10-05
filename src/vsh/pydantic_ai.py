@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from os import PathLike, fspath
 from typing import Literal, TypeAlias
 
@@ -27,8 +27,10 @@ from ._native import (
     RunMode,
     RunRequest,
     Runtime,
+    SnapshotLimits,
     _Cancellation,
 )
+from ._response import DEFAULT_RESPONSE_BYTES, MIN_RESPONSE_BYTES, response_size
 from .hooks import HookedRuntime, HookHandler
 
 _ACTIONABLE_STATES = frozenset(("auto_approved", "pending_approval"))
@@ -48,6 +50,7 @@ class VshToolResult:
     stderr: str = ""
     hook_verdict: str | None = None
     feedback: str | None = None
+    response_truncated: bool = False
 
     @property
     def requires_review(self) -> bool:
@@ -73,7 +76,13 @@ class VshCapability(Capability[object]):
         review_content_bytes: int = 0,
         id: str = "vsh",
         defer_loading: bool = False,
+        run_only: bool = False,
+        max_response_bytes: int = DEFAULT_RESPONSE_BYTES,
+        snapshot_limits: SnapshotLimits | None = None,
     ) -> None:
+        if max_response_bytes < MIN_RESPONSE_BYTES:
+            raise ValueError(f"max_response_bytes must be at least {MIN_RESPONSE_BYTES}")
+        self._max_response_bytes = max_response_bytes
         if hook_handler is None:
             if review_content_bytes:
                 raise ValueError("review_content_bytes requires hook_handler")
@@ -83,6 +92,8 @@ class VshCapability(Capability[object]):
                 policy=policy,
                 worker_path=worker_path,
                 bash=bash,
+                result_compatibility="agent_json",
+                snapshot_limits=snapshot_limits,
             )
         else:
             self.runtime = HookedRuntime.open(
@@ -95,18 +106,21 @@ class VshCapability(Capability[object]):
                 policy=policy,
                 worker_path=worker_path,
                 bash=bash,
+                result_compatibility="agent_json",
+                snapshot_limits=snapshot_limits,
             )
         toolset = FunctionToolset[object](id=id, sequential=True)
-        toolset.tool_plain(self.vsh_read)
-        toolset.tool_plain(self.vsh_write)
-        toolset.tool_plain(self.vsh_list)
-        toolset.tool_plain(self.vsh_mkdir)
-        toolset.tool_plain(self.vsh_remove)
-        toolset.tool_plain(self.vsh_move)
-        toolset.tool_plain(self.vsh_copy)
-        toolset.tool_plain(self.vsh_glob)
-        toolset.tool_plain(self.vsh_search)
-        toolset.tool_plain(self.vsh_patch)
+        if not run_only:
+            toolset.tool_plain(self.vsh_read)
+            toolset.tool_plain(self.vsh_write)
+            toolset.tool_plain(self.vsh_list)
+            toolset.tool_plain(self.vsh_mkdir)
+            toolset.tool_plain(self.vsh_remove)
+            toolset.tool_plain(self.vsh_move)
+            toolset.tool_plain(self.vsh_copy)
+            toolset.tool_plain(self.vsh_glob)
+            toolset.tool_plain(self.vsh_search)
+            toolset.tool_plain(self.vsh_patch)
         self._bash_enabled = bash is not None
         toolset.tool_plain(
             description=(
@@ -125,7 +139,12 @@ class VshCapability(Capability[object]):
                 "policy-controlled commit."
             ),
             defer_loading=defer_loading,
-            instructions=_INSTRUCTIONS,
+            instructions=(
+                "Only vsh_run is exposed as an agent tool. Call filesystem functions "
+                "inside its Monty program.\n" + _INSTRUCTIONS
+                if run_only
+                else _INSTRUCTIONS
+            ),
             toolsets=[toolset],
         )
 
@@ -308,7 +327,15 @@ class VshCapability(Capability[object]):
                 token,
                 on_cancel=lambda receipt: runtime._cancel_receipt(receipt.transaction),
             )
-        return _tool_result(receipt, hook_verdict=hook_verdict, feedback=feedback)
+        result = _tool_result(receipt, hook_verdict=hook_verdict, feedback=feedback)
+        if response_size(asdict(result)) <= self._max_response_bytes:
+            return result
+        result = replace(result, result=None, stdout="", stderr="", response_truncated=True)
+        if response_size(asdict(result)) > self._max_response_bytes:
+            result = replace(
+                result, feedback=(result.feedback or "")[:256] + "… [feedback truncated]"
+            )
+        return result
 
 
 def _tool_result(
@@ -323,8 +350,10 @@ def _tool_result(
         result=_json_value(receipt.result) if receipt.state == "committed" else None,
         changed_paths=receipt.changed_paths,
         language="bash" if receipt.language is Language.BASH else "monty",
-        stdout=receipt.stdout if receipt.state == "committed" else "",
-        stderr=receipt.stderr if receipt.state == "committed" else "",
+        stdout=receipt.stdout
+        if receipt.state == "committed" and receipt.language is Language.MONTY
+        else "",
+        stderr="",
         hook_verdict=hook_verdict,
         feedback=feedback,
     )
@@ -345,7 +374,12 @@ def _json_value(value: object) -> JsonValue:
     if isinstance(value, PathLike):
         return fspath(value)
     if isinstance(value, Mapping):
-        return {str(key): _json_value(item) for key, item in value.items()}
+        result: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("VSH agent JSON dictionary keys must be strings")
+            result[key] = _json_value(item)
+        return result
     if isinstance(value, list | tuple):
         return [_json_value(item) for item in value]
     raise TypeError(f"VSH returned a value that cannot be sent to Pydantic AI: {type(value)!r}")
@@ -361,7 +395,13 @@ read_file or write_file do not exist. Write ordinary Python calls, for example
 vsh_patch('/workspace/app.toml', 'old', 'new', count=1); never pass a JSON object as the
 single positional argument. If the host enables language='bash', pass bounded shell source
 instead; it runs at /workspace through the same VSH filesystem and commit policy, without
-host executables or network. Bash is not full POSIX/GNU compatibility. A result with
+host executables or network. The same opt-in also injects vsh_bash(code) into Monty:
+it shares the active overlay and transaction, returning exit_code plus stdout/stderr bytes.
+Use it to compose Python filesystem work with bounded shell pipelines. Nested terminal
+Bash failures abort the whole transaction even inside try/except; each shell starts fresh.
+Bash is not full POSIX/GNU compatibility. response_truncated=True means display data
+was omitted to fit the host response budget, not that commit failed. Return selected
+fields or short slices from vsh_run instead of dumping whole files. A result with
 state='pending_approval' has not changed host
 files; report its transaction and feedback to the user instead of claiming completion.
 Treat intent as context, not proof that the resulting changes are safe.

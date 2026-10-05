@@ -5,6 +5,15 @@ giving the model a host shell, a host filesystem mount, subprocess access, or a
 second simulation engine. Eleven agent tools enter the same Rust-owned VSH runtime
 used by the Python and Rust SDKs.
 
+!!! note "Development checkout"
+
+    The `run_only`, response-budget, snapshot-limit and pre-commit JSON validation
+    additions below require this checkout; they have not been released in 0.6.0.
+
+Set `VshCapability(workspace, run_only=True)` for a program-first, single-agent-tool
+surface. The ten filesystem functions remain available inside Monty programs; only
+their separate model-facing schemas are omitted. The default remains eleven tools.
+
 Use this page as the integration reference. For a guided build, continue with either
 [deterministic review](../tutorials/pydantic-ai-deterministic.md) or the
 [evidence-first LLM judge](../tutorials/pydantic-ai-judge.md).
@@ -19,6 +28,22 @@ Optional Unix Bash uses `VshCapability(workspace, bash=BashConfig(...))`. The sa
 pipeline; existing filesystem tools remain Monty-based. The language enum advertises
 only host-enabled frontends. Pending/rejected calls return feedback but withhold
 their result and both streams from the main agent. See [bounded Bash](bash.md).
+
+With this opt-in, Monty programs can also call `vsh_bash(code)` between filesystem
+operations. They share one snapshot, one canonical diff and one review/commit boundary.
+
+The capability validates `agent_json` result compatibility in Rust **before commit**.
+Unsupported sets, non-string dictionary keys and non-finite floats fail without host
+mutation. Convert intentionally inside your program, for example `sorted(my_set)`.
+Ordinary Python SDK callers retain their richer native result types.
+
+Agent responses default to a 16 KiB compact ASCII-JSON budget; set the host-only
+`max_response_bytes` constructor option to adjust it (minimum 4096). A response with
+`response_truncated=true` omits oversized result/stream display data but preserves the
+actual transaction state. It does **not** mean a committed operation failed. Return
+summaries and selected slices rather than whole files. Bash streams occur once as
+base64 objects inside `result`, not again in top-level text fields. `snapshot_limits`
+can separately constrain host capture; presentation limits never discard judge evidence.
 
 | Requirement | Configuration | Who may authorize commit? |
 |---|---|---|

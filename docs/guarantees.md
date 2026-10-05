@@ -42,6 +42,10 @@ documented platform/configuration requirements are met, VSH guarantees:
   descriptors to the untrusted program.
 - Concurrency safety covers recorded dependencies. Unmodeled external side effects are
   outside the transaction.
+- Parent-identity checkpoints detect observed directory relocation before host operations,
+  but cannot make a check and filesystem syscall atomic against hostile external renames.
+  Commit containment requires host-controlled directory ownership or OS isolation; see
+  the [explicit limitation](threat-model.md#host-escape-and-confused-paths).
 - An auto-approved preview handle is resumable only by the same live `Runtime`. VSH
   persists its exact artifact before commit reservation; approval-required previews are
   durable immediately and may be resumed after restart.

@@ -6,7 +6,7 @@ import builtins
 from collections.abc import Mapping
 from enum import Enum
 from os import PathLike
-from typing import overload
+from typing import Literal, overload
 
 __version__: str
 
@@ -453,6 +453,27 @@ class CommitResolution:
     @property
     def hook(self) -> HookDecisionRecord | None: ...
 
+class SnapshotLimits:
+    def __init__(
+        self,
+        *,
+        max_nodes: int | None = ...,
+        max_depth: int | None = ...,
+        max_total_file_bytes: int | None = ...,
+        max_materialized_bytes: int | None = ...,
+        max_materialized_file_bytes: int | None = ...,
+    ) -> None: ...
+    @property
+    def max_nodes(self) -> int: ...
+    @property
+    def max_depth(self) -> int: ...
+    @property
+    def max_total_file_bytes(self) -> int: ...
+    @property
+    def max_materialized_bytes(self) -> int: ...
+    @property
+    def max_materialized_file_bytes(self) -> int: ...
+
 class Runtime:
     @staticmethod
     def open(
@@ -465,6 +486,8 @@ class Runtime:
         hook_id: str | None = ...,
         hook_scope: HookScope | None = ...,
         review_content_bytes: int = ...,
+        result_compatibility: Literal["python", "agent_json"] = ...,
+        snapshot_limits: SnapshotLimits | None = ...,
     ) -> Runtime: ...
     def run(self, request: RunRequest) -> Receipt: ...
     def _run(self, request: RunRequest, cancellation: _Cancellation) -> Receipt: ...

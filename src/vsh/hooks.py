@@ -6,7 +6,7 @@ import inspect
 import time
 from collections.abc import Awaitable, Callable
 from os import PathLike
-from typing import TypeAlias, overload
+from typing import Literal, TypeAlias, overload
 
 from ._async import native_call
 from ._native import (
@@ -24,6 +24,7 @@ from ._native import (
     RunMode,
     RunRequest,
     Runtime,
+    SnapshotLimits,
     _Cancellation,
 )
 
@@ -53,6 +54,8 @@ class HookedRuntime:
         policy: str = "balanced",
         worker_path: str | PathLike[str] | None = None,
         bash: BashConfig | None = None,
+        result_compatibility: Literal["python", "agent_json"] = "python",
+        snapshot_limits: SnapshotLimits | None = None,
     ) -> HookedRuntime:
         """Open a runtime whose direct native commit path enforces the hook."""
 
@@ -65,6 +68,8 @@ class HookedRuntime:
             hook_id=hook_id,
             hook_scope=hook_scope,
             review_content_bytes=review_content_bytes,
+            result_compatibility=result_compatibility,
+            snapshot_limits=snapshot_limits,
         )
         return cls(runtime, hook_handler)
 

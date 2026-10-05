@@ -7,6 +7,7 @@ from fastmcp import FastMCP
 
 from vsh import __version__
 
+from .native_tools import BudgetOverrides, PolicyName
 from .prompts import register_codemode_prompts
 from .surface import register_vsh_surface
 
@@ -26,7 +27,8 @@ tools, and both surfaces observe the same active overlay under `/workspace`.
 commit the exact canonical diff; denied and escalated transactions remain virtual. Put
 the complete multi-file operation in one program so it stays one transaction, one policy
 decision, and one Python-to-Rust boundary call. To promote an auto-approved preview, pass
-its returned `transaction` with no code and `mode="auto"`; VSH revalidates dependencies
+its returned `transaction` with no code and `mode="auto"` only if `preview_retained=true`;
+completed read-only previews are normally released automatically. VSH revalidates dependencies
 before commit. Bound discovery with `max_results`. Never emulate a shell or use a second
 simulation path.
 """
@@ -83,14 +85,20 @@ def load_custom_instructions(
     return merged or None
 
 
-def create_codemode_server(*, custom_instructions: str | None = None) -> FastMCP:
+def create_codemode_server(
+    *,
+    custom_instructions: str | None = None,
+    workspace_root: str | None = None,
+    policy: PolicyName = "balanced",
+    budget: BudgetOverrides | None = None,
+) -> FastMCP:
     """Build the CodeMode-oriented FastMCP server."""
     server = FastMCP(
         CODEMODE_SERVER_NAME,
         instructions=build_codemode_instructions(custom_instructions=custom_instructions),
         version=__version__,
     )
-    register_vsh_surface(server)
+    register_vsh_surface(server, workspace_root=workspace_root, policy=policy, budget=budget)
     register_codemode_prompts(server)
     return server
 

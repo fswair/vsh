@@ -257,6 +257,22 @@ impl ExecutionBudget {
         self.stats.denied_accesses = self.stats.denied_accesses.saturating_add(1);
     }
 
+    /// Charge all guest output, including output returned by a nested frontend.
+    ///
+    /// # Errors
+    /// Returns the output limit before accepting bytes beyond the shared ceiling.
+    pub fn charge_output(&mut self, bytes: usize) -> Result<(), ExecutionLimitExceeded> {
+        let attempted = self.stats.output_bytes.saturating_add(bytes);
+        if attempted > self.limits.max_output_bytes {
+            return Err(ExecutionLimitExceeded::OutputBytes {
+                limit: self.limits.max_output_bytes as u64,
+                attempted: attempted as u64,
+            });
+        }
+        self.stats.output_bytes = attempted;
+        Ok(())
+    }
+
     /// Start an empty ledger with explicit limits.
     #[must_use]
     pub const fn new(limits: ExecutionLimits) -> Self {

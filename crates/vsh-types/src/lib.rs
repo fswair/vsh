@@ -379,6 +379,10 @@ digest_id!(
     "The digest identity of the exact completed result, output and review evidence."
 );
 digest_id!(
+    InvocationId,
+    "A fresh identity for one execution, independent of its semantic evidence."
+);
+digest_id!(
     IntentDigest,
     "The digest identity of transaction intent supplied out of band."
 );
@@ -568,6 +572,10 @@ pub struct TransactionBinding {
     pub runtime_config: RuntimeConfigDigest,
     /// Optional out-of-band user intent shown to an approval principal.
     pub intent: Option<IntentDigest>,
+    /// Fresh execution identity; absent only on legacy or low-level bindings.
+    pub invocation: Option<InvocationId>,
+    /// Required trusted-host hook configuration, independent of execution budgets.
+    pub commit_hook: Option<RuntimeConfigDigest>,
     /// Completed execution evidence sealed before deriving the transaction ID.
     /// `None` preserves the original identity domain for legacy records and
     /// low-level callers which do not supply an execution result.
@@ -593,12 +601,29 @@ impl TransactionBinding {
             }
             None => canonical.push(0),
         }
-        let domain = if let Some(evidence) = self.execution_evidence {
+        let mut domain = if let Some(evidence) = self.execution_evidence {
             canonical.extend_from_slice(evidence.as_bytes());
             b"transaction-v2".as_slice()
         } else {
             b"transaction-v1".as_slice()
         };
+        if self.invocation.is_some() || self.commit_hook.is_some() {
+            // Presence tags make absent fields distinct from all-zero identities.
+            for value in [
+                self.invocation.map(|id| *id.as_bytes()),
+                self.commit_hook.map(|id| *id.as_bytes()),
+            ] {
+                match value {
+                    Some(bytes) => {
+                        canonical.push(1);
+                        canonical.extend_from_slice(&bytes);
+                    }
+                    None => canonical.push(0),
+                }
+            }
+            canonical.push(u8::from(self.execution_evidence.is_some()));
+            domain = b"transaction-v3";
+        }
         TransactionId::from_bytes(domain_hash(domain, &canonical))
     }
 }
@@ -1002,6 +1027,8 @@ mod tests {
             policy: PolicyDigest::from_bytes([6; 32]),
             runtime_config: RuntimeConfigDigest::from_bytes([7; 32]),
             intent: Some(IntentDigest::from_bytes([8; 32])),
+            invocation: None,
+            commit_hook: None,
             execution_evidence: None,
         };
         let mut legacy_bytes = Vec::new();

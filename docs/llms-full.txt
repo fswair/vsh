@@ -626,7 +626,7 @@ denials, not approval prompts.
 | Recursion | 512 frames | stack growth |
 | Worker heap | 256 MiB | guest allocation |
 | Typed OS / high-level VSH calls | 10,000 | call amplification |
-| Read bytes | 64 MiB | cumulative materialization |
+| Read bytes | 64 MiB | cumulative guest file reads |
 | Write bytes | 64 MiB | cumulative virtual output |
 | One I/O call | 4 MiB | single-frame allocation |
 | One path | 16 KiB | path/protocol abuse |
@@ -640,6 +640,37 @@ denials, not approval prompts.
 The supervised worker additionally enforces protocol frame and process boundaries.
 Snapshot, artifact, state-log, journal, plan, and commit paths have their own trusted
 host limits.
+
+Host capture is separate from guest I/O. `SnapshotLimits` defaults to 250,000 metadata
+nodes, depth 128, 16 GiB represented file sizes, **64 MiB cumulatively materialized
+host content**, and **4 MiB per materialized host file/link**. Lazy reads during
+canonical diff construction (for example a rename) consume the same host capture
+allowance even when `receipt.read_bytes` remains zero. Limits are charged before
+content reading/blob storage; directory entries are counted before statting or retaining
+an unbounded directory. Reading a file that grew after snapshot fails before capturing
+its larger content. Enumeration and chunked lazy reads observe request cancellation.
+
+```python
+from vsh import Runtime, SnapshotLimits
+
+runtime = Runtime.open(
+    "/absolute/controlled/workspace",
+    snapshot_limits=SnapshotLimits(
+        max_materialized_bytes=32 * 1024 * 1024,
+        max_materialized_file_bytes=2 * 1024 * 1024,
+    ),
+)
+```
+
+These are trusted-host settings. The same `snapshot_limits` option is available on
+`HookedRuntime.open` and `VshCapability`; Rust uses `RuntimeConfig::with_snapshot_limits`.
+They are not process-tree RSS bounds and do not count the same immutable capture again
+on every subsequent guest read. Guest read quotas still charge each read separately.
+
+When Monty calls `vsh_bash`, filesystem/evidence/output counters, outer cancellation,
+and the parent wall deadline span every nested call. Each fresh shell additionally has
+its own Bash parser/command/work-unit ceilings. Discarding a shell's returned bytes does
+not refund its output budget. Terminal Bash errors abort the entire outer transaction.
 
 `max_evidence_records` counts retained effects, read dependencies, write
 preconditions and adapter-retained policy denials together. Filtered/ignored
@@ -1000,10 +1031,24 @@ gets the host's filesystem, environment, executables or network.
 
 ## Enable it explicitly
 
-VSH 0.6.0 Python wheels on Linux/macOS bundle two separate workers. Enabling Bash does not start a worker
-until the first Bash call. `worker_path` still selects Monty; the Bash executable is
+!!! note "Development checkout additions"
+
+    The nested Monty `vsh_bash` function described here is an
+    unreleased addition after 0.6.0. Standalone `language=Language.BASH` is available
+    in 0.6.0; the new guest function requires a build from this checkout.
+
+VSH 0.6.0 Python wheels on Linux/macOS bundle two separate workers. In this development
+checkout, the first execution on a Bash-enabled runtime initializes the Bash worker
+pool, including a Monty execution that could call `vsh_bash`. `worker_path` still selects Monty; the Bash executable is
 selected by `BashConfig.worker_path`, `VSH_BASH_WORKER`, or the wheel's script directory.
 There is no implicit download, shell command lookup or fallback to real filesystem I/O.
+
+In the development checkout, the same opt-in also enables `vsh_bash(code)` inside
+Monty. It borrows the active VFS and shares I/O, evidence, output and outer deadline
+budgets; parser/work-unit limits apply to each fresh shell. There is no nested snapshot,
+approval or commit. Each shell starts at `/workspace` without prior shell variables.
+Run `examples/native/monty_bash_workflow.py` for a complete disposable example that
+stages a Monty write, copies it in Bash, searches the staged result and commits once.
 
 ```python
 from vsh import BashConfig, BashResult, Language, ReceiptDetail, Runtime
@@ -2379,6 +2424,9 @@ start with the [cookbook](examples.md), not isolated API fragments.
 The shipped `vsh._native.pyi` is the static signature contract. Guest `vsh_*` functions
 are a separate [Monty program surface](../integrations/monty-tools.md), not module exports.
 
+`SnapshotLimits` and `result_compatibility` are unreleased additions in this checkout,
+not options provided by the published 0.6.0 wheel.
+
 ## Module functions
 
 ### `engine_kind() -> str`
@@ -2449,6 +2497,23 @@ available as a read-only property with the same name. See
 calls. The functions available in every `code` program are documented in
 [VSH functions inside Monty](../integrations/monty-tools.md).
 
+## `SnapshotLimits`
+
+Trusted-host limits for metadata enumeration and lazy content capture. Pass an immutable
+`SnapshotLimits(...)` to `Runtime.open`, `HookedRuntime.open`, or `VshCapability`.
+Every keyword is optional and exposed as a read-only property:
+
+| Keyword | Default |
+|---|---:|
+| `max_nodes` | 250,000, including the root |
+| `max_depth` | 128 |
+| `max_total_file_bytes` | 16 GiB represented by snapshot metadata |
+| `max_materialized_bytes` | 64 MiB captured host bytes per snapshot |
+| `max_materialized_file_bytes` | 4 MiB per captured file/link |
+
+Lazy reads performed while producing canonical changes consume these capture bounds,
+even without guest read calls. See [budget semantics](../guides/policies-and-budgets.md).
+
 ## `RunRequest`
 
 `Language.MONTY` (default) and `Language.BASH` select the guest frontend. Bash
@@ -2492,12 +2557,23 @@ Runtime.open(
     hook_id: str | None = ...,
     hook_scope: HookScope | None = ...,
     review_content_bytes: int = 0,
+    result_compatibility: "python" | "agent_json" = "python",
+    snapshot_limits: SnapshotLimits | None = None,
 ) -> Runtime
 ```
 
 Opens capability roots, validates separation, creates bounded stores, starts worker
 supervision, and performs startup recovery. The workspace must already exist and be a
 directory.
+
+`result_compatibility` selects a **pre-commit acceptance contract**, not a new serializer.
+The default keeps the rich native Python result surface. `"agent_json"` allows finite
+scalars, strings, bytes, paths, sequences, and string-keyed dictionaries; it rejects
+sets, arbitrary-precision Monty integers, non-finite floats, non-string keys, and other
+unsupported values before committing. Return giant numbers as strings and sets as
+explicit lists. `VshCapability` selects this contract automatically, then projects
+bytes to base64 objects and paths to strings. It never silently merges keys such as
+`1` and `"1"`. The ordinary Python SDK still supports richer Python values.
 
 ### `run(request: RunRequest) -> Receipt`
 
@@ -2789,6 +2865,12 @@ receipt = runtime.run(
 would return `pending_approval`. Select `HookScope.ALL_REQUESTS` to inspect successful
 read-only and auto-approved simulations too. Denied access and denied mutation remain
 unhookable.
+
+`HookedRuntime.open` also forwards the host-only `snapshot_limits` and
+`result_compatibility` options from [Runtime.open](api.md). Agent integrations choose
+`agent_json` so result conversion cannot first fail after a successful commit.
+The hook configuration is transaction-bound: reopening without the hook, or changing
+its identity, scope or evidence limits, cannot bypass an existing review requirement.
 
 ## Evidence contract
 
@@ -3264,13 +3346,17 @@ authorize commit. This validates traceability, not the semantic correctness of a
 
 Both judge types also receive `resolved_changes`: a readable view of each non-metadata
 canonical change, linked to the same `change:N` reference. Each entry contains its
-path, kind, exact `before_text` and `after_text`, and a unified line diff. The model
-does not have to join blob hashes to discover that a security setting disappeared
-inside an otherwise routine edit. The original canonical nodes, content records and
-ordered effects remain in the packet; the readable view does not replace them.
+path, kind, `before_content` and `after_content` references into `contents`, and a
+unified line diff for convenience. Exact file bodies occur in the path-bound content
+records, not again in each resolved change. The diff display is capped at 4096 UTF-8
+bytes per change and marked with `diff_display_truncated`; complete referenced contents
+remain authoritative and must be inspected even when the display is shortened.
+The canonical nodes and ordered effects remain in the packet. Missing or unauthorized
+required content still prevents judge approval; display compaction never fabricates it.
 
 Text is resolved only from authorized evidence with the same **path and blob ID**.
-An absent node or directory has `null` text; an empty file has `""`. Diff headers use
+An absent node or directory has a `null` content reference; an empty file references
+an explicit `""` content body. Diff headers use
 fixed `before`/`after` labels, with filenames kept in the JSON path field. Missing
 final newlines are marked explicitly. Metadata-only changes stay in `changes` and
 `effects`, without a `resolved_changes` entry: native review does not capture file
@@ -3717,6 +3803,9 @@ Use the [complete Rust cookbook](examples.md) for a compiled example. Unlike Pyt
 the Rust preview API accepts a borrowed `RunRequest`; it does not emulate Python's
 source-string overload. The guest `vsh_*` surface is included in VSH.
 
+The `AgentJson` compatibility mode, extra host materialization limits and nested
+Monty `vsh_bash` support below are unreleased development-checkout additions.
+
 ## Constants and diagnostics
 
 ```rust
@@ -3744,12 +3833,12 @@ let config = RuntimeConfig::new(workspace_root)
 | `with_worker_path(path)` | Select the exact supervised worker executable |
 | `with_bash(BashConfig)` | Opt into the separate bounded Bash frontend (`bash` feature) |
 | `with_max_idle_workers(count)` | Bound reusable clean workers; zero disables pooling |
-| `with_result_compatibility(kind)` | Require native or Python-projectable result values |
+| `with_result_compatibility(kind)` | Require `Native`, `Python`, or pre-commit `AgentJson` result compatibility |
 | `with_in_process_execution()` | Trusted-only correctness/benchmark harness |
 | `with_virtual_root(root)` | Change the synthetic absolute namespace shown to Monty |
 | `with_policy(policy)` | Supply a custom validated deterministic policy |
 | `with_policy_profile(profile)` | Select balanced, strict, or paranoid presets |
-| `with_snapshot_limits(limits)` | Replace eager traversal and snapshot ceilings |
+| `with_snapshot_limits(limits)` | Bound metadata traversal plus aggregate/per-file lazy host capture |
 | `with_commit_config(config)` | Replace trusted commit/recovery ceilings |
 | `with_store_config(config)` | Replace durable transaction-log ceilings |
 | `with_artifact_limits(limits)` | Replace pending-artifact and cache ceilings |
@@ -3760,6 +3849,12 @@ let config = RuntimeConfig::new(workspace_root)
 | `policy()` | Borrow the deterministic transaction policy |
 
 Builder values contribute to runtime configuration identity where security relevant.
+
+`SnapshotLimits::max_materialized_bytes` (64 MiB) and
+`max_materialized_file_bytes` (4 MiB) bound host reads including content captured during
+canonical diff generation. They are separate from guest read counters. Nested
+`vsh_bash(code)` is enabled by the same `bash` feature and `with_bash` configuration as
+top-level Bash; it borrows the current VFS and budget, not another `Runtime`.
 Idle-pool capacity is not an admission limit on concurrent calls. Reusing a runtime
 retains clean workers and capabilities, but every execution captures a fresh snapshot.
 
@@ -4143,6 +4238,12 @@ overlay, one canonical change set and one policy
 decision. The Python adapter constructs a native request and projects the receipt;
 it does not implement a separate filesystem simulator.
 
+!!! note "Development checkout hardening"
+
+    Host-fixed tool configuration, aggregate payload budgets and automatic read-only
+    preview cleanup on this page are unreleased changes after 0.6.0. Build this checkout
+    to use them; the installation command below installs the published release.
+
 ## Install and launch
 
 ```bash
@@ -4182,9 +4283,13 @@ inside the environment where VSH is installed:
 ```
 
 Use the environment's `vsh-codemode` executable with empty `args` for CodeMode guidance.
-Client configuration formats vary; `cwd` selects the default workspace, **not an
-authorization allowlist**. The raw tool still accepts `workspace_root`, policy and
-budget arguments. Constrain those in a trusted wrapper for an untrusted client.
+Client configuration formats vary. The server captures `VSH_WORKSPACE_ROOT` (or its
+startup working directory) as its authorized workspace when registering the tool.
+The model cannot replace the root, policy, worker or execution budget. Python hosts
+can configure these with `register_vsh_surface(server, workspace_root=..., policy=...,
+budget=...)` or `create_codemode_server(...)`. These are host constructor options,
+not tool arguments. The Python `native_tools.vsh_run` helper and CLI remain explicit
+trusted-host interfaces.
 
 ## Request contract
 
@@ -4194,12 +4299,9 @@ vsh_run(
     *,
     language: "monty" | "bash" = "monty",
     transaction: str | None = None,
-    workspace_root: str | None = None,
     intent: str | None = None,
     mode: "preview" | "auto" = "preview",
-    policy: "balanced" | "strict" | "paranoid" = "balanced",
     detail: "compact" | "full" = "compact",
-    budget: BudgetOverrides | None = None,
 ) -> dict[str, object]
 ```
 
@@ -4212,7 +4314,7 @@ See [bounded Bash](bash.md) for the supported Unix profile and noncommittable fa
 For new work pass `code`. For promotion pass `transaction`, no code, and `mode="auto"`.
 Resolve the same workspace/profile/worker identity as the preview. Promotion does not
 rerun source or create a different detail/budget configuration for the existing artifact.
-The budget keys match the [Python execution budget](../python/api.md#executionbudget).
+Host-configured budget keys match the [Python execution budget](../python/api.md#executionbudget).
 
 ## Preview, review, promote
 
@@ -4259,13 +4361,15 @@ MCP returns `result_repr`, not the Python SDK's arbitrary typed `result`. Do not
 that representation. `diff` is not a textual diff; request bounded before/after content
 when reviewing a transformation.
 
-The adapter retains **65,536 Python characters plus an ellipsis** independently for
-result representation, stdout and stderr. This is not 64 KiB of UTF-8, a whole-envelope cap or
-a token limit. JSON escaping and full change lists add transport bytes. Truncation
-happens after constructing the representation; return small results in the first place.
-The separate `bash` object encodes at most 65,536 **raw bytes** per stream before
-base64 conversion and marks `output_truncated` if either stream exceeds that bound.
-Do not use the top-level lossy display text for binary comparison or approval.
+The registered agent tool has an aggregate **16 KiB compact ASCII-JSON payload budget**,
+including escaping and field names. The host can set `max_response_bytes` when registering
+the surface (minimum 4096). This is a byte budget, not a token guarantee or a bound on
+MCP transport wrappers. Large result/output/change-list display fields are omitted with
+`response_truncated=true`; state, transaction identity and commit outcome remain truthful.
+Return selected fields or short slices from Monty when you need useful bounded output.
+Bash streams appear once as base64 in `bash`, not again as repr and lossy text.
+The trusted Python helper and CLI retain their separate per-field 65,536-character/raw-byte
+display limits; they do not claim the registered tool's aggregate bound.
 
 ## Lifetime and retention limits
 
@@ -4291,9 +4395,12 @@ encoded artifacts. Capacity fails closed; previews are not silently evicted with
 runtime to make room. The **runtime LRU can evict a whole runtime**, losing its
 auto-approved handles even while the server process remains alive.
 
-Restart also loses those handles. Read-only previews consume capacity too, and the raw
-MCP surface has no discard tool. For high-rate analysis, use an SDK-owned service that
-can discard completed previews; do not treat the raw cache as a durable queue.
+Restart also loses those handles. The registered tool automatically discards completed
+auto-approved previews with no canonical changes: their response has `preview_retained=false`
+and cannot be promoted. Mutating or approval-required previews remain retained. A host
+which needs read-only promotion can register `retain_read_only_previews=True` and own the
+cleanup lifecycle explicitly. This releases preview retention, not general blob-store
+garbage collection; do not treat the cache as a durable queue.
 
 Pending approval artifacts are durable. MCP does not expose approval minting: a trusted
 Python/Rust service must authenticate the reviewer and call `approve`. Model-authored
@@ -4335,6 +4442,15 @@ giving the model a host shell, a host filesystem mount, subprocess access, or a
 second simulation engine. Eleven agent tools enter the same Rust-owned VSH runtime
 used by the Python and Rust SDKs.
 
+!!! note "Development checkout"
+
+    The `run_only`, response-budget, snapshot-limit and pre-commit JSON validation
+    additions below require this checkout; they have not been released in 0.6.0.
+
+Set `VshCapability(workspace, run_only=True)` for a program-first, single-agent-tool
+surface. The ten filesystem functions remain available inside Monty programs; only
+their separate model-facing schemas are omitted. The default remains eleven tools.
+
 Use this page as the integration reference. For a guided build, continue with either
 [deterministic review](../tutorials/pydantic-ai-deterministic.md) or the
 [evidence-first LLM judge](../tutorials/pydantic-ai-judge.md).
@@ -4349,6 +4465,22 @@ Optional Unix Bash uses `VshCapability(workspace, bash=BashConfig(...))`. The sa
 pipeline; existing filesystem tools remain Monty-based. The language enum advertises
 only host-enabled frontends. Pending/rejected calls return feedback but withhold
 their result and both streams from the main agent. See [bounded Bash](bash.md).
+
+With this opt-in, Monty programs can also call `vsh_bash(code)` between filesystem
+operations. They share one snapshot, one canonical diff and one review/commit boundary.
+
+The capability validates `agent_json` result compatibility in Rust **before commit**.
+Unsupported sets, non-string dictionary keys and non-finite floats fail without host
+mutation. Convert intentionally inside your program, for example `sorted(my_set)`.
+Ordinary Python SDK callers retain their richer native result types.
+
+Agent responses default to a 16 KiB compact ASCII-JSON budget; set the host-only
+`max_response_bytes` constructor option to adjust it (minimum 4096). A response with
+`response_truncated=true` omits oversized result/stream display data but preserves the
+actual transaction state. It does **not** mean a committed operation failed. Return
+summaries and selected slices rather than whole files. Bash streams occur once as
+base64 objects inside `result`, not again in top-level text fields. `snapshot_limits`
+can separately constrain host capture; presentation limits never discard judge evidence.
 
 | Requirement | Configuration | Who may authorize commit? |
 |---|---|---|
@@ -4688,6 +4820,14 @@ Every program submitted through the Rust SDK, Python SDK, or `vsh_run` receives 
 high-level filesystem functions. They are ordinary callable names inside the Monty
 sandbox—not additional MCP tools.
 
+Host Bash opt-in additionally injects `vsh_bash`. It is an eleventh guest callable,
+not another agent-facing tool or an inner transaction.
+
+!!! note "Unreleased additions"
+
+    `vsh_bash` and the accelerated case-sensitive search engine require this development
+    checkout; they are not part of the published 0.6.0 wheel.
+
 ```python
 vsh_mkdir('/workspace/generated')
 vsh_write('/workspace/generated/status.txt', 'ready\n')
@@ -4841,6 +4981,44 @@ Binary/non-UTF-8 files and policy-hidden files are skipped. Case-insensitive mod
 Unicode lowercase matching while preserving columns from the original source text.
 Traversal and file reads stop when `max_results` is reached.
 
+The default case-sensitive matcher uses exact-pinned **`memchr` 2.8.3**, reusing one
+literal finder across files and visiting matching lines directly. It only searches
+bytes already authorized and read by VSH: no host directory index, watcher, database,
+or out-of-band mmap mount. Virtual writes, deletes, renames, read dependencies and
+protected-path rules remain authoritative. Case-insensitive matching retains the
+existing Unicode lowercase/column semantics. The experimental FFF adapter was removed
+after a [controlled comparison](../performance.md) found no material end-to-end benefit
+over this smaller implementation.
+
+### `vsh_bash`
+
+```text
+vsh_bash(code: str) -> {"exit_code": int, "stdout": bytes, "stderr": bytes}
+```
+
+Enable Bash on the trusted host with `Runtime.open(workspace, bash=BashConfig(...))`
+or Rust `RuntimeConfig::with_bash(...)`. Without opt-in the callable is not injected.
+It uses the existing supervised Bashkit backend at `/workspace`, never `/bin/bash`,
+host executables, network, or a fresh filesystem snapshot.
+
+```python
+vsh_write('/workspace/input.txt', 'alpha\nbeta\n')
+shell = vsh_bash('cat input.txt | grep alpha > selected.txt; cat selected.txt')
+assert shell['stdout'] == b'alpha\n'
+assert vsh_read('/workspace/selected.txt') == 'alpha\n'
+{'selected': shell['stdout'].decode('utf-8')}
+```
+
+The outer preview remains non-mutating. Promotion applies the complete canonical diff
+once and invokes the outer hook once. Every shell is fresh: cwd, variables and functions
+do not leak into the next call. Use `cd subdir; ...` within a call when needed.
+I/O, evidence and output accounting share the outer ledger; cancellation and the parent
+deadline also span nested calls. Bash parser/command/work-unit ceilings are per shell.
+Nonzero final exit, unsupported profile operations, resource failures and protocol errors
+are terminal for the outer transaction, even inside Monty `try/except`. Individual denied
+accesses stay in the policy evidence even if the shell handles an error. See the
+[Bash compatibility profile](bash.md) before composing commands.
+
 ### `vsh_patch`
 
 ```text
@@ -4901,12 +5079,14 @@ authenticate users or determine whether an agent understood the task.
 | Integration | Good fit | Host responsibility |
 |---|---|---|
 | Python/Rust SDK wrapper | Managed services and high-rate workflows | Own runtime lifecycle, fixed roots/budgets, review and discard |
-| `vsh serve` | An MCP host with its own workflow guidance | Restrict raw arguments and manage server lifetime |
+| `vsh serve` | An MCP host with its own workflow guidance | Fix the workspace/configuration at registration; manage server lifetime |
 | `vsh-codemode` | MCP clients consuming server instructions/prompts | Same controls; instructions are not policy enforcement |
 
-The raw MCP tool exposes workspace, policy and budget choices. Do not assume its
-working directory confines an untrusted caller. Run with appropriate operating-system
-permissions and place an authorization layer around those arguments.
+The registered MCP tool fixes workspace, policy and budget on the trusted host;
+these are not model arguments. Its default root is captured at registration from
+`VSH_WORKSPACE_ROOT` or the working directory. Set it explicitly in a service and
+enforce session authentication and appropriate operating-system permissions. The
+Python helper and CLI still accept these choices as trusted host APIs.
 
 ## Keep trusted choices out of the model schema
 
@@ -4980,9 +5160,11 @@ Reuse one runtime per authorized workspace/configuration. Complete every auto-ap
 preview lifecycle; read-only requests must be discarded after consumption. Use strict
 durable artifacts for asynchronous human review, not process-local auto-preview caches.
 
-The raw MCP LRU retains 16 runtimes and can lose handles on eviction. Its one-tool
-surface has no discard action. SDK wrappers are better suited to continuous analysis
-and long-lived services. Bound concurrent active requests independently of idle worker
+The MCP LRU retains 16 runtimes and can lose handles on eviction. Registered MCP
+automatically discards auto-approved previews without canonical changes; its response
+reports `preview_retained`. Mutating and pending previews remain available for promotion.
+SDK callers own explicit discard, and SDK wrappers are better suited to durable
+long-lived workflows. Bound concurrent active requests independently of idle worker
 pool capacity, and expect stale conflicts for concurrent work on one workspace.
 
 Guest bytecode/heap limits are not whole-service deadlines or memory quotas. Monitor
@@ -5223,6 +5405,10 @@ documented platform/configuration requirements are met, VSH guarantees:
   descriptors to the untrusted program.
 - Concurrency safety covers recorded dependencies. Unmodeled external side effects are
   outside the transaction.
+- Parent-identity checkpoints detect observed directory relocation before host operations,
+  but cannot make a check and filesystem syscall atomic against hostile external renames.
+  Commit containment requires host-controlled directory ownership or OS isolation; see
+  the [explicit limitation](threat-model.md#host-escape-and-confused-paths).
 - An auto-approved preview handle is resumable only by the same live `Runtime`. VSH
   persists its exact artifact before commit reservation; approval-required previews are
   durable immediately and may be resumed after restart.
@@ -5286,6 +5472,8 @@ and revalidating before one trusted writer commits.
 - Protected paths are denied before their names or bytes reach the worker.
 - Program, intent, snapshot, dependencies, diff, policy, and configuration bind the
   transaction ID.
+- A fresh invocation nonce separates repeated executions from replay of one artifact;
+  persisted hook requirements cannot be dropped by reopening without the hook.
 - Commit consumes a single-use reservation and verifies read/write preconditions.
 - State logs and commit metadata are checksummed and bounded; complete corrupt frames
   fail rather than being treated as torn appends.
@@ -5329,6 +5517,12 @@ VSH is not:
 - protection against a malicious trusted host or replaced VSH binary;
 - a substitute for filesystem permissions, backups, deployment rollback, or secrets
   management.
+
+In particular, parent-identity checks detect observed directory relocation but cannot
+atomically freeze the host namespace against another equally privileged process.
+Use host-controlled workspace ownership or OS isolation; see the precise
+[external-writer limitation](threat-model.md). A pinned directory handle alone does not
+prove that the directory remains at its original pathname.
 
 ## Deployment rules
 
@@ -5380,7 +5574,7 @@ trusted committer without exposing unauthorized host data or mutation paths.
 | Fresh judge | advisory/separate principal | It cannot reverse deterministic deny. |
 | Transaction store | trusted state | CAS transitions enforce single-use commit. |
 | Committer | smallest trusted host writer | It alone may mutate the real workspace. |
-| External concurrent process | adversarial race source | Revalidation must detect dependency changes. |
+| External concurrent process | adversarial race source with a host-containment limitation | Dependency checks and mutation checkpoints detect observed changes; they are not OS isolation against arbitrary directory relocation. |
 | Third-party dependencies | supply-chain risk | Exact pins and continuous advisory/license/source checks apply. |
 
 ## Attacker capabilities
@@ -5416,6 +5610,17 @@ Controls:
 - no path resolution fallback to ambient process CWD,
 - symlink policy applied before data exposure and again at commit,
 - adversarial platform/path tests.
+
+!!! warning "Concurrent directory relocation requires an OS boundary"
+
+    A descriptor pinned inside the workspace can be moved outside it by another host
+    process that has sufficient directory permissions. Revalidation and per-mutation
+    parent-identity checks reject observed relocation/replacement, including the
+    post-revalidation regression scenario, but a rename can still occur between a check
+    and its filesystem syscall. Advisory VSH locks do not stop an uncooperative process.
+    Do not deploy commit against a workspace writable by an adversarial external process
+    and claim absolute path containment. That deployment requires OS-enforced isolation
+    or exclusive host-controlled directory ownership. VSH alone does not provide it.
 
 ### Confidentiality and output exfiltration
 
@@ -5606,6 +5811,87 @@ are recorded for large-payload cases.
 # Performance and optimization evidence
 
 Canonical URL: https://fswair.github.io/vsh/performance/
+
+## Literal search: direct memchr decision — 2026-10-05
+
+The **unreleased development checkout** now uses exact-pinned `memchr` 2.8.3 directly
+for case-sensitive search. This keeps the existing SIMD-capable literal finder and
+replaces the experimental `fff-grep` line/callback adapter with a small matching-line
+iterator. It does not revert to the original per-line `str::find` scan. Unicode
+case-insensitive matching, policy authorization, VFS reads and evidence are unchanged.
+
+The decision follows a separate controlled comparison on Apple M1 / 8 GiB / macOS
+26.1: the same native release-profile harness, fixtures and transaction path, with
+only the matcher adapter selected between runs. There were 12 paired observations
+per end-to-end cell across 200 / 2,000 / 5,000 files and common / rare / absent queries.
+The paired median improvement for direct `memchr` ranged from **−0.73% to +0.33%**.
+Some cells slightly favored FFF; this is not a claim that either implementation is
+universally faster, or a formal equivalence bound on other systems.
+
+| Matcher-only case | FFF median | Direct memchr median |
+| --- | ---: | ---: |
+| 5,000 files, common | 0.026660 ms | 0.025735 ms |
+| 5,000 files, rare | 0.744408 ms | 0.744108 ms |
+| 5,000 files, absent | 0.736219 ms | 0.734239 ms |
+| Dense matching lines | 0.006910 ms | 0.005697 ms |
+| Unicode / CRLF lines | 0.008319 ms | 0.006202 ms |
+
+Seven additional input shapes included large no-hit/tail-hit files, dense/sparse
+matches, Unicode/CRLF, empty files and overlapping needles. The scratch comparison
+also checked 397,800 oracle comparisons over 3,825 generated texts. Measurements
+preceded promotion of the direct iterator into production; they are not a second
+post-integration benchmark. No process-memory or agent-token savings are claimed.
+Removing FFF removes one otherwise-exclusive crate from the measured dependency graph;
+its other dependencies were already shared elsewhere.
+
+Separate profiling of a 5,000-file rare query attributed approximately **61.82%** of
+native time to lazy host capture, **32.52%** to blob insertion/verification and **0.10%**
+to FFF matching. These are instrumented attribution results, not an additive speedup
+promise. They explain why changing the line adapter barely affects transaction latency.
+Capture/blob optimizations need their own correctness and performance gates; this
+change does not weaken stale detection, hash verification or authorization.
+
+Local replay artifacts (ignored by Git): `target/fff_memchr_2026_10_05/README.md`,
+`run1/summary.json`, `shapes.jsonl`, `correctness.log` and
+`target/FFF_DETAILED_MEASUREMENT_2026_10_05.md`.
+
+## Earlier exploratory FFF comparison — 2026-10-05
+
+This measurement covers **unreleased working-tree changes**, not published 0.6.0.
+This earlier candidate used `fff-grep` 0.11.0 over authorized VFS byte slices, before
+the direct-memchr decision above. There was no host-side FFF index, watcher or mmap in
+VSH. Unicode-insensitive matching retained its existing semantics. Snapshot, policy,
+content capture, read dependencies and canonical evidence stayed on the transaction path.
+
+On an Apple M1 / 8 GiB / macOS 26.1 machine, the same Python harness searched
+deterministic 4096-byte files (seed 63227). Each size used three fresh engine/store
+rounds, alternating engines, with nine warm queries per case: 27 samples per cell.
+Common matches stop at 100; rare matches occur in the final two files; absent returns
+zero. Result counts and fixture SHA-256 identities were verified. Times are medians
+in milliseconds, including VSH preview rather than just the matching loop.
+
+| Files | VSH before: common / rare / absent | VSH after: common / rare / absent | Standalone indexed FFF after: common / rare / absent |
+| ---: | ---: | ---: | ---: |
+| 200 | 14.960 / 27.666 / 27.757 | 15.500 / 28.757 / 28.469 | 1.416 / 2.551 / 2.282 |
+| 2,000 | 21.561 / 292.038 / 295.911 | 20.915 / 273.640 / 276.504 | 1.219 / 13.130 / 12.815 |
+| 5,000 | 37.215 / 1737.027 / 1688.226 | 32.238 / 731.120 / 729.393 | 1.256 / 36.586 / 35.693 |
+
+The 5,000-file baseline varied substantially: rare-query round medians were about
+1926, 1808 and 743 ms. The candidate's 731 ms is close to that fastest baseline
+round. **Do not attribute the pooled 2.4× ratio to FFF**, or treat this observational
+before/after series as an isolated causal performance gate. Other audit fixes changed
+the checkout, and system/cache variation matters. The 200-file cases did not improve.
+
+Fresh engine/store plus first rare query took approximately 1.81 / 16.97 / 42.19 s
+for VSH versus 48 / 56 / 119 ms for standalone FFF at these sizes. OS page caches
+were not flushed; process startup/imports were excluded. Standalone indexed FFF is
+still much faster for repeated search, but it does not do VSH transaction/evidence
+work or search uncommitted VSH overlays. This is not security-equivalent replacement
+evidence. No commit-inclusive latency, whole-process memory reduction or agent token
+savings is claimed. The later attribution and controlled comparison are summarized above.
+
+Raw local artifacts: `target/fff_search_benchmark_2026_10_05/results.json` (baseline),
+`after-integration.json` (candidate), and `compare.py` (unchanged harness).
 
 ## Stable integration decision — 2026-10-02
 
@@ -6769,7 +7055,15 @@ handles; approval-required artifacts are durable.
 
 ## Integrity and recovery
 
-Current pending artifacts use `VSHPND03`. Monty and Bash have separate output tags;
+Current pending artifacts use `VSHPND04`. Every fresh execution gets an OS-entropy
+invocation identity separate from its semantic diff/evidence digests. Repeating the
+same read or no-op therefore creates a fresh transaction; replaying one existing
+approval or commit handle still fails. A persisted hook-configuration digest prevents
+reopening the artifact with a missing or changed hook to bypass review.
+
+Pending artifacts from older formats require a fresh preview before approval or commit.
+Entered commits still use their journaled recovery protocol; do not delete recovery
+state during an upgrade. Monty and Bash have separate output tags;
 Bash records its profile, successful exit status and byte-authoritative stdout/stderr.
 Loading recomputes the execution-evidence seal and identity. Unknown tags, incomplete
 outputs, nonzero Bash exits, malformed lengths or combined output over the configured

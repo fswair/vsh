@@ -22,10 +22,11 @@ required-features = ["bash"]
 
 [features]
 default = []
-bash = ["dep:vsh-bash"]
+bash = ["dep:vsh-bash", "vsh-monty/bash"]
 
 [dependencies]
 blake3.workspace = true
+getrandom.workspace = true
 postcard.workspace = true
 vsh-bash = { workspace = true, features = ["host"], optional = true }
 vsh-execution.workspace = true

@@ -8,8 +8,9 @@ use vsh_policy::{
 };
 use vsh_types::{
     ContentVersion, DiffDigest, DiffEntry, DiffKind, DirectoryDigest, ExecutionEvidenceDigest,
-    FileStamp, IntentDigest, NodeKind, NodeState, PlatformFileId, PolicyDigest, ProgramDigest,
-    ReadSetDigest, RuntimeConfigDigest, SnapshotId, TransactionBinding, VPath, WriteSetDigest,
+    FileStamp, IntentDigest, InvocationId, NodeKind, NodeState, PlatformFileId, PolicyDigest,
+    ProgramDigest, ReadSetDigest, RuntimeConfigDigest, SnapshotId, TransactionBinding, VPath,
+    WriteSetDigest,
 };
 use vsh_vfs::{
     CanonicalDiff, Effect, EffectEvent, EffectOrigin, ReadObservation, WritePrecondition,
@@ -21,6 +22,7 @@ use crate::{BashResult, ExecutionOutput};
 const ARTIFACT_MAGIC_V1: &[u8; 8] = b"VSHPND01";
 const ARTIFACT_MAGIC_V2: &[u8; 8] = b"VSHPND02";
 const ARTIFACT_MAGIC_V3: &[u8; 8] = b"VSHPND03";
+const ARTIFACT_MAGIC_V4: &[u8; 8] = b"VSHPND04";
 
 #[derive(Clone)]
 pub(crate) struct ReviewEvidence {
@@ -217,11 +219,20 @@ fn write_pending_fields(
             });
         }
     }
-    output.extend_from_slice(if modern {
-        ARTIFACT_MAGIC_V3
-    } else {
-        ARTIFACT_MAGIC_V2
-    })?;
+    output.extend_from_slice(
+        if artifact.binding.invocation.is_some() || artifact.binding.commit_hook.is_some() {
+            if !modern {
+                return Err(ArtifactError::Unsupported {
+                    reason: "invocation binding requires sealed execution evidence",
+                });
+            }
+            ARTIFACT_MAGIC_V4
+        } else if modern {
+            ARTIFACT_MAGIC_V3
+        } else {
+            ARTIFACT_MAGIC_V2
+        },
+    )?;
     if create_seal {
         // Fixed-width slot; its contents do not participate in the evidence hash.
         let mut binding = artifact.binding;
@@ -299,7 +310,11 @@ pub(crate) fn decode_pending(
     }
     let mut decoder = Decoder::new(bytes);
     let magic = decoder.take(ARTIFACT_MAGIC_V2.len())?;
-    let has_review_evidence = if magic == ARTIFACT_MAGIC_V3 {
+    let has_review_evidence = if magic == ARTIFACT_MAGIC_V4 {
+        decoder.invocation_binding = true;
+        decoder.modern = true;
+        true
+    } else if magic == ARTIFACT_MAGIC_V3 {
         decoder.modern = true;
         true
     } else if magic == ARTIFACT_MAGIC_V2 {
@@ -851,6 +866,10 @@ fn encode_binding(binding: &TransactionBinding, output: &mut Encoder) -> Result<
     output.extend_from_slice(binding.policy.as_bytes())?;
     output.extend_from_slice(binding.runtime_config.as_bytes())?;
     encode_optional_digest(binding.intent.map(|value| *value.as_bytes()), output)?;
+    if binding.invocation.is_some() || binding.commit_hook.is_some() {
+        encode_optional_digest(binding.invocation.map(|value| *value.as_bytes()), output)?;
+        encode_optional_digest(binding.commit_hook.map(|value| *value.as_bytes()), output)?;
+    }
     if let Some(evidence) = binding.execution_evidence {
         output.extend_from_slice(evidence.as_bytes())?;
     }
@@ -942,6 +961,16 @@ fn decode_binding(decoder: &mut Decoder<'_>) -> Result<TransactionBinding, Artif
         policy: PolicyDigest::from_bytes(decoder.digest()?),
         runtime_config: RuntimeConfigDigest::from_bytes(decoder.digest()?),
         intent: decode_optional_digest(decoder)?.map(IntentDigest::from_bytes),
+        invocation: if decoder.invocation_binding {
+            decode_optional_digest(decoder)?.map(InvocationId::from_bytes)
+        } else {
+            None
+        },
+        commit_hook: if decoder.invocation_binding {
+            decode_optional_digest(decoder)?.map(RuntimeConfigDigest::from_bytes)
+        } else {
+            None
+        },
         execution_evidence: if decoder.modern {
             Some(ExecutionEvidenceDigest::from_bytes(decoder.digest()?))
         } else {
@@ -1531,6 +1560,7 @@ struct Decoder<'a> {
     bytes: &'a [u8],
     offset: usize,
     modern: bool,
+    invocation_binding: bool,
 }
 
 impl<'a> Decoder<'a> {
@@ -1539,6 +1569,7 @@ impl<'a> Decoder<'a> {
             bytes,
             offset: 0,
             modern: false,
+            invocation_binding: false,
         }
     }
 
@@ -1773,6 +1804,8 @@ mod tests {
             policy: PolicyDigest::digest_canonical(b"artifact-policy"),
             runtime_config: RuntimeConfigDigest::digest_canonical(b"artifact-runtime"),
             intent: Some(IntentDigest::digest_text("create result")),
+            invocation: None,
+            commit_hook: None,
             execution_evidence: None,
         };
         let receipt = Receipt {
@@ -1826,6 +1859,30 @@ mod tests {
             },
             receipt,
         }
+    }
+
+    #[test]
+    fn invocation_and_hook_binding_round_trip_without_changing_execution_evidence() {
+        let limits = ArtifactLimits::default();
+        let mut first = fixture();
+        first.binding.invocation = Some(InvocationId::from_bytes([1; 32]));
+        first.binding.commit_hook = Some(RuntimeConfigDigest::from_bytes([2; 32]));
+        let mut second = first.clone();
+        second.binding.invocation = Some(InvocationId::from_bytes([3; 32]));
+        let bytes = seal_pending_and_encode(&mut first, limits).unwrap();
+        seal_pending_and_size(&mut second, limits).unwrap();
+        assert_eq!(&bytes[..8], ARTIFACT_MAGIC_V4);
+        assert_eq!(
+            first.binding.execution_evidence,
+            second.binding.execution_evidence
+        );
+        assert_ne!(
+            first.binding.transaction_id(),
+            second.binding.transaction_id()
+        );
+        let decoded = decode_pending(&bytes, limits).unwrap();
+        assert_eq!(decoded.binding, first.binding);
+        assert_eq!(encode_pending(&decoded, limits).unwrap(), bytes);
     }
 
     fn seal(artifact: &mut PendingTransaction) {

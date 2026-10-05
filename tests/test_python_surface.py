@@ -9,11 +9,126 @@ from pathlib import Path
 from typing import Literal, cast
 
 import pytest
+from fastmcp import Client, FastMCP
+from fastmcp.exceptions import ToolError
 from fastmcp.prompts import PromptResult
 
 from vsh import __version__, cli
+from vsh._response import bound_mcp_response, response_size
 from vsh.mcp import codemode_server
 from vsh.mcp.native_tools import DetailName, PolicyName, RunModeName, vsh_run
+from vsh.mcp.surface import register_vsh_surface
+
+
+def test_mcp_authority_is_fixed_by_host_not_tool_arguments(tmp_path, monkeypatch) -> None:
+    authorized = tmp_path / "authorized"
+    outside = tmp_path / "outside"
+    authorized.mkdir()
+    outside.mkdir()
+    (authorized / "visible.txt").write_text("host workspace")
+    server = FastMCP("fixed-root-test")
+    register_vsh_surface(
+        server, workspace_root=str(authorized), policy="strict", budget={"max_program_bytes": 512}
+    )
+    monkeypatch.chdir(outside)
+
+    async def exercise() -> None:
+        async with Client(server) as client:
+            tool = (await client.list_tools())[0]
+            assert (
+                not {"workspace_root", "policy", "budget"} & tool.inputSchema["properties"].keys()
+            )
+            result = await client.call_tool(
+                "vsh_run", {"code": "vsh_read('/workspace/visible.txt')"}
+            )
+            assert result.data["result_repr"] == "'host workspace'"
+            for argument, value in {
+                "workspace_root": str(outside),
+                "policy": "balanced",
+                "budget": {"max_program_bytes": 99999},
+            }.items():
+                with pytest.raises(ToolError):
+                    await client.call_tool("vsh_run", {"code": "None", argument: value})
+
+    asyncio.run(exercise())
+    assert not (outside / ".vsh-runtime").exists()
+
+
+def test_mcp_response_has_one_aggregate_json_budget(tmp_path) -> None:
+    server = FastMCP("bounded-response-test")
+    register_vsh_surface(server, workspace_root=str(tmp_path), max_response_bytes=4096)
+
+    async def exercise() -> None:
+        async with Client(server) as client:
+            result = await client.call_tool(
+                "vsh_run", {"code": "print('🙂' * 10000)\n'🙂' * 10000", "mode": "auto"}
+            )
+            assert result.data["state"] == "committed"
+            assert result.data["response_truncated"]
+            assert len(json.dumps(result.data, ensure_ascii=True, separators=(",", ":"))) <= 4096
+
+    asyncio.run(exercise())
+
+
+def test_response_budget_omits_full_changes_and_denial_text_but_keeps_outcome() -> None:
+    payload: dict[str, object] = {
+        "state": "denied",
+        "commit": {"committed": False},
+        "changes": [{"path": "🙂" * 2000, "kind": "create"}],
+        "deny_reason": "not authorized " * 2000,
+        "bash": {"stdout": "x" * 10000},
+    }
+    result = bound_mcp_response(payload, 4096)
+    assert response_size(result) <= 4096
+    assert result["state"] == "denied" and result["commit"] == {"committed": False}
+    assert result["changes"] == [] and result["deny_reason"] is None
+    assert result["response_truncated"] is True
+
+
+def test_mcp_host_configuration_is_validated(tmp_path) -> None:
+    file = tmp_path / "file.txt"
+    file.write_text("not a directory")
+    with pytest.raises(NotADirectoryError):
+        register_vsh_surface(FastMCP("invalid-root"), workspace_root=str(file))
+    with pytest.raises(ValueError, match="unknown policy"):
+        register_vsh_surface(FastMCP("invalid-policy"), policy=cast(PolicyName, "invalid"))
+    with pytest.raises(ValueError, match="max_response_bytes"):
+        register_vsh_surface(FastMCP("invalid-size"), max_response_bytes=1)
+
+
+def test_mcp_bash_response_has_one_byte_authoritative_copy(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("VSH_ENABLE_BASH", "1")
+    server = FastMCP("bash-response-test")
+    register_vsh_surface(server, workspace_root=str(tmp_path))
+
+    async def exercise() -> None:
+        async with Client(server) as client:
+            result = await client.call_tool("vsh_run", {"code": "printf hello", "language": "bash"})
+            assert result.data["bash"]["stdout"] == "aGVsbG8="
+            assert (
+                result.data["stdout"] == result.data["stderr"] == result.data["result_repr"] == ""
+            )
+
+    asyncio.run(exercise())
+
+
+def test_mcp_completed_read_previews_do_not_exhaust_retention(tmp_path) -> None:
+    server = FastMCP("preview-cleanup-test")
+    register_vsh_surface(server, workspace_root=str(tmp_path))
+
+    async def exercise() -> None:
+        async with Client(server) as client:
+            for _ in range(66):
+                result = await client.call_tool("vsh_run", {"code": "42"})
+                assert result.data["result_repr"] == "42"
+                assert result.data["preview_retained"] is False
+            changed = await client.call_tool(
+                "vsh_run", {"code": "vsh_write('/workspace/new.txt', 'pending')"}
+            )
+            assert changed.data["preview_retained"] is True
+            assert not (tmp_path / "new.txt").exists()
+
+    asyncio.run(exercise())
 
 
 def test_cli_reports_version(capsys: pytest.CaptureFixture[str]) -> None:

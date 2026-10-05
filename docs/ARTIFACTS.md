@@ -36,7 +36,15 @@ handles; approval-required artifacts are durable.
 
 ## Integrity and recovery
 
-Current pending artifacts use `VSHPND03`. Monty and Bash have separate output tags;
+Current pending artifacts use `VSHPND04`. Every fresh execution gets an OS-entropy
+invocation identity separate from its semantic diff/evidence digests. Repeating the
+same read or no-op therefore creates a fresh transaction; replaying one existing
+approval or commit handle still fails. A persisted hook-configuration digest prevents
+reopening the artifact with a missing or changed hook to bypass review.
+
+Pending artifacts from older formats require a fresh preview before approval or commit.
+Entered commits still use their journaled recovery protocol; do not delete recovery
+state during an upgrade. Monty and Bash have separate output tags;
 Bash records its profile, successful exit status and byte-authoritative stdout/stderr.
 Loading recomputes the execution-evidence seal and identity. Unknown tags, incomplete
 outputs, nonzero Bash exits, malformed lengths or combined output over the configured

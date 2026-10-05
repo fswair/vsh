@@ -130,6 +130,10 @@ list, make directory, remove, move, copy, glob, literal search and exact text pa
 They share the same copy-on-write snapshot as `pathlib`, so earlier virtual writes are
 visible to later calls without creating a nested runtime or crossing MCP.
 
+With explicit Bash opt-in, Monty also receives `vsh_bash(code)`: bounded shell pipelines
+share that same overlay, budget and commit boundary. Default literal content search uses
+direct `memchr` byte matching behind VSH's policy gateway, without a host filesystem index.
+
 ```python
 files = vsh_glob('**/*.toml', path='/workspace/services', max_results=101)
 assert len(files) <= 100, 'split this migration into reviewed batches'

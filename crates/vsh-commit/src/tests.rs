@@ -79,6 +79,8 @@ fn binding(vfs: &VirtualFs, diff: &CanonicalDiff) -> TransactionBinding {
         policy: PolicyDigest::digest_canonical(b"test-policy"),
         runtime_config: RuntimeConfigDigest::digest_canonical(b"test-runtime"),
         intent: None,
+        invocation: None,
+        commit_hook: None,
         execution_evidence: None,
     }
 }
@@ -352,6 +354,81 @@ fn journal_and_host_error_types_have_stable_sources() {
             )
         );
     }
+}
+
+// Windows pins directory handles against rename; its blocked-swap test below
+// covers that boundary instead of assuming the relocation succeeds.
+#[cfg(unix)]
+#[test]
+fn relocated_parent_is_rejected_at_mutation_checkpoints() {
+    for trigger in [
+        FaultPoint::Revalidated,
+        FaultPoint::CommitStatePersisted,
+        FaultPoint::IntentSynced(0),
+    ] {
+        let (directory, committer) = fixture("relocated-parent");
+        fs::create_dir(directory.workspace().join("sub")).unwrap();
+        let outside = directory.0.join("outside");
+        fs::create_dir(&outside).unwrap();
+        let mut filesystem = VirtualFs::new(committer.snapshot(SnapshotLimits::default()).unwrap());
+        filesystem
+            .write(&path("sub/created.txt"), b"must stay inside")
+            .unwrap();
+        let diff = filesystem.canonical_diff().unwrap();
+        let binding = binding(&filesystem, &diff);
+        let plan = CommitPlan::new(
+            &binding,
+            &diff,
+            filesystem.read_set(),
+            filesystem.write_set(),
+        )
+        .unwrap();
+        let store = MemoryTransactionStore::default();
+        let reservation = reserve(&store, &binding);
+        let result = committer.commit_with_faults(&store, reservation, &plan, &|point| {
+            if point == trigger {
+                fs::rename(directory.workspace().join("sub"), outside.join("moved")).unwrap();
+            }
+            false
+        });
+        assert!(result.is_err());
+        assert!(!outside.join("moved/created.txt").exists());
+        assert!(!directory.workspace().join("sub/created.txt").exists());
+    }
+}
+
+#[test]
+fn lazy_host_capture_rejects_oversize_growth_and_cancellation_before_blob_storage() {
+    let (directory, committer) = fixture("bounded-lazy-capture");
+    for limits in [
+        SnapshotLimits {
+            max_materialized_file_bytes: 2,
+            ..SnapshotLimits::default()
+        },
+        SnapshotLimits {
+            max_materialized_bytes: 2,
+            ..SnapshotLimits::default()
+        },
+    ] {
+        let snapshot = committer.snapshot(limits).unwrap();
+        let mut vfs = VirtualFs::new(snapshot);
+        assert!(vfs.read(&path("old.txt")).is_err());
+    }
+    let cancellation = vsh_execution::ExecutionCancellation::default();
+    let snapshot = committer
+        .snapshot_cancellable(SnapshotLimits::default(), &cancellation)
+        .unwrap();
+    assert!(cancellation.cancel());
+    assert!(VirtualFs::new(snapshot).read(&path("old.txt")).is_err());
+    assert!(
+        committer
+            .snapshot_cancellable(SnapshotLimits::default(), &cancellation)
+            .is_err()
+    );
+
+    let snapshot = committer.snapshot(SnapshotLimits::default()).unwrap();
+    fs::write(directory.workspace().join("old.txt"), vec![b'x'; 8192]).unwrap();
+    assert!(VirtualFs::new(snapshot).read(&path("old.txt")).is_err());
 }
 
 #[test]
@@ -912,6 +989,8 @@ fn commit_applies_and_verifies_directory_mode_changes() {
         policy: PolicyDigest::digest_canonical(b"test-policy"),
         runtime_config: RuntimeConfigDigest::digest_canonical(b"test-runtime"),
         intent: None,
+        invocation: None,
+        commit_hook: None,
         execution_evidence: None,
     };
     let plan = CommitPlan::new(&binding, &diff, &read_set, &write_set).unwrap();
@@ -1575,7 +1654,7 @@ fn parent_swap_after_durable_intent_cannot_redirect_a_mutation() {
     );
     assert_eq!(
         fs::read(workspace.join("detached-parent/value.txt")).unwrap(),
-        b"transaction"
+        b"old"
     );
 
     let report = committer.recover(&store).unwrap();
@@ -1591,7 +1670,7 @@ fn parent_swap_after_durable_intent_cannot_redirect_a_mutation() {
     );
     assert_eq!(
         fs::read(workspace.join("detached-parent/value.txt")).unwrap(),
-        b"transaction"
+        b"old"
     );
 }
 

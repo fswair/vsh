@@ -14,7 +14,7 @@ use super::{
     dispatch_call, gateway, map_authorized_path, map_call_path, not_directory,
 };
 
-/// Stable VSH functions injected into every Monty program.
+/// Stable VSH function names. `vsh_bash` is injected only with host Bash opt-in.
 pub const MONTY_VSH_TOOL_NAMES: &[&str] = &[
     "vsh_read",
     "vsh_write",
@@ -26,6 +26,7 @@ pub const MONTY_VSH_TOOL_NAMES: &[&str] = &[
     "vsh_glob",
     "vsh_search",
     "vsh_patch",
+    "vsh_bash",
 ];
 
 const TOOL_SPECS: &[(&str, &str)] = &[
@@ -71,7 +72,7 @@ const TOOL_SPECS: &[(&str, &str)] = &[
     ),
 ];
 
-pub(super) fn inputs() -> (Vec<String>, Vec<MontyObject>) {
+pub(super) fn inputs(bash_enabled: bool) -> (Vec<String>, Vec<MontyObject>) {
     let mut names = Vec::with_capacity(TOOL_SPECS.len());
     let mut values = Vec::with_capacity(TOOL_SPECS.len());
     for (name, docstring) in TOOL_SPECS {
@@ -79,6 +80,13 @@ pub(super) fn inputs() -> (Vec<String>, Vec<MontyObject>) {
         values.push(MontyObject::Function {
             name: (*name).to_owned(),
             docstring: Some((*docstring).to_owned()),
+        });
+    }
+    if bash_enabled {
+        names.push("vsh_bash".into());
+        values.push(MontyObject::Function {
+            name: "vsh_bash".into(),
+            docstring: Some("vsh_bash(code) -> dict\nRun bounded Bash in the same active VSH transaction at /workspace. Returns exit_code, stdout and stderr bytes. Host opt-in required; terminal failures abort the entire transaction.".into()),
         });
     }
     (names, values)
@@ -95,6 +103,7 @@ pub(super) fn dispatch(
     filesystem: &mut VirtualFs,
     config: &InProcessConfig,
     budget: &mut Budget,
+    #[cfg(feature = "bash")] bash: &mut BashToolContext<'_>,
 ) -> Result<MontyObject, CallFailure> {
     match name {
         "vsh_read" => read(args, kwargs, filesystem, config, budget),
@@ -107,8 +116,67 @@ pub(super) fn dispatch(
         "vsh_glob" => glob(args, kwargs, filesystem, config, budget),
         "vsh_search" => search(args, kwargs, filesystem, config, budget),
         "vsh_patch" => patch(args, kwargs, filesystem, config, budget),
+        #[cfg(feature = "bash")]
+        "vsh_bash" => run_bash(args, kwargs, filesystem, config, budget, bash),
         _ => Err(runtime_error(format!("unknown VSH Monty tool: {name}"))),
     }
+}
+
+#[cfg(feature = "bash")]
+pub(super) struct BashToolContext<'a> {
+    pub(super) backend: Option<&'a vsh_bash::SubprocessBash>,
+    pub(super) cancellation: Option<&'a vsh_execution::ExecutionCancellation>,
+    pub(super) deadline: std::time::Instant,
+    pub(super) denied_accesses: &'a mut Vec<vsh_policy::DeniedAccess>,
+}
+
+#[cfg(feature = "bash")]
+fn run_bash(
+    args: &[MontyObject],
+    kwargs: &[(MontyObject, MontyObject)],
+    filesystem: &mut VirtualFs,
+    config: &InProcessConfig,
+    budget: &mut Budget,
+    context: &mut BashToolContext<'_>,
+) -> Result<MontyObject, CallFailure> {
+    let args = Arguments::bind("vsh_bash", args, kwargs, &["code"])?;
+    let code = args.required_string("code")?;
+    let backend = context
+        .backend
+        .ok_or_else(|| runtime_error("Bash is not enabled by the host".into()))?;
+    if config.virtual_root.as_str() != "/workspace" {
+        return Err(CallFailure::Bash(vsh_bash::BashError::Configuration(
+            "Bash requires /workspace".into(),
+        )));
+    }
+    let default_cancellation = vsh_execution::ExecutionCancellation::default();
+    let outcome = backend
+        .execute_with_budget(
+            code,
+            filesystem,
+            &config.call_policy,
+            budget,
+            context.cancellation.unwrap_or(&default_cancellation),
+            context.deadline,
+        )
+        .map_err(CallFailure::Bash)?;
+    // The Bash gateway already charged retention against the same VFS evidence
+    // budget. Move the records into the outer ledger without charging twice.
+    context.denied_accesses.extend(outcome.denied_accesses);
+    Ok(MontyObject::dict(vec![
+        (
+            MontyObject::String("exit_code".into()),
+            MontyObject::Int(i64::from(outcome.exit_code)),
+        ),
+        (
+            MontyObject::String("stdout".into()),
+            MontyObject::Bytes(outcome.stdout),
+        ),
+        (
+            MontyObject::String("stderr".into()),
+            MontyObject::Bytes(outcome.stderr),
+        ),
+    ]))
 }
 
 fn read(
@@ -363,6 +431,7 @@ fn search(
         return Ok(MontyObject::List(Vec::new()));
     }
     let folded_query = (!case_sensitive).then(|| query.to_lowercase());
+    let literal_search = super::search::LiteralSearch::new(query);
     let mut matches = Vec::with_capacity(max_results.min(64));
     if root_state.kind() == NodeKind::Directory {
         active_gateway.walk_visible(&root, |entry| {
@@ -370,6 +439,7 @@ fn search(
                 entry,
                 query,
                 folded_query.as_deref(),
+                &literal_search,
                 max_results,
                 &mut matches,
                 config,
@@ -381,6 +451,7 @@ fn search(
             root_entry,
             query,
             folded_query.as_deref(),
+            &literal_search,
             max_results,
             &mut matches,
             config,
@@ -393,6 +464,7 @@ fn search_file(
     mut entry: ObservedEntry<'_, '_>,
     query: &str,
     folded_query: Option<&str>,
+    literal_search: &super::search::LiteralSearch<'_>,
     max_results: usize,
     matches: &mut Vec<MontyObject>,
     config: &InProcessConfig,
@@ -411,21 +483,30 @@ fn search_file(
     let Ok(text) = String::from_utf8(bytes) else {
         return Ok(true);
     };
-    for (line_index, line) in text.lines().enumerate() {
+    let mut visit = |line_number: usize, line: &str| {
         let Some(column) = search_column(line, query, folded_query) else {
-            continue;
+            return true;
         };
         matches.push(search_match(
             config.virtual_root.present(entry.path()),
-            line_index.saturating_add(1),
+            line_number,
             column,
             line,
         ));
-        if matches.len() >= max_results {
-            return Ok(false);
+        matches.len() < max_results
+    };
+    if folded_query.is_none() {
+        literal_search.visit(&text, &mut visit);
+    } else {
+        // Keep the Unicode lowercase/column contract separate from the
+        // case-sensitive byte matcher.
+        for (line_index, line) in text.lines().enumerate() {
+            if !visit(line_index.saturating_add(1), line) {
+                break;
+            }
         }
     }
-    Ok(true)
+    Ok(matches.len() < max_results)
 }
 
 fn search_column(line: &str, query: &str, folded_query: Option<&str>) -> Option<usize> {

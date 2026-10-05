@@ -2154,6 +2154,7 @@ dependencies = [
  "blake3",
  "cap-fs-ext",
  "cap-std",
+ "vsh-execution",
  "vsh-policy",
  "vsh-store",
  "vsh-types",
@@ -2175,10 +2176,12 @@ name = "vsh-monty"
 version = "0.6.0"
 dependencies = [
  "get-size2",
+ "memchr",
  "monty",
  "monty-proto",
  "monty-types",
  "rustix",
+ "vsh-bash",
  "vsh-execution",
  "vsh-policy",
  "vsh-store",
@@ -2225,6 +2228,7 @@ name = "vsh-runtime"
 version = "0.6.0"
 dependencies = [
  "blake3",
+ "getrandom 0.4.3",
  "postcard",
  "vsh-bash",
  "vsh-commit",

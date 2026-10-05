@@ -29,8 +29,8 @@ const VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 const FRAME_OVERHEAD_BYTES: usize = 64 * 1024;
 const MAX_WORKER_EVENTS_PER_EXECUTION: u64 = 16_384;
 
-fn monty_tool_inputs() -> Vec<pb::NamedValue> {
-    let (names, values) = tools::inputs();
+fn monty_tool_inputs(bash_enabled: bool) -> Vec<pb::NamedValue> {
+    let (names, values) = tools::inputs(bash_enabled);
     names
         .into_iter()
         .zip(values)
@@ -214,10 +214,43 @@ impl SubprocessMonty {
         adapter: &InProcessConfig,
         cancellation: &ExecutionCancellation,
     ) -> Result<ExecutionOutcome, ExecutionError> {
+        self.execute_inner(
+            code.into(),
+            filesystem,
+            adapter,
+            cancellation,
+            #[cfg(feature = "bash")]
+            None,
+        )
+    }
+
+    /// Execute Monty with an optional host-enabled nested Bash tool.
+    ///
+    /// # Errors
+    /// Nested Bash failures abort the outer transaction, including caught guest exceptions.
+    #[cfg(feature = "bash")]
+    pub fn execute_with_bash(
+        &self,
+        code: impl Into<String>,
+        filesystem: &mut VirtualFs,
+        adapter: &InProcessConfig,
+        cancellation: &ExecutionCancellation,
+        bash: Option<&vsh_bash::SubprocessBash>,
+    ) -> Result<ExecutionOutcome, ExecutionError> {
+        self.execute_inner(code.into(), filesystem, adapter, cancellation, bash)
+    }
+
+    fn execute_inner(
+        &self,
+        code: String,
+        filesystem: &mut VirtualFs,
+        adapter: &InProcessConfig,
+        cancellation: &ExecutionCancellation,
+        #[cfg(feature = "bash")] bash: Option<&vsh_bash::SubprocessBash>,
+    ) -> Result<ExecutionOutcome, ExecutionError> {
         if cancellation.is_cancelled() {
             return Err(ExecutionError::Cancelled);
         }
-        let code = code.into();
         adapter
             .limits
             .check_program_bytes(code.len())
@@ -230,7 +263,14 @@ impl SubprocessMonty {
         let mut worker = self.checkout()?;
         worker.cancellation = Some(cancellation.clone());
         let wall_timeout = self.config.wall_timeout(adapter);
-        let result = worker.execute(code, filesystem, adapter, wall_timeout);
+        let result = worker.execute(
+            code,
+            filesystem,
+            adapter,
+            wall_timeout,
+            #[cfg(feature = "bash")]
+            bash,
+        );
         if cancellation.is_cancelled() {
             return Err(ExecutionError::Cancelled);
         }
@@ -506,7 +546,12 @@ impl Worker {
         filesystem: &mut VirtualFs,
         adapter: &InProcessConfig,
         wall_timeout: Duration,
+        #[cfg(feature = "bash")] bash: Option<&vsh_bash::SubprocessBash>,
     ) -> Result<ExecutionOutcome, ExecutionError> {
+        #[cfg(feature = "bash")]
+        let bash_enabled = bash.is_some();
+        #[cfg(not(feature = "bash"))]
+        let bash_enabled = false;
         self.frame_limits.configure(adapter);
         let deadline = Instant::now()
             .checked_add(wall_timeout)
@@ -514,7 +559,7 @@ impl Worker {
         self.configure(adapter, deadline)?;
         self.send(pb::parent_request::Kind::Feed(pb::Feed {
             code,
-            inputs: monty_tool_inputs(),
+            inputs: monty_tool_inputs(bash_enabled),
             skip_type_check: true,
         }))?;
 
@@ -536,6 +581,9 @@ impl Worker {
             })?;
             match kind {
                 pb::child_event::Kind::Print(output) => {
+                    budget
+                        .charge_output(output.text.len())
+                        .map_err(limit_error)?;
                     append_output(&mut stdout, &output, adapter.limits.max_output_bytes)?;
                 }
                 pb::child_event::Kind::OsCall(call) => {
@@ -565,7 +613,6 @@ impl Worker {
                             worker_error(WorkerFailureKind::Protocol, source.to_string())
                         })?;
                     let mut stats = budget.stats();
-                    stats.output_bytes = stdout.len();
                     stats.result_bytes = measure_result(&value, adapter.limits.max_result_bytes)
                         .map_err(limit_error)?;
                     return Ok(ExecutionOutcome {
@@ -588,6 +635,10 @@ impl Worker {
                         adapter,
                         &mut budget,
                         &mut denied_accesses,
+                        #[cfg(feature = "bash")]
+                        bash,
+                        #[cfg(feature = "bash")]
+                        deadline,
                     )?;
                 }
                 pb::child_event::Kind::ResolveFutures(_) => {
@@ -668,6 +719,13 @@ impl Worker {
         }))
     }
 
+    #[cfg_attr(
+        feature = "bash",
+        expect(
+            clippy::too_many_arguments,
+            reason = "one framed call borrows the same transaction ledger and nested backend lifetime"
+        )
+    )]
     fn resume_tool_call(
         &mut self,
         call: monty_proto::WireFunctionCall,
@@ -675,6 +733,8 @@ impl Worker {
         config: &InProcessConfig,
         budget: &mut Budget,
         denied_accesses: &mut Vec<DeniedAccess>,
+        #[cfg(feature = "bash")] bash: Option<&vsh_bash::SubprocessBash>,
+        #[cfg(feature = "bash")] deadline: Instant,
     ) -> Result<(), ExecutionError> {
         if call.object_id.is_some() || !tools::is_tool(&call.function_name) {
             return Err(ExecutionError::UnsupportedSuspension {
@@ -691,6 +751,13 @@ impl Worker {
                 filesystem,
                 config,
                 budget,
+                #[cfg(feature = "bash")]
+                &mut tools::BashToolContext {
+                    backend: bash,
+                    cancellation: self.cancellation.as_ref(),
+                    deadline,
+                    denied_accesses,
+                },
             )
         });
         let result = call_result(result, filesystem, budget, denied_accesses)?;

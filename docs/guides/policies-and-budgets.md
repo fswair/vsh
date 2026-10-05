@@ -31,7 +31,7 @@ denials, not approval prompts.
 | Recursion | 512 frames | stack growth |
 | Worker heap | 256 MiB | guest allocation |
 | Typed OS / high-level VSH calls | 10,000 | call amplification |
-| Read bytes | 64 MiB | cumulative materialization |
+| Read bytes | 64 MiB | cumulative guest file reads |
 | Write bytes | 64 MiB | cumulative virtual output |
 | One I/O call | 4 MiB | single-frame allocation |
 | One path | 16 KiB | path/protocol abuse |
@@ -45,6 +45,37 @@ denials, not approval prompts.
 The supervised worker additionally enforces protocol frame and process boundaries.
 Snapshot, artifact, state-log, journal, plan, and commit paths have their own trusted
 host limits.
+
+Host capture is separate from guest I/O. `SnapshotLimits` defaults to 250,000 metadata
+nodes, depth 128, 16 GiB represented file sizes, **64 MiB cumulatively materialized
+host content**, and **4 MiB per materialized host file/link**. Lazy reads during
+canonical diff construction (for example a rename) consume the same host capture
+allowance even when `receipt.read_bytes` remains zero. Limits are charged before
+content reading/blob storage; directory entries are counted before statting or retaining
+an unbounded directory. Reading a file that grew after snapshot fails before capturing
+its larger content. Enumeration and chunked lazy reads observe request cancellation.
+
+```python
+from vsh import Runtime, SnapshotLimits
+
+runtime = Runtime.open(
+    "/absolute/controlled/workspace",
+    snapshot_limits=SnapshotLimits(
+        max_materialized_bytes=32 * 1024 * 1024,
+        max_materialized_file_bytes=2 * 1024 * 1024,
+    ),
+)
+```
+
+These are trusted-host settings. The same `snapshot_limits` option is available on
+`HookedRuntime.open` and `VshCapability`; Rust uses `RuntimeConfig::with_snapshot_limits`.
+They are not process-tree RSS bounds and do not count the same immutable capture again
+on every subsequent guest read. Guest read quotas still charge each read separately.
+
+When Monty calls `vsh_bash`, filesystem/evidence/output counters, outer cancellation,
+and the parent wall deadline span every nested call. Each fresh shell additionally has
+its own Bash parser/command/work-unit ceilings. Discarding a shell's returned bytes does
+not refund its output budget. Terminal Bash errors abort the entire outer transaction.
 
 `max_evidence_records` counts retained effects, read dependencies, write
 preconditions and adapter-retained policy denials together. Filtered/ignored

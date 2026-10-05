@@ -10,6 +10,14 @@ Every program submitted through the Rust SDK, Python SDK, or `vsh_run` receives 
 high-level filesystem functions. They are ordinary callable names inside the Monty
 sandbox—not additional MCP tools.
 
+Host Bash opt-in additionally injects `vsh_bash`. It is an eleventh guest callable,
+not another agent-facing tool or an inner transaction.
+
+!!! note "Unreleased additions"
+
+    `vsh_bash` and the accelerated case-sensitive search engine require this development
+    checkout; they are not part of the published 0.6.0 wheel.
+
 ```python
 vsh_mkdir('/workspace/generated')
 vsh_write('/workspace/generated/status.txt', 'ready\n')
@@ -162,6 +170,44 @@ The search is literal and reports the first match on each matching line. Each it
 Binary/non-UTF-8 files and policy-hidden files are skipped. Case-insensitive mode uses
 Unicode lowercase matching while preserving columns from the original source text.
 Traversal and file reads stop when `max_results` is reached.
+
+The default case-sensitive matcher uses exact-pinned **`memchr` 2.8.3**, reusing one
+literal finder across files and visiting matching lines directly. It only searches
+bytes already authorized and read by VSH: no host directory index, watcher, database,
+or out-of-band mmap mount. Virtual writes, deletes, renames, read dependencies and
+protected-path rules remain authoritative. Case-insensitive matching retains the
+existing Unicode lowercase/column semantics. The experimental FFF adapter was removed
+after a [controlled comparison](../performance.md) found no material end-to-end benefit
+over this smaller implementation.
+
+### `vsh_bash`
+
+```text
+vsh_bash(code: str) -> {"exit_code": int, "stdout": bytes, "stderr": bytes}
+```
+
+Enable Bash on the trusted host with `Runtime.open(workspace, bash=BashConfig(...))`
+or Rust `RuntimeConfig::with_bash(...)`. Without opt-in the callable is not injected.
+It uses the existing supervised Bashkit backend at `/workspace`, never `/bin/bash`,
+host executables, network, or a fresh filesystem snapshot.
+
+```python
+vsh_write('/workspace/input.txt', 'alpha\nbeta\n')
+shell = vsh_bash('cat input.txt | grep alpha > selected.txt; cat selected.txt')
+assert shell['stdout'] == b'alpha\n'
+assert vsh_read('/workspace/selected.txt') == 'alpha\n'
+{'selected': shell['stdout'].decode('utf-8')}
+```
+
+The outer preview remains non-mutating. Promotion applies the complete canonical diff
+once and invokes the outer hook once. Every shell is fresh: cwd, variables and functions
+do not leak into the next call. Use `cd subdir; ...` within a call when needed.
+I/O, evidence and output accounting share the outer ledger; cancellation and the parent
+deadline also span nested calls. Bash parser/command/work-unit ceilings are per shell.
+Nonzero final exit, unsupported profile operations, resource failures and protocol errors
+are terminal for the outer transaction, even inside Monty `try/except`. Individual denied
+accesses stay in the policy evidence even if the shell handles an error. See the
+[Bash compatibility profile](bash.md) before composing commands.
 
 ### `vsh_patch`
 

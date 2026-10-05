@@ -24,6 +24,7 @@ use vsh_policy::{AccessKind, CallPolicy, DeniedAccess};
 use vsh_types::{ContentVersion, NodeKind, NodeState, RuntimeConfigDigest, VPath};
 use vsh_vfs::{EffectOrigin, VfsError, VirtualFs};
 
+mod search;
 mod tools;
 mod worker;
 mod worker_input;
@@ -47,12 +48,20 @@ pub enum ResultCompatibility {
     Native,
     /// Reject values the pinned `monty-proto` `PyO3` converter cannot project.
     Python,
+    /// Values supported by the agent JSON projection: finite primitives, bytes,
+    /// paths, sequences, and dictionaries with string keys only.
+    AgentJson,
 }
 
 /// A bounded Monty result cannot be represented by the selected host surface.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ResultCompatibilityError {
+    /// An agent-facing JSON result would be lossy or impossible to serialize.
+    AgentJson {
+        /// Stable explanation without guest content.
+        reason: String,
+    },
     /// The value exceeds the converter's native-stack recursion backstop.
     Depth {
         /// Maximum accepted nesting depth.
@@ -70,6 +79,10 @@ pub enum ResultCompatibilityError {
 impl fmt::Display for ResultCompatibilityError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::AgentJson { reason } => write!(
+                formatter,
+                "result cannot be projected to agent JSON: {reason}"
+            ),
             Self::Depth { limit, attempted } => write!(
                 formatter,
                 "Python result depth exceeds converter limit: {attempted} > {limit}"
@@ -107,6 +120,38 @@ pub fn validate_result_compatibility(
                 limit: MAX_PYTHON_RESULT_DEPTH,
                 attempted: depth,
             });
+        }
+        if compatibility == ResultCompatibility::AgentJson {
+            match value {
+                MontyObject::None
+                | MontyObject::Bool(_)
+                | MontyObject::Int(_)
+                | MontyObject::String(_)
+                | MontyObject::Bytes(_)
+                | MontyObject::Path(_)
+                | MontyObject::List(_)
+                | MontyObject::Tuple(_)
+                | MontyObject::NamedTuple { .. } => {}
+                MontyObject::Float(number) if number.is_finite() => {}
+                MontyObject::Dict(pairs) => {
+                    if pairs
+                        .into_iter()
+                        .any(|(key, _)| !matches!(key, MontyObject::String(_)))
+                    {
+                        return Err(ResultCompatibilityError::AgentJson {
+                            reason: "dictionary keys must be strings; implicit key coercion loses information".into(),
+                        });
+                    }
+                }
+                _ => {
+                    return Err(ResultCompatibilityError::AgentJson {
+                        reason: format!(
+                            "unsupported or non-finite {} value; return JSON-compatible data explicitly",
+                            value.type_name()
+                        ),
+                    });
+                }
+            }
         }
         if let MontyObject::Type(kind) = value
             && !python_type_object_is_supported(kind)
@@ -274,6 +319,7 @@ impl InProcessConfig {
         encode_string("vsh-monty-config-v5", &mut canonical);
         encode_string(env!("CARGO_PKG_VERSION"), &mut canonical);
         encode_string("monty-0.0.22", &mut canonical);
+        encode_string("memchr-2.8.3-literal-v1", &mut canonical);
         encode_string(vsh_execution::FS_GATEWAY_VERSION, &mut canonical);
         encode_string(self.virtual_root.as_str(), &mut canonical);
         encode_string(&self.script_name, &mut canonical);
@@ -366,6 +412,9 @@ impl Error for WorkerFailure {}
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ExecutionError {
+    /// Terminal nested Bash failure; never resumed as a catchable Monty exception.
+    #[cfg(feature = "bash")]
+    Bash(Box<vsh_bash::BashError>),
     /// Host cancellation won before commit entry.
     Cancelled,
     /// Monty compilation or runtime failed.
@@ -393,6 +442,8 @@ pub enum ExecutionError {
 impl fmt::Display for ExecutionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(feature = "bash")]
+            Self::Bash(source) => write!(formatter, "nested Bash execution failed: {source}"),
             Self::Cancelled => formatter.write_str("execution cancelled"),
             Self::Monty { phase, source } => write!(formatter, "Monty {phase:?} failure: {source}"),
             Self::Limit(source) => write!(formatter, "execution budget failure: {source}"),
@@ -409,6 +460,8 @@ impl fmt::Display for ExecutionError {
 impl Error for ExecutionError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            #[cfg(feature = "bash")]
+            Self::Bash(source) => Some(source),
             Self::Monty { source, .. } => Some(source),
             Self::Limit(source) => Some(source),
             Self::InternalVfs(source) => Some(source),
@@ -459,7 +512,54 @@ impl InProcessMonty {
         code: impl Into<String>,
         filesystem: &mut VirtualFs,
     ) -> Result<ExecutionOutcome, ExecutionError> {
-        let code = code.into();
+        self.execute_inner(
+            code.into(),
+            filesystem,
+            &vsh_execution::ExecutionCancellation::default(),
+            #[cfg(feature = "bash")]
+            None,
+        )
+    }
+
+    /// Execute with an optional host-enabled Bash worker sharing this VFS and budget.
+    ///
+    /// # Errors
+    /// Includes terminal nested frontend failures; failed state must never be committed.
+    #[cfg(feature = "bash")]
+    pub fn execute_with_bash(
+        &self,
+        code: impl Into<String>,
+        filesystem: &mut VirtualFs,
+        cancellation: &vsh_execution::ExecutionCancellation,
+        bash: Option<&vsh_bash::SubprocessBash>,
+    ) -> Result<ExecutionOutcome, ExecutionError> {
+        self.execute_inner(code.into(), filesystem, cancellation, bash)
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "keep the fail-closed interpreter suspension state machine in one place"
+    )]
+    fn execute_inner(
+        &self,
+        code: String,
+        filesystem: &mut VirtualFs,
+        cancellation: &vsh_execution::ExecutionCancellation,
+        #[cfg(feature = "bash")] bash: Option<&vsh_bash::SubprocessBash>,
+    ) -> Result<ExecutionOutcome, ExecutionError> {
+        #[cfg(feature = "bash")]
+        let bash_enabled = bash.is_some();
+        #[cfg(not(feature = "bash"))]
+        let bash_enabled = false;
+        #[cfg(feature = "bash")]
+        let deadline = std::time::Instant::now()
+            .checked_add(
+                self.config
+                    .limits
+                    .max_duration
+                    .saturating_add(Duration::from_secs(1)),
+            )
+            .ok_or(ExecutionError::Cancelled)?;
         self.config
             .limits
             .check_program_bytes(code.len())
@@ -468,7 +568,7 @@ impl InProcessMonty {
         filesystem
             .check_evidence()
             .map_err(|source| ExecutionError::InternalVfs(Box::new(source)))?;
-        let (input_names, input_values) = tools::inputs();
+        let (input_names, input_values) = tools::inputs(bash_enabled);
         let run = MontyRun::new(
             code,
             &self.config.script_name,
@@ -485,6 +585,7 @@ impl InProcessMonty {
             );
         let tracker = ResourceTracker::new(resource_limits);
         let mut stdout = String::new();
+        let mut accounted_stdout = 0;
         let mut budget = Budget::new(self.config.limits);
         let mut denied_accesses = Vec::new();
         let mut progress = run
@@ -492,10 +593,15 @@ impl InProcessMonty {
             .map_err(|source| self.monty_error(MontyFailurePhase::Runtime, source))?;
 
         loop {
+            if cancellation.is_cancelled() {
+                return Err(ExecutionError::Cancelled);
+            }
             progress = match progress {
                 RunProgress::Complete(value) => {
+                    budget
+                        .charge_output(stdout.len().saturating_sub(accounted_stdout))
+                        .map_err(limit_error)?;
                     let mut stats = budget.stats();
-                    stats.output_bytes = stdout.len();
                     stats.result_bytes =
                         measure_result(&value, self.config.limits.max_result_bytes)
                             .map_err(limit_error)?;
@@ -526,6 +632,10 @@ impl InProcessMonty {
                     .resume(NameLookupResult::Undefined, self.print_writer(&mut stdout))
                     .map_err(|source| self.monty_error(MontyFailurePhase::Runtime, source))?,
                 RunProgress::FunctionCall(call) => {
+                    budget
+                        .charge_output(stdout.len().saturating_sub(accounted_stdout))
+                        .map_err(limit_error)?;
+                    accounted_stdout = stdout.len();
                     if call.object_id.is_some() || !tools::is_tool(&call.function_name) {
                         return Err(ExecutionError::UnsupportedSuspension {
                             kind: "external function call",
@@ -542,6 +652,13 @@ impl InProcessMonty {
                                 filesystem,
                                 &self.config,
                                 &mut budget,
+                                #[cfg(feature = "bash")]
+                                &mut tools::BashToolContext {
+                                    backend: bash,
+                                    cancellation: Some(cancellation),
+                                    deadline,
+                                    denied_accesses: &mut denied_accesses,
+                                },
                             )
                         });
                     let result =
@@ -588,6 +705,8 @@ fn call_result(
     denied_accesses: &mut Vec<DeniedAccess>,
 ) -> Result<ExtFunctionResult, ExecutionError> {
     match result {
+        #[cfg(feature = "bash")]
+        Err(CallFailure::Bash(source)) => Err(ExecutionError::Bash(Box::new(source))),
         Ok(value) => Ok(ExtFunctionResult::Return(value)),
         Err(CallFailure::Python(exception)) => Ok(ExtFunctionResult::Error(exception)),
         Err(CallFailure::Policy(denial)) => {
@@ -685,6 +804,8 @@ fn exception_bytes(source: &MontyException) -> u64 {
 }
 
 enum CallFailure {
+    #[cfg(feature = "bash")]
+    Bash(vsh_bash::BashError),
     Python(MontyException),
     Policy(DeniedAccess),
     Limit(ExecutionLimitExceeded),
